@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#6366f1" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="stylesheet" href="style.css" />
+    <title>ЛК Механика</title>
+  </head>
+  <body>
+    <!-- ВЕРХНЯЯ ПАНЕЛЬ (Статус сети) -->
+    <header class="app-header">
+      <div class="network-status" id="networkStatus">
+        <span class="dot"></span>
+        <span class="text">Онлайн</span>
+      </div>
+      <div class="header-title">ЛК Механика</div>
+      <button class="header-btn" id="syncBtn" title="Синхронизировать">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+          <path
+            d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.07 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
+          />
+        </svg>
+      </button>
+    </header>
+    <div id="apiStatusBlock" class="api-status-block"></div>
+    <!-- ОСНОВНОЙ КОНТЕНТ -->
+    <main id="app" class="app-content">
+      <!-- Экран 0: Авторизация -->
+      <div id="view-login" class="view">
+        <div
+          class="login-wrapper"
+          style="
+            padding: 20px;
+            max-width: 400px;
+            margin: 0 auto;
+            margin-top: 10vh;
+          "
+        >
+          <div style="text-align: center; margin-bottom: 30px">
+            <h1 style="font-size: 24px; margin-bottom: 8px">Вход в систему</h1>
+            <p style="color: var(--text-muted); font-size: 14px">
+              Введите данные для доступа
+            </p>
+          </div>
+
+          <form
+            id="loginForm"
+            style="display: flex; flex-direction: column; gap: 16px"
+          >
+            <div
+              class="info-block"
+              style="padding: 0; border: none; background: transparent"
+            >
+              <label>Логин</label>
+              <input
+                type="text"
+                id="loginName"
+                class="search-input"
+                placeholder="Иванов Иван"
+                required
+                style="
+                  width: 100%;
+                  background: var(--bg-input);
+                  border: 1px solid var(--border);
+                  color: var(--text-main);
+                  padding: 12px;
+                  border-radius: 8px;
+                "
+              />
+            </div>
+
+            <div
+              class="info-block"
+              style="padding: 0; border: none; background: transparent"
+            >
+              <label>Пароль</label>
+              <input
+                type="password"
+                id="loginPassword"
+                class="search-input"
+                placeholder="••••••"
+                required
+                style="
+                  width: 100%;
+                  background: var(--bg-input);
+                  border: 1px solid var(--border);
+                  color: white;
+                  padding: 12px;
+                  border-radius: 8px;
+                "
+              />
+            </div>
+
+            <label
+              style="
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 14px;
+                color: var(--text-muted);
+                cursor: pointer;
+              "
+            >
+              <input
+                type="checkbox"
+                id="loginAutoLogin"
+                checked
+                style="width: 18px; height: 18px; accent-color: var(--accent)"
+              />
+              Запомнить меня
+            </label>
+
+            <div
+              id="loginError"
+              style="
+                display: none;
+                color: var(--danger);
+                font-size: 14px;
+                text-align: center;
+                background: rgba(239, 68, 68, 0.1);
+                padding: 10px;
+                border-radius: 8px;
+              "
+            ></div>
+
+            <button
+              type="submit"
+              id="loginSubmit"
+              class="btn-action btn-accept"
+              style="margin-top: 10px"
+            >
+              Войти
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Экран 1: Список заявок -->
+      <div id="view-list" class="view">
+        <div class="list-header">
+          <div class="list-title-wrap">
+            <h2>Заявки (<span id="totalTicketsCount">0</span>)</h2>
+            <div id="newTicketsBlock" class="new-tickets-block hidden">
+              <span class="badge-new">
+                <span class="pulse-dot"></span>
+                Новых: <span id="newTicketsCount">0</span>
+              </span>
+            </div>
+          </div>
+          <button class="btn-primary hidden" id="acceptAllBtn">
+            Принять все
+          </button>
+        </div>
+        <div class="cards-container" id="ticketsContainer">
+          <!-- Сюда падают карточки заявок -->
+        </div>
+      </div>
+
+      <!-- Экран 2: Карточка заявки -->
+      <div id="view-detail" class="view">
+        <div class="detail-header">
+          <button class="btn-back" id="backBtn">← Назад</button>
+          <div class="detail-title" id="detailTitle">Загрузка...</div>
+        </div>
+
+        <!-- Скелетон загрузки (мерцающие блоки) -->
+        <div id="cardLoading" class="detail-body" style="display: none">
+          <div class="info-block">
+            <div
+              class="skeleton skeleton-line short"
+              style="margin-bottom: 12px"
+            ></div>
+            <div class="skeleton skeleton-line medium"></div>
+            <div class="skeleton skeleton-line"></div>
+          </div>
+
+          <div class="info-block">
+            <div
+              class="skeleton skeleton-line short"
+              style="margin-bottom: 12px"
+            ></div>
+            <div class="skeleton skeleton-box"></div>
+          </div>
+
+          <div class="skeleton skeleton-btn"></div>
+
+          <div class="info-block" style="margin-top: 20px">
+            <div
+              class="skeleton skeleton-line short"
+              style="margin-bottom: 12px"
+            ></div>
+            <div class="skeleton skeleton-box" style="height: 60px"></div>
+            <div class="skeleton skeleton-box" style="height: 60px"></div>
+          </div>
+        </div>
+
+        <!-- Тело карточки (скрыто до загрузки) -->
+        <div class="detail-body" id="cardBody" style="display: none">
+          <div class="info-block">
+            <label>📍 Адрес</label>
+            <div class="value" id="detailAddress"></div>
+          </div>
+
+          <div class="info-block">
+            <label>🚨 Описание</label>
+            <div class="value" id="detailDesc"></div>
+          </div>
+
+          <div
+            id="solutionBlock"
+            class="info-block"
+            style="
+              display: none;
+              border-color: var(--success);
+              background: rgba(34, 197, 94, 0.05);
+            "
+          >
+            <label style="color: var(--success)">✅ Решение</label>
+            <div class="value" id="solutionText"></div>
+            <div
+              style="font-size: 12px; color: var(--text-muted); margin-top: 4px"
+              id="solutionMeta"
+            ></div>
+          </div>
+
+          <button class="btn-action btn-accept" id="acceptBtn">
+            ✓ Принять в работу
+          </button>
+
+          <div class="comments-section">
+            <h3>Комментарии</h3>
+            <div
+              id="notesContainerDOM"
+              style="
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-top: 10px;
+              "
+            ></div>
+          </div>
+
+          <div class="comment-composer">
+            <textarea placeholder="Написать комментарий..." rows="2"></textarea>
+            <div class="composer-actions">
+              <label class="btn-attach">
+                📷 Фото
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  hidden
+                  id="photoInput"
+                />
+              </label>
+              <button class="btn-send" id="sendCommentBtn">Отправить</button>
+            </div>
+          </div>
+
+          <button class="btn-action btn-danger" id="closeTicketBtn">
+            🔒 Закрыть заявку
+          </button>
+        </div>
+      </div>
+
+      <!-- Экран 3: Закрытые заявки (Архив) -->
+      <div id="view-closed" class="view">
+        <div class="list-header">
+          <h2>Архив заявок</h2>
+        </div>
+
+        <div class="period-selector">
+          <button class="period-btn active" data-period="1">Сутки</button>
+          <button class="period-btn" data-period="3">3 дня</button>
+          <button class="period-btn" data-period="7">Неделя</button>
+        </div>
+
+        <div class="cards-container" id="closedContainer">
+          <!-- Сюда падают закрытые заявки -->
+        </div>
+      </div>
+    </main>
+
+    <!-- НИЖНЯЯ НАВИГАЦИЯ (Исправленная) -->
+    <nav class="bottom-nav">
+      <a href="#/list" class="nav-item active">
+        <svg viewBox="0 0 24 24">
+          <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z" />
+        </svg>
+        <span>Заявки</span>
+      </a>
+      <a href="#/tasks" class="nav-item">
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"
+          />
+        </svg>
+        <span>Задачи</span>
+      </a>
+      <a href="#/closed" class="nav-item">
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 10H6v-2h8v2zm4-4H6v-2h12v2z"
+          />
+        </svg>
+        <span>Архив</span>
+      </a>
+      <a href="#/profile" class="nav-item">
+        <svg viewBox="0 0 24 24">
+          <path
+            d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+          />
+        </svg>
+        <span>Профиль</span>
+      </a>
+    </nav>
+
+    <!-- МОДАЛЬНОЕ ОКНО ДЛЯ ЗАКРЫТИЯ ЗАЯВКИ -->
+    <div class="modal-overlay" id="closeModal">
+      <div class="modal-content">
+        <h3>Закрытие заявки</h3>
+        <p>Опишите, что было сделано (минимум 6 символов).</p>
+        <textarea
+          id="solutionInput"
+          rows="4"
+          placeholder="Замена контактора..."
+        ></textarea>
+        <div class="modal-actions">
+          <button class="btn-cancel" id="cancelCloseBtn">Отмена</button>
+          <button class="btn-confirm" id="confirmCloseBtn">
+            Закрыть заявку
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

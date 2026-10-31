@@ -1,0 +1,59 @@
+name: Build & Deploy to Jino
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies & Build
+        run: |
+          npm ci || npm install
+          npm run build
+
+      # Проверка, что папка dist создалась (поможет увидеть ошибку, если сборка упала)
+      - name: Check dist folder
+        run: ls -la dist/
+
+      - name: Deploy Backend
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASS }}
+          protocol: ftps
+          security: loose
+          server-dir: /domains/liftcs.ru/
+          local-dir: ./
+          exclude: |
+            **/.git/**
+            **/.github/**
+            **/frontend/**
+            **/node_modules/**
+            **/dist/**
+            **/package*.json
+            **/vite.config.js
+            **/config/db.php
+            **/config/admin.php
+
+      - name: Deploy Frontend (UI)
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASS }}
+          protocol: ftps
+          security: loose
+          server-dir: /domains/liftcs.ru/ui/
+          local-dir: ./dist/

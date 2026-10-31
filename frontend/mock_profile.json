@@ -1,0 +1,39 @@
+{
+    "action": "save_user_settings",
+    "profile": {
+        "surname": "мвамвв",
+        "name": "амамв",
+        "patronymic": "амвм"
+    },
+    "column_settings": {
+        "order": [
+            "id",
+            "address",
+            "details",
+            "staff_name",
+            "date",
+            "notify_status",
+            "staff_name2",
+            "notify_status2",
+            "staff_name3",
+            "notify_status3",
+            "repair_time",
+            "other",
+            "close_date",
+            "close_name",
+            "solution",
+            "department",
+            "request",
+            "group"
+        ],
+        "hidden": [
+            "staff_name2",
+            "notify_status2",
+            "staff_name3",
+            "notify_status3",
+            "department",
+            "request",
+            "group"
+        ]
+    }
+}

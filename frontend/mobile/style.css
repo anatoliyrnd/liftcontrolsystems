@@ -1,0 +1,822 @@
+/* =========================================
+   1. ПЕРЕМЕННЫЕ (Темная тема по умолчанию)
+   ========================================= */
+:root {
+    --bg-main: #0f172a;
+    /* Глубокий синий */
+    --bg-card: #1e293b;
+    /* Фон карточек */
+    --bg-input: #0b1120;
+    /* Фон полей ввода */
+    --text-main: #f8fafc;
+    /* Основной текст */
+    --text-muted: #94a3b8;
+    /* Вторичный текст */
+    --accent: #6366f1;
+    /* Акцент (кнопки) */
+    --success: #22c55e;
+    /* Зеленый (успех/онлайн) */
+    --danger: #ef4444;
+    /* Красный (ошибка/закрыть) */
+    --warning: #f59e0b;
+    /* Оранжевый (внимание) */
+    --border: #334155;
+    /* Границы */
+    --radius: 12px;
+    /* Скругление углов */
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+}
+
+/* Если система светлая — можно добавить тему (опционально) */
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg-main: #f1f5f9;
+        --bg-card: #ffffff;
+        --bg-input: #f8fafc;
+        --text-main: #0f172a;
+        --text-muted: #64748b;
+        --border: #cbd5e1;
+        --shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+}
+
+/* =========================================
+   2. БАЗОВЫЕ СБРОСЫ И ШРИФТЫ
+   ========================================= */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+    /* Убираем синюю рамку при тапе */
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    /* Запрещаем скролл всего body */
+    margin: 0;
+}
+
+.app-content {
+    flex: 1;
+    overflow-y: auto;
+    /* Скролл только здесь */
+    min-height: 0;
+    /* КРИТИЧЕСКИ ВАЖНО для работы flex-скролла */
+    padding: 16px;
+    padding-bottom: 100px;
+    /* Отступ, чтобы нижнее меню не перекрывало контент */
+    -webkit-overflow-scrolling: touch;
+}
+
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    padding-top: max(10px, env(safe-area-inset-top));
+    background-color: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+    flex-shrink: 0;
+    /* Шапка не должна сжиматься */
+}
+
+.header-title {
+    font-size: 16px;
+    font-weight: 700;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.network-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--success);
+}
+
+.network-status .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+
+/* Состояния сети */
+.network-status.offline {
+    color: var(--danger);
+}
+
+.network-status.offline .dot {
+    background-color: var(--danger);
+    box-shadow: 0 0 6px var(--danger);
+}
+
+.network-status.sync {
+    color: var(--warning);
+}
+
+.network-status.sync .dot {
+    background-color: var(--warning);
+    box-shadow: 0 0 6px var(--warning);
+    animation: pulse 1s infinite;
+}
+
+.header-title {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.header-btn {
+    background: none;
+    border: none;
+    color: var(--text-main);
+    padding: 8px;
+    cursor: pointer;
+}
+
+/* =========================================
+   4. ОСНОВНОЙ КОНТЕНТ
+   ========================================= */
+
+
+.view {
+    display: none;
+}
+
+.view.active {
+    display: block;
+    animation: fadeIn 0.2s ease-out;
+}
+
+/* =========================================
+   5. СПИСОК ЗАЯВОК (КАРТОЧКИ)
+   ========================================= */
+.list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.list-header h2 {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.btn-primary:active {
+    opacity: 0.8;
+}
+
+.cards-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ticket-card {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 16px;
+    box-shadow: var(--shadow);
+    border-left: 4px solid var(--accent);
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.ticket-card:active {
+    transform: scale(0.98);
+}
+
+.card-top {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.card-id {
+    font-weight: 700;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.card-status {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.status-open {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--danger);
+}
+
+.status-work {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+}
+
+.card-address {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.card-desc {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.card-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+/* =========================================
+   6. КАРТОЧКА ЗАЯВКИ (ДЕТАЛИ)
+   ========================================= */
+.detail-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.btn-back {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.btn-back:active {
+    background: var(--border);
+}
+
+.detail-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.detail-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.info-block {
+    background: var(--bg-card);
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
+.info-block label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.info-block .value {
+    font-size: 15px;
+    font-weight: 500;
+}
+
+/* =========================================
+   7. КНОПКИ ДЕЙСТВИЙ
+   ========================================= */
+.btn-action {
+    width: 100%;
+    padding: 16px;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    transition: opacity 0.2s;
+}
+
+.btn-action:active {
+    opacity: 0.8;
+}
+
+.btn-accept {
+    background: var(--accent);
+    color: #fff;
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: #fff;
+}
+
+/* =========================================
+   8. КОММЕНТАРИИ
+   ========================================= */
+.comments-section h3 {
+    font-size: 16px;
+    margin-bottom: 12px;
+}
+
+.comment-item {
+    background: var(--bg-card);
+    padding: 12px;
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+}
+
+.comment-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    font-size: 12px;
+}
+
+.comment-author {
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.comment-date {
+    color: var(--text-muted);
+}
+
+.comment-text {
+    font-size: 14px;
+}
+
+/* =========================================
+   9. ПОЛЕ ВВОДА (КОММЕНТАРИЙ)
+   ========================================= */
+.comment-composer {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 12px;
+    border: 1px solid var(--border);
+}
+.comment-composer textarea {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 10px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 16px;
+    /* БЫЛО 15px. Фикс авто-зума iOS */
+    resize: none;
+    outline: none;
+    min-height: 60px;
+}
+.comment-composer textarea:focus {
+    border-color: var(--accent);
+}
+
+.composer-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.btn-attach {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px;
+    cursor: pointer;
+    background: var(--bg-input);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+.btn-attach:active {
+    background: var(--border);
+}
+
+.btn-send {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.btn-send:active {
+    opacity: 0.8;
+}
+
+/* =========================================
+   10. НИЖНЯЯ НАВИГАЦИЯ
+   ========================================= */
+.bottom-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-around;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+    z-index: 100;
+    height: 64px;
+    /* Фиксированная высота */
+}
+
+.nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px 0;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: 600;
+    gap: 4px;
+}
+
+.nav-item svg {
+    width: 24px;
+    height: 24px;
+    fill: currentColor;
+}
+
+.nav-item.active {
+    color: var(--accent);
+}
+
+/* =========================================
+   11. МОДАЛЬНОЕ ОКНО (ЗАКРЫТИЕ ЗАЯВКИ)
+   ========================================= */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    display: none;
+    justify-content: center;
+    align-items: flex-end;
+    /* Выезжает снизу */
+    z-index: 1000;
+}
+
+.modal-overlay.active {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--bg-card);
+    width: 100%;
+    border-radius: 24px 24px 0 0;
+    padding: 20px;
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
+    animation: slideUp 0.3s ease-out;
+}
+
+.modal-content h3 {
+    font-size: 18px;
+    margin-bottom: 8px;
+}
+
+.modal-content p {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+}
+
+.modal-content textarea {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 15px;
+    resize: none;
+    margin-bottom: 16px;
+}
+
+.modal-content textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.modal-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.btn-cancel {
+    flex: 1;
+    padding: 14px;
+    background: var(--bg-input);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.btn-confirm {
+    flex: 2;
+    padding: 14px;
+    background: var(--danger);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 15px;
+}
+
+/* =========================================
+   12. АНИМАЦИИ
+   ========================================= */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes slideUp {
+    from {
+        transform: translateY(100%);
+    }
+
+    to {
+        transform: translateY(0);
+    }
+}
+
+@keyframes pulse {
+    0% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+/* Утилита для скрытия элементов (если еще нет) */
+.hidden {
+    display: none !important;
+}
+
+/* Обертка для заголовка и бейджа */
+.list-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+/* Бейдж с новыми заявками */
+.badge-new {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(239, 68, 68, 0.15);
+    /* Полупрозрачный красный */
+    color: var(--danger);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 700;
+    animation: fadeIn 0.3s ease;
+}
+
+/* Пульсирующая точка внутри бейджа */
+.pulse-dot {
+    width: 8px;
+    height: 8px;
+    background-color: var(--danger);
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: pulseNew 1.5s infinite;
+}
+
+@keyframes pulseNew {
+    0% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    }
+
+    70% {
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    }
+}
+/* Выбор периода в архиве */
+.period-selector {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    overflow-x: auto;
+}
+
+.period-btn {
+    background: var(--bg-card);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.period-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+/* Карточка закрытой заявки */
+.ticket-card.closed {
+    border-left-color: var(--success);
+    opacity: 0.9;
+}
+
+.ticket-card.closed .card-address {
+    color: var(--text-muted);
+}
+
+.card-solution {
+    font-size: 13px;
+    color: var(--success);
+    background: rgba(34, 197, 94, 0.1);
+    padding: 8px;
+    border-radius: 6px;
+    margin-top: 8px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+/* =========================================
+   SKELETON LOADER (Мерцающие блоки)
+   ========================================= */
+.skeleton {
+    background: linear-gradient(90deg, var(--bg-card) 25%, var(--border) 50%, var(--bg-card) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite linear;
+    border-radius: 6px;
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: 200% 0;
+    }
+
+    100% {
+        background-position: -200% 0;
+    }
+}
+
+.skeleton-line {
+    height: 16px;
+    margin-bottom: 8px;
+    width: 100%;
+}
+
+.skeleton-line.short {
+    width: 40%;
+}
+
+.skeleton-line.medium {
+    width: 70%;
+}
+
+.skeleton-box {
+    height: 80px;
+    margin-bottom: 16px;
+    border-radius: 8px;
+}
+
+.skeleton-btn {
+    height: 50px;
+    border-radius: 12px;
+    margin-top: 10px;
+}
+
+/* =========================================
+   14. ПЛАШКА СТАТУСА API
+   ========================================= */
+.api-status-block {
+    visibility: hidden;
+    position: fixed;
+    top: 56px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 12px;
+    z-index: 90;
+    pointer-events: none;
+}
+
+/* =========================================
+   15. ВСПЛЫВАЮЩИЙ ТОСТ (Уведомление)
+   ========================================= */
+.ui-toast {
+    position: fixed;
+    /* Опускаем чуть ниже, с учетом безопасной зоны экрана (челки) */
+    top: max(20px, env(safe-area-inset-top));
+    left: 50%;
+    /* Изначально прячем его далеко вверх через transform */
+    transform: translate(-50%, -200px);
+
+    background: var(--success);
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 9999;
+
+    /* Анимируем transform и opacity (работает намного плавнее) */
+    transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s ease;
+    opacity: 0;
+    pointer-events: none;
+    text-align: center;
+    max-width: 90%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ui-toast.show {
+    /* Выезжает на экран */
+    transform: translate(-50%, 0);
+    opacity: 1;
+}

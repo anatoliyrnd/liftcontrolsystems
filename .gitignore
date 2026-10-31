@@ -1,0 +1,6 @@
+# Секреты — не пушим в репозиторий
+config/admin.php
+config/db.php
+node_modules/
+dist/
+logs/

@@ -1,0 +1,2279 @@
+/* ==========================================================================
+   1. ПЕРЕМЕННЫЕ И НАСТРОЙКА ТЕМ
+   ========================================================================== */
+:root, [data-theme="light"] {
+    --bg-primary: #edf2f7;
+    --bg-secondary: #f8fafc;
+    --border-color: #cbd5e1;
+
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+
+    --accent: #6366f1;
+    --accent-hover: #4f46e5;
+
+    --table-th-bg: #e2e8f0;
+    --table-row-hover: #f1f5f9;
+    --mark-bg: #fef08a;
+    --mark-text: #0f172a;
+    /* Уровни визуальной тревоги — светлая тема */
+    --row-level-1-bg: transparent;      /* обычный — фон темы по умолчанию */
+    --row-level-2-bg: #fff8e1;          /* внимание — мягкий жёлтый */
+    --row-level-3-bg: #ffe5e5;          /* критично — мягкий красный */
+    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+}
+
+[data-theme="dark"] {
+    --bg-primary: #0b0f19;
+    --bg-secondary: #121b2c;
+    --border-color: #2a3a55;              /* ← было #a3e635 (лайм). Стало: приглушённый серо-синий */
+
+    --text-primary: #cbd5e1;              /* ← было #f8fafc. Стало: мягкий светло-серый */
+    --text-secondary: #7c8ba1;            /* ← было #94a3b8. Стало: чуть темнее, спокойнее */
+
+    --accent: #a3e635;                    /* оставляем — акцент должен выделяться */
+    --accent-hover: #84cc16;
+
+    --table-th-bg: #1a2438;               /* ← было #1e293b. Стало: чуть холоднее */
+    --table-row-hover: #1a263d;
+    --mark-bg: #84cc16;
+    --mark-text: #0b0f19;
+
+    --shadow: 0 0 8px rgb(163 230 53 / 0.15);
+
+    /* Уровни тревоги — оставляем как были */
+    --row-level-2-bg: #3a3418;
+    --row-level-3-bg: #3a1a1a;
+}
+[data-theme="light"] .sun-icon { display: block; }
+[data-theme="light"] .moon-icon { display: none; }
+[data-theme="dark"] .sun-icon { display: none; }
+[data-theme="dark"] .moon-icon { display: block; }
+
+/* ==========================================================================
+   2. БАЗОВЫЕ СТИЛИ И СЕТКА ПРИЛОЖЕНИЯ
+   ========================================================================== */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.navbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.25rem 5%;
+    background-color: var(--bg-secondary);
+    border-bottom: 2px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.logo {
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: -0.05em;
+}
+
+.logo-link {
+    text-decoration: none;
+    color: inherit;
+}
+
+.container {
+    flex: 1;
+    width: 100%;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: calc(100vh - 80px);
+    box-sizing: border-box;
+}
+
+h1 {
+    margin-bottom: 0.5rem;
+    font-size: 1.75rem;
+    flex-shrink: 0;
+}
+
+.search-container {
+    margin-bottom: 1rem;
+    max-width: 400px;
+    flex-shrink: 0;
+}
+
+.search-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    font-size: 1rem;
+    background-color: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 8px;
+    outline: none;
+}
+.search-input:focus {
+    border-color: var(--accent);
+    box-shadow: var(--shadow);
+}
+
+mark {
+    background-color: var(--mark-bg);
+    color: var(--mark-text);
+    border-radius: 2px;
+    padding: 0 2px;
+}
+/* ==========================================================================
+   3. ОСНОВНАЯ ТАБЛИЦА С ГОРИЗОНТАЛЬНЫМ СКРОЛЛОМ И ЛИПКИМИ СТОЛБЦАМИ
+   ========================================================================== */
+.table-wrapper {
+    background-color: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    position: relative;
+    flex: 1;
+    overflow-y: auto;   /* Вертикальный скролл */
+    overflow-x: auto;   /* Горизонтальный скролл */
+    min-height: 0;      /* Защита флекс-бокса от распирания контентом */
+    margin-bottom: 0.5rem;
+    display: block;
+}
+
+table {
+    width: 100%;
+    border-collapse: separate; /* Обязательно для наложения position: sticky */
+    border-spacing: 0;
+    text-align: left;
+    font-size: 0.95rem;
+    table-layout: fixed; /* Жестко фиксирует ширину колонок, заданную ресайзером */
+}
+
+th, td {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+th {
+    background-color: var(--table-th-bg) !important;
+    color: var(--text-primary);
+    font-weight: 600;
+    position: sticky !important;
+    top: 0;
+    z-index: 20;
+}
+
+th::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* Компактные отступы таблицы для вмещения большего числа строк */
+#dataTable th {
+    padding: 6px 10px !important;
+    font-size: 13px;
+    height: 32px;
+}
+
+#dataTable td {
+    padding: 5px 10px !important;
+    font-size: 13px;
+    line-height: 1.3;
+    height: 36px; /* Фиксированная компактная высота строки */
+    box-sizing: border-box;
+}
+
+/* Контрастное чередование строк (Зебра) */
+#dataTable tbody tr:nth-child(even) {
+    background-color: rgba(0, 0, 0, 0.02) !important;
+}
+
+[data-theme="dark"] #dataTable tbody tr:nth-child(even) {
+    background-color: rgba(255, 255, 255, 0.03) !important;
+}
+
+#dataTable tbody tr:hover {
+    background-color: rgba(138, 43, 226, 0.08) !important;
+}
+
+/* Стилизация динамической подсветки строк с сервера */
+tbody tr[style*="background-color"] {
+    transition: filter 0.15s ease;
+}
+tbody tr[style*="background-color"]:hover {
+    filter: brightness(0.92);
+}
+[data-theme="dark"] tbody tr[style*="background-color"]:hover {
+    filter: brightness(1.15);
+}
+
+/* Поддержка зебры для липких колонок */
+#dataTable tbody tr:nth-child(even) td[data-col-id="id"],
+#dataTable tbody tr:nth-child(even) td[data-col-id="address"] {
+    background-color: var(--bg-secondary) !important;
+}
+
+/* Фиксация колонок по горизонтали (Заморозка № и Адрес) */
+#dataTable th[data-id="id"] {
+    position: sticky !important;
+    left: 0;
+    z-index: 35 !important; /* Выше обычных th при вертикальном скролле */
+    background-color: var(--table-th-bg) !important;
+}
+
+#dataTable th[data-id="address"] {
+    position: sticky !important;
+    z-index: 35 !important;
+    background-color: var(--table-th-bg) !important;
+}
+
+#dataTable td[data-col-id="id"] {
+    position: sticky !important;
+    left: 0;
+    z-index: 25; /* Выше обычных ячеек td */
+    background-color: var(--bg-secondary) !important;
+}
+
+#dataTable td[data-col-id="address"] {
+    position: sticky !important;
+    z-index: 25;
+    background-color: var(--bg-secondary) !important;
+}
+/* ==========================================================================
+   УРОВНИ ТРЕВОГИ (alert_level) — фон строки и sticky-ячеек
+   ========================================================================== */
+
+/* Уровни задают ЛОКАЛЬНУЮ переменную --row-bg на <tr>.
+   Не красим строку здесь — цвет применится через общее правило ниже. */
+#dataTable tbody tr.row-level-2 { --row-bg: var(--row-level-2-bg); }
+#dataTable tbody tr.row-level-3 { --row-bg: var(--row-level-3-bg); }
+
+/* Единое правило фона: каждая ячейка (обычная и sticky) читает --row-bg
+   от родительского <tr>. Если переменная не задана — fallback на --bg-secondary.
+   Одно правило = нет конфликта специфичности. */
+#dataTable tbody td {
+    background-color: var(--row-bg, var(--bg-secondary));
+}
+
+/* Строка тоже подкрашивается — визуальный стык между ячейками не выделяется */
+#dataTable tbody tr {
+    background-color: var(--row-bg, var(--bg-secondary));
+}
+
+/* Hover поверх цветных строк */
+#dataTable tbody tr.row-level-2:hover,
+#dataTable tbody tr.row-level-3:hover {
+    filter: brightness(0.97);
+}
+[data-theme="dark"] #dataTable tbody tr.row-level-2:hover,
+[data-theme="dark"] #dataTable tbody tr.row-level-3:hover {
+    filter: brightness(1.08);
+}
+
+/* Визуальная разделительная тень для зафиксированных столбцов */
+.sticky-freeze-border {
+    box-shadow: 4px 0 8px -3px rgb(0 0 0 / 0.2);
+    border-right: 2px solid var(--border-color) !important;
+}
+/* ==========================================================================
+   4. ИСПРАВЛЕНИЕ РЕСАЙЗЕРА И КОНФЛИКТОВ DRAG-AND-DROP
+   ========================================================================== */
+
+/* ИСПРАВЛЕНО: Ползунок больше не перекрывает тело th и не крадет mousedown */
+#dataTable th .resizer {
+    position: absolute;
+    right: -2px;
+    top: 0;
+    width: 8px;
+    height: 100%;
+    cursor: col-resize;
+    user-select: none;
+    z-index: 45; /* Выше уровня липких заголовков (35) */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-right: 1px solid var(--border-color);
+}
+
+.resizer::after {
+    content: '↔';
+    font-size: 10px;
+    color: var(--text-secondary);
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 0 1px;
+    opacity: 1;
+    pointer-events: none;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    line-height: 1;
+    transition: color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.resizer:hover,
+.resizer.resizing {
+    border-right: 3px solid var(--accent);
+}
+
+.resizer:hover::after,
+.resizer.resizing::after {
+    color: var(--accent);
+    border-color: var(--accent);
+    transform: scale(1.1);
+}
+
+/* ИСПРАВЛЕНО: Полный запрет текстового выделения при перетаскивании th */
+#dataTable th.sortable,
+#dataTable th[draggable="true"] {
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+    -ms-user-select: none !important;
+    user-select: none !important;
+    cursor: grab;
+}
+
+#dataTable th:active {
+    cursor: grabbing;
+}
+
+/* ИСПРАВЛЕНО: Наложение z-index для защиты от наложения stacking context */
+th.dragging-active {
+    opacity: 0.35;
+    background-color: var(--border-color) !important;
+    z-index: 9999 !important; /* Принудительно выше всех фиксированных th (35) */
+}
+
+th.drag-over-left {
+    border-left: 3px solid var(--accent) !important;
+}
+
+th.drag-over-right {
+    border-right: 3px solid var(--accent) !important;
+}
+
+th.no-drag {
+    user-select: none !important;
+}
+
+/* ==========================================================================
+   5. ДИЗАЙН БЛОКА "ИСТОРИЯ" И ИНДИКАТОРОВ СТАТУСА API
+   ========================================================================== */
+.history-wrapper {
+    position: relative;
+    width: 100%;
+    flex-shrink: 0;
+    border-left: 2px solid var(--border-color);
+    border-right: 2px solid var(--border-color);
+    border-bottom: 2px solid var(--border-color);
+    border-radius: 0 0 12px 12px;
+    background-color: var(--bg-secondary);
+    /* Уменьшили отступы, чтобы больше места было под строки */
+    padding: 1rem 1rem 0.5rem 1rem;
+    margin-top: 1rem;
+
+    /* Общая высота блока стала меньше (было 170px) */
+    height: 135px;
+    display: flex;
+    flex-direction: column;
+}
+
+.history-title {
+    position: absolute;
+    left: 12px;
+    top: 0;
+    transform: translateY(-50%);
+    font-size: 1.25rem;
+    font-weight: 600;
+    padding: 0 0.5rem;
+    background-color: var(--bg-primary);
+    z-index: 5;
+    line-height: 1;
+}
+
+.history-wrapper::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 12px;
+    border-top: 2px solid var(--border-color);
+}
+
+.history-wrapper::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: calc(12px + 5.5rem);
+    right: 0;
+    border-top: 2px solid var(--border-color);
+    border-radius: 0 12px 0 0;
+}
+
+.history-list-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    /* Уменьшили расстояние между строками до минимума */
+    gap: 2px;
+    flex: 1;
+    overflow-y: auto;
+    /* Кастомный тонкий скроллбар, чтобы не занимал место */
+    scrollbar-width: thin;
+}
+
+.history-item {
+    /* Уменьшили шрифт с 0.95rem до 12px */
+    font-size: 12px;
+    line-height: 1.3;
+    color: var(--text-secondary);
+    padding: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+.history-item:hover { color: var(--text-primary); }
+
+.api-status-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    /* Максимально сжали отступы для нижней панели */
+    margin-top: 2px;
+    padding-top: 2px;
+    border-top: 1px dashed var(--border-color);
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    min-height: 14px;
+    line-height: 1;
+}
+
+.api-status-field.api-error-state {
+    color: #ef4444;
+    border-top: 1px dashed #fee2e2;
+    animation: errorPulse 2s infinite ease-in-out;
+}
+
+.error-icon {
+    width: 12px;
+    height: 12px;
+    background-color: #ef4444;
+    color: #ffffff;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.theme-toggle-btn {
+    background: transparent;
+    border: 2px solid var(--border-color);
+    color: var(--text-primary);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.theme-toggle-btn:hover { background-color: var(--bg-primary); color: var(--accent); border-color: var(--accent); }
+.theme-toggle-btn svg { width: 22px; height: 22px; fill: currentColor; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes errorPulse {
+    0% { opacity: 0.8; }
+    50% { opacity: 1; transform: scale(1.005); }
+    100% { opacity: 0.8; }
+}
+
+.spa-nav-menu {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.nav-menu-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 6px;
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+
+.nav-menu-link:hover {
+    color: var(--text-primary);
+    background-color: var(--table-row-hover);
+}
+
+.nav-menu-link.active-route {
+    color: var(--accent);
+    background-color: var(--table-th-bg);
+    font-weight: 600;
+}
+
+.nav-menu-icon-btn {
+    background: var(--accent);
+    color: var(--mark-text);
+    border: none;
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+.nav-menu-icon-btn:hover {
+    filter: brightness(0.9);
+}
+
+/* ==========================================================================
+   6. МОНОЛИТНЫЙ АДАПТИВНЫЙ БЛОК НАВИГАЦИИ ШАПКИ
+   ========================================================================== */
+.responsive-menu-list {
+    margin: 0;
+    padding: 0;
+    list-style: none !important;
+}
+
+.responsive-menu-list .nav-menu-li {
+    list-style-type: none !important;
+    margin: 0;
+    padding: 0;
+}
+
+.responsive-menu-list .menu-item.active,
+.responsive-menu-list .nav-menu-li.active .menu-item,
+.responsive-menu-list .add-ticket-btn.active {
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: var(--mark-text) !important;
+    box-shadow: 0 4px 10px rgb(0 0 0 / 0.15);
+}
+
+@media screen and (min-width: 921px) {
+    .menu-hamburger-trigger {
+        display: none !important;
+    }
+
+    .responsive-menu-list {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        gap: 8px;
+    }
+
+    .responsive-menu-list .nav-menu-li {
+        display: inline-block !important;
+    }
+
+    .responsive-menu-list .menu-item {
+        display: inline-block !important;
+        vertical-align: middle;
+        text-decoration: none !important;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+        background-color: var(--bg-primary);
+        border: 2px solid var(--border-color);
+        border-radius: 10px;
+        padding: 8px 16px !important;
+        cursor: pointer;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 2px 4px rgb(0 0 0 / 0.02);
+    }
+
+    .responsive-menu-list .menu-item:hover {
+        background-color: var(--border-color);
+        color: var(--accent);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 8px rgb(0 0 0 / 0.05);
+    }
+
+    .responsive-menu-list .add-ticket-btn {
+        border: 2px solid var(--border-color) !important;
+        background-color: var(--bg-primary) !important;
+        color: var(--text-primary) !important;
+        margin-right: 8px !important;
+    }
+
+    .responsive-menu-list .add-ticket-btn:hover {
+        background-color: var(--border-color) !important;
+        color: var(--accent) !important;
+        transform: scale(1.05) translateY(-1px);
+    }
+}
+
+@media screen and (max-width: 920px) {
+    .menu-hamburger-trigger {
+        display: inline-flex !important;
+        background: var(--bg-secondary);
+        border: 2px solid var(--border-color);
+        color: var(--text-primary);
+        padding: 6px;
+        border-radius: 8px;
+        cursor: pointer;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+        vertical-align: middle;
+        margin-right: 1rem;
+    }
+
+    .menu-hamburger-trigger:hover {
+        background: var(--border-color);
+    }
+
+    .responsive-menu-list {
+        display: none !important;
+        position: absolute;
+        top: 65px;
+        left: 20px;
+        right: 20px;
+        background-color: var(--bg-secondary) !important;
+        border: 2px solid var(--border-color) !important;
+        border-radius: 12px;
+        padding: 12px !important;
+        box-shadow: var(--shadow);
+        z-index: 9999;
+        flex-direction: column !important;
+        gap: 8px;
+        align-items: flex-start !important;
+    }
+
+    .responsive-menu-list.open {
+        display: flex !important;
+    }
+
+    .responsive-menu-list .nav-menu-li {
+        display: block !important;
+        width: 100%;
+    }
+
+    .responsive-menu-list .menu-item {
+        display: block !important;
+        width: 100%;
+        box-sizing: border-box;
+        border-radius: 8px;
+        padding: 12px 16px !important;
+        background-color: var(--bg-primary);
+        border: 2px solid var(--border-color);
+        text-align: left;
+        text-decoration: none !important;
+    }
+    .responsive-menu-list .add-ticket-btn {
+        margin: 4px 0 !important;
+        display: inline-flex !important;
+    }
+}
+/* ==========================================================================
+7. ДИНАМИЧЕСКОЕ CSS-СКРЫТИЕ КОЛОНОК ЖУРНАЛА
+========================================================================== */
+/*table[data-mode="open"] th[data-id="solution"],
+table[data-mode="open"] td[data-col-id="solution"],
+table[data-mode="open"] th[data-id="close_name"],
+table[data-mode="open"] td[data-col-id="close_name"],
+table[data-mode="open"] th[data-id="close_date"],
+table[data-mode="open"] td[data-col-id="close_date"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+}*/
+/* ==========================================================================
+   8. АДАПТИВНАЯ СЕТКА КАРТОЧКИ ИНЦИДЕНТА
+   ========================================================================== */
+
+/* Сетка для больших мониторов оператора */
+.ticket-card-layout-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding-top: 15px;
+}
+
+/* Медиа-запрос: Если экран сужается меньше 920px (мобильные, планшеты, сжатая IDE) */
+@media screen and (max-width: 920px) {
+    /* Переводим сетку в один вертикальный столбец */
+    .ticket-card-layout-grid {
+        grid-template-columns: 1fr !important;
+        grid-template-rows: auto auto;
+        overflow-y: auto !important;
+        gap: 1.5rem;
+    }
+
+    /* Снимаем жесткое ограничение высоты для контейнера приложения, чтобы прокрутка шла плавно */
+    .container {
+        height: auto !important;
+        overflow-y: auto !important;
+    }
+
+    /* Панели карточки подстраиваются под контент, но не сжимаются меньше 300px */
+    .ticket-info-panel,
+    .ticket-notes-panel {
+        overflow-y: visible !important;
+        height: auto !important;
+        min-height: 600px !important;
+    }
+}
+/* ==========================================================================
+   ИНДИКАТОР СЕТЕВОГО ШЛЮЗА — LED / спиннер
+   ========================================================================== */
+
+.network-led {
+    position: fixed;
+    bottom: 15px;
+    left: 20px;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background-color: #9ca3af;                 /* idle — серый */
+    box-shadow: 0 0 6px rgba(156, 163, 175, 0.5);
+    z-index: 99999;
+    box-sizing: border-box;
+    transition: background-color 0.3s ease,
+    box-shadow 0.3s ease,
+    width 0.2s ease,
+    height 0.2s ease;
+}
+
+.network-led.online {
+    background-color: #22c55e;                  /* зелёный */
+    box-shadow: 0 0 8px #22c55e;
+}
+
+.network-led.offline {
+    background-color: #ef4444;                  /* красный */
+    box-shadow: 0 0 8px #ef4444;
+}
+
+/* Спиннер во время сетевого запроса */
+.network-led.loading {
+    background-color: transparent;
+    box-shadow: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent);
+    animation: ledSpin 0.7s linear infinite;
+}
+
+@keyframes ledSpin {
+    to { transform: rotate(360deg); }
+}
+/* ==========================================================================
+   СОСТОЯНИЯ КНОПКИ «СОХРАНИТЬ» (форма редактирования карточки)
+   ========================================================================== */
+
+#saveBtn {
+    transition: background-color 0.2s ease, opacity 0.2s ease;
+    position: relative;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+}
+
+/* Спиннер */
+#saveBtn.btn-loading {
+    pointer-events: none;
+}
+
+#saveBtn.btn-loading::after {
+    content: '';
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: saveBtnSpin 0.7s linear infinite;
+    display: block;
+}
+
+/* Зелёная галочка */
+#saveBtn.btn-success {
+    background-color: #22c55e !important;
+    pointer-events: none;
+}
+
+#saveBtn.btn-success::after {
+    content: '✓';
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1;
+    display: block;
+}
+
+/* Красный крестик */
+#saveBtn.btn-error {
+    background-color: #ef4444 !important;
+    pointer-events: none;
+}
+
+#saveBtn.btn-error::after {
+    content: '✕';
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1;
+    display: block;
+}
+
+@keyframes saveBtnSpin {
+    to { transform: rotate(360deg); }
+}
+/* ==========================================================================
+   СЛОТ ОТВЕТСТВЕННОГО — «внимание», если не назначен
+   Цветовая логика согласована с alert_level: 2 (внимание).
+   ========================================================================== */
+
+.staff-slot-empty {
+    background-color: var(--row-level-2-bg) !important;
+    border-color: #f59e0b !important;
+}
+
+.staff-slot-empty-label {
+    color: #d97706;
+    font-weight: 600;
+}
+
+/* В тёмной теме — приглушённый янтарный, чтобы не рябило */
+[data-theme="dark"] .staff-slot-empty-label {
+    color: #fbbf24;
+}
+
+[data-theme="dark"] .staff-slot-empty {
+    border-color: #a16207 !important;
+}
+/* ==========================================================================
+   РЕДАКТИРУЕМЫЕ ПОЛЯ — тонкая светящаяся тень
+   Применяется к input, select, textarea и label-обёрткам чекбоксов,
+   которые пользователь может изменить прямо в интерфейсе.
+   ========================================================================== */
+
+.editable-field {
+    box-shadow:
+            0 0 0 1px var(--accent),
+            0 0 6px rgba(99, 102, 241, 0.25);
+    transition: box-shadow 0.2s ease;
+}
+
+.editable-field:hover {
+    box-shadow:
+            0 0 0 1px var(--accent),
+            0 0 10px rgba(99, 102, 241, 0.45);
+}
+
+.editable-field:focus,
+.editable-field:focus-within {
+    box-shadow:
+            0 0 0 2px var(--accent),
+            0 0 14px rgba(99, 102, 241, 0.6);
+    outline: none;
+}
+
+/* В тёмной теме — акцент лаймовый, отдельная палитра свечения */
+[data-theme="dark"] .editable-field {
+    box-shadow:
+            0 0 0 1px var(--accent),
+            0 0 6px rgba(163, 230, 53, 0.3);
+}
+
+[data-theme="dark"] .editable-field:hover {
+    box-shadow:
+            0 0 0 1px var(--accent),
+            0 0 10px rgba(163, 230, 53, 0.5);
+}
+
+[data-theme="dark"] .editable-field:focus,
+[data-theme="dark"] .editable-field:focus-within {
+    box-shadow:
+            0 0 0 2px var(--accent),
+            0 0 14px rgba(163, 230, 53, 0.65);
+    outline: none;
+}
+/* ==========================================================================
+   ЗАБЛОКИРОВАННАЯ КАРТОЧКА — после успешного сохранения
+   ========================================================================== */
+
+.ticket-card-layout-grid.card-locked {
+    pointer-events: none;
+    cursor: not-allowed;
+}
+
+/* Исключения: кнопка возврата в журнал и вся правая панель комментариев.
+   Внутри правой панели сама кнопка «Добавить комментарий» блокируется
+   отдельно через disabled в контроллере. */
+.ticket-card-layout-grid.card-locked #backBtn,
+.ticket-card-layout-grid.card-locked .ticket-notes-panel {
+    pointer-events: auto;
+}
+
+.ticket-card-layout-grid.card-locked #backBtn {
+    /* CSS-переменные для цвета свечения — чтобы keyframes работал в обеих темах */
+    --back-btn-glow:        rgba(99, 102, 241, 0.35);
+    --back-btn-glow-strong: rgba(99, 102, 241, 0.8);
+
+    cursor: pointer;
+
+    /* Только свечение и пульсация. Фон, цвет текста, рамка — без изменений. */
+    box-shadow: 0 0 6px var(--back-btn-glow);
+    animation: backBtnPulse 1.6s ease-in-out 3;
+    transition: box-shadow 0.2s ease;
+}
+
+[data-theme="dark"] .ticket-card-layout-grid.card-locked #backBtn {
+    --back-btn-glow:        rgba(163, 230, 53, 0.4);
+    --back-btn-glow-strong: rgba(163, 230, 53, 0.85);
+}
+
+/* Hover — усиливает свечение, пульсация отключается, чтобы не спорила с hover */
+.ticket-card-layout-grid.card-locked #backBtn:hover {
+    animation: none;
+    box-shadow: 0 0 16px 3px var(--back-btn-glow-strong);
+}
+
+/* Пульсация: от базового свечения к усиленному и обратно */
+@keyframes backBtnPulse {
+    0%, 100% {
+        box-shadow: 0 0 6px var(--back-btn-glow);
+    }
+    50% {
+        box-shadow: 0 0 16px 3px var(--back-btn-glow-strong);
+    }
+}
+
+/* Лёгкое затемнение карточки — визуальная индикация блокировки.
+   На кнопке «Сохранить» галочка и на кнопке «Вернуться в журнал» — без затемнения. */
+.ticket-card-layout-grid.card-locked .ticket-info-panel > *:not(.ticket-actions-footer) {
+    opacity: 0.6;
+    transition: opacity 0.3s ease;
+}
+/* Модификатор для label, оборачивающего чекбокс — чтобы рамка обнимала и текст */
+/* ==========================================================================
+   РЕДАКТИРУЕМЫЕ ПОЛЯ — мягкое свечение (blur)
+   Никаких чётких рамок — только размытый ореол вокруг поля.
+   Согласовано с палитрой акцента светлой и тёмной темы.
+   ========================================================================== */
+
+.editable-field {
+    transition: box-shadow 0.25s ease;
+    /* Два слоя: ближний — плотнее и размытее, дальний — широкий ореол */
+    box-shadow:
+            0 0 8px 1px rgba(99, 102, 241, 0.35),
+            0 0 20px 4px rgba(99, 102, 241, 0.15);
+}
+
+.editable-field:hover {
+    box-shadow:
+            0 0 10px 2px rgba(99, 102, 241, 0.5),
+            0 0 26px 6px rgba(99, 102, 241, 0.22);
+}
+
+.editable-field:focus,
+.editable-field:focus-within {
+    box-shadow:
+            0 0 12px 2px rgba(99, 102, 241, 0.7),
+            0 0 32px 8px rgba(99, 102, 241, 0.3);
+    outline: none;
+}
+
+/* Тёмная тема — лаймовое свечение */
+[data-theme="dark"] .editable-field {
+    box-shadow:
+            0 0 8px 1px rgba(163, 230, 53, 0.4),
+            0 0 20px 4px rgba(163, 230, 53, 0.18);
+}
+
+[data-theme="dark"] .editable-field:hover {
+    box-shadow:
+            0 0 10px 2px rgba(163, 230, 53, 0.55),
+            0 0 26px 6px rgba(163, 230, 53, 0.25);
+}
+
+[data-theme="dark"] .editable-field:focus,
+[data-theme="dark"] .editable-field:focus-within {
+    box-shadow:
+            0 0 12px 2px rgba(163, 230, 53, 0.75),
+            0 0 32px 8px rgba(163, 230, 53, 0.32);
+    outline: none;
+}
+
+/* Чекбокс-обёртка: без изменения формы, только свечение вокруг label */
+.editable-field--checkbox {
+    border-radius: 6px;
+    padding: 6px 10px;
+    box-sizing: border-box;
+}
+
+/* Чекбоксы внутри — крупнее для удобства клика */
+.editable-field--checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+}
+/* Фиксированная подложка для кнопок в самом низу левой панели */
+.ticket-actions-footer {
+    display: flex !important;
+    gap: 10px !important;
+    flex-wrap: wrap !important;
+    width: 100% !important;
+    margin-top: auto !important; /* Прижимает блок к самому низу родителя */
+    padding-top: 1.25rem !important;
+    border-top: 2px solid var(--border-color) !important;
+    flex-shrink: 0 !important;
+}
+
+/* Все кнопки внутри равномерно распределяются по ширине */
+.ticket-actions-footer .menu-item {
+    flex: 1 1 140px; /* Растягиваются, но не сжимаются меньше 140px */
+    box-sizing: border-box;
+}
+
+/* Скрытие неактивных в данный момент кнопок без конфликта с flex */
+.ticket-actions-footer .hide-action-btn {
+    display: none;
+}
+
+/* ==========================================================================
+   КНОПКА ГОЛОСОВОГО ВВОДА
+   Наследует свечение .editable-field, при записи — красное
+   ========================================================================== */
+
+.btn-voice-mic {
+    flex-shrink: 0;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+    cursor: pointer;
+    background-color: var(--bg-primary);
+    border: 2px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 18px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
+}
+
+.btn-voice-mic:hover {
+    background-color: var(--table-row-hover);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* Активная запись — красное свечение поверх editable-field.
+   Повышенная специфичность, чтобы перебить .editable-field:focus и :hover. */
+.btn-voice-mic.editable-field.active,
+.btn-voice-mic.active {
+    background-color: rgba(239, 68, 68, 0.1);
+    border-color: #ef4444;
+    color: #ef4444;
+    animation: pulse-mic-anim 1.5s infinite;
+    box-shadow: 0 0 12px 2px rgba(239, 68, 68, 0.6);
+}
+@keyframes pulse-mic-anim {
+    0%   { opacity: 1; }
+    50%  { opacity: 0.55; }
+    100% { opacity: 1; }
+}
+
+/* ==========================================================================
+   МОДУЛЬ ВСПЛЫВАЮЩИХ УВЕДОМЛЕНИЙ (TOASTS)
+   ========================================================================== */
+
+:root, [data-theme="light"] {
+    --toast-bg-opacity: 0.95;
+    --toast-bg: rgba(248, 250, 252, var(--toast-bg-opacity));
+    --toast-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+    --toast-success-color: #22c55e;
+    --toast-error-color: #ef4444;
+    --toast-warning-color: #f59e0b;
+    --toast-info-color: #6366f1;
+}
+
+[data-theme="dark"] {
+    --toast-bg: rgba(18, 27, 44, var(--toast-bg-opacity));
+    --toast-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+    --toast-warning-color: #fbbf24;
+    --toast-info-color: #a3e635;
+}
+
+#toastContainer {
+    position: fixed;
+    top: 90px;
+    right: 16px;
+    width: 340px;
+    max-width: calc(100vw - 32px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 9000;
+    pointer-events: none;
+}
+
+.toast {
+    position: relative;
+    padding: 12px 48px 14px 14px;   /* справа — место под крестик */
+    background: var(--toast-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-left: 4px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: var(--toast-shadow);
+    font-size: 13px;
+    line-height: 1.4;
+    word-break: break-word;
+    opacity: 0;
+    transition: opacity 150ms ease;
+    pointer-events: auto;
+}
+
+.toast.toast-visible {
+    opacity: 1;
+}
+
+.toast.toast-closing {
+    opacity: 0;
+    transition: opacity 500ms ease;
+}
+
+.toast-success { border-left-color: var(--toast-success-color); }
+.toast-error   { border-left-color: var(--toast-error-color);   }
+.toast-warning { border-left-color: var(--toast-warning-color); }
+.toast-info    { border-left-color: var(--toast-info-color);    }
+
+.toast-text {
+    display: inline;
+}
+
+.toast-count {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    background: var(--border-color);
+    color: var(--text-primary);
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    vertical-align: middle;
+}
+
+.toast-close {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.toast-close:hover {
+    background: var(--table-row-hover);
+    color: var(--text-primary);
+}
+
+.toast-progress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: 3px;
+    background: currentColor;
+    transform-origin: left center;
+    animation-name: toastShrink;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+    border-radius: 0 0 0 8px;
+    color: var(--border-color);
+}
+
+.toast-success .toast-progress { color: var(--toast-success-color); }
+.toast-error   .toast-progress { color: var(--toast-error-color);   }
+.toast-warning .toast-progress { color: var(--toast-warning-color); }
+.toast-info    .toast-progress { color: var(--toast-info-color);    }
+
+@keyframes toastShrink {
+    from { transform: scaleX(1); }
+    to   { transform: scaleX(0); }
+}
+
+.toast-queue-indicator {
+    align-self: flex-end;
+    padding: 4px 10px;
+    background: var(--toast-bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    box-shadow: var(--toast-shadow);
+    pointer-events: auto;
+}
+
+.toast-close-all {
+    align-self: flex-end;
+    padding: 6px 14px;
+    background: var(--toast-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--toast-shadow);
+    pointer-events: auto;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.toast-close-all:hover {
+    background: var(--table-row-hover);
+    color: var(--accent);
+}
+.toast-open-link {
+    display: inline-block;
+    margin-left: 8px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+}
+
+.toast-open-link:hover {
+    text-decoration: underline;
+    color: var(--accent-hover);
+}
+
+/* Мобильные — full width под шапкой */
+@media (max-width: 920px) {
+    #toastContainer {
+        top: 80px;
+        left: 8px;
+        right: 8px;
+        width: auto;
+        max-width: none;
+    }
+}
+/* ==========================================================================
+   БЛОКИРОВКА ФОРМЫ СОЗДАНИЯ ЗАЯВКИ
+   ========================================================================== */
+
+.create-form-locked {
+    pointer-events: none;
+}
+
+.create-form-locked #cancelFormBtn {
+    pointer-events: auto;
+}
+
+.create-form-locked input,
+.create-form-locked textarea,
+.create-form-locked select,
+.create-form-locked button:not(#cancelFormBtn) {
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
+}
+
+/* ==========================================================================
+   СОСТОЯНИЯ КНОПКИ «СОХРАНИТЬ ЗАЯВКУ» (форма создания)
+   Дублируют состояния #saveBtn карточки для консистентности
+   ========================================================================== */
+
+#saveTicketBtn {
+    position: relative;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s ease, opacity 0.2s ease;
+}
+
+#saveTicketBtn.btn-loading {
+    pointer-events: none;
+}
+
+#saveTicketBtn.btn-loading::after {
+    content: '';
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: saveBtnSpin 0.7s linear infinite;
+    display: block;
+}
+
+#saveTicketBtn.btn-success {
+    background-color: #22c55e !important;
+    pointer-events: none;
+}
+
+#saveTicketBtn.btn-success::after {
+    content: '✓';
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1;
+    display: block;
+}
+
+#saveTicketBtn.btn-error {
+    background-color: #ef4444 !important;
+    pointer-events: none;
+}
+
+#saveTicketBtn.btn-error::after {
+    content: '✕';
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1;
+    display: block;
+}
+/* ==========================================================================
+   ФОРМА СОЗДАНИЯ — ЗАБЛОКИРОВАННЫЙ АДРЕС (наследован из заявки)
+   ========================================================================== */
+
+.address-locked {
+    background-color: var(--table-row-hover) !important;
+    cursor: not-allowed;
+    opacity: 0.85;
+}
+
+.address-locked:focus {
+    border-color: var(--border-color) !important;
+    box-shadow: none !important;
+}
+[hidden] {
+    display: none !important;
+}
+/* ==========================================================================
+   СТИЛИ ДЛЯ ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ И ВЫПАДАЮЩЕГО МЕНЮ
+   ========================================================================== */
+.user-profile-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.user-profile-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+    border: 2px solid transparent;
+    padding: 4px 8px;
+    border-radius: 20px;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background 0.2s ease;
+}
+
+.user-profile-btn:hover {
+    background: var(--table-row-hover);
+}
+
+.user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    color: var(--mark-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+.user-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.user-name {
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.user-arrow {
+    color: var(--text-secondary);
+    transition: transform 0.2s ease;
+}
+.user-profile-wrapper.open .user-arrow {
+    transform: rotate(180deg);
+}
+
+.user-dropdown {
+    position: absolute;
+    top: calc(100% + 10px);
+    right: 0;
+    min-width: 200px;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    display: none;
+    flex-direction: column;
+    padding: 6px 0;
+    z-index: 1000;
+}
+
+.user-dropdown.show {
+    display: flex;
+}
+
+.dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    font-size: 14px;
+    color: var(--text-primary);
+    text-decoration: none;
+    background: transparent;
+    border: none;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.dropdown-item:hover {
+    background-color: var(--table-row-hover);
+    color: var(--accent);
+}
+
+.dropdown-item-danger {
+    color: #ef4444;
+}
+.dropdown-item-danger:hover {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+}
+
+.dropdown-divider {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 4px 0;
+}
+
+@media (max-width: 920px) {
+    .user-name { display: none; }
+}
+
+/* ==========================================================================
+   ФИКСАЦИЯ БЛОКА ИСТОРИЯ ПОД 5 СТРОК И СКРЫТИЕ "НИЧЕГО НЕ НАЙДЕНО"
+   ========================================================================== */
+#noResults {
+    display: none;
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.history-wrapper {
+    position: relative;
+    width: 100%;
+    flex-shrink: 0;
+    border-left: 2px solid var(--border-color);
+    border-right: 2px solid var(--border-color);
+    border-bottom: 2px solid var(--border-color);
+    border-radius: 0 0 12px 12px;
+    background-color: var(--bg-secondary);
+    padding: 18px 12px 6px 12px;
+    margin-top: 1rem;
+    height: 142px; /* Жесткая высота */
+    display: flex;
+    flex-direction: column;
+}
+
+.history-title {
+    position: absolute;
+    left: 12px;
+    top: 0;
+    transform: translateY(-50%);
+    font-size: 1.1rem;
+    font-weight: 600;
+    padding: 0 0.5rem;
+    background-color: var(--bg-primary);
+    z-index: 5;
+    line-height: 1;
+}
+
+.history-list-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    overflow-y: auto;
+    margin-bottom: 4px;
+    scrollbar-width: thin;
+}
+
+.history-item {
+    font-size: 11.5px;
+    line-height: 1.25;
+    color: var(--text-secondary);
+    padding: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
+.api-status-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 0;
+    padding-top: 3px;
+    border-top: 1px dashed var(--border-color);
+    font-size: 9px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    min-height: 12px;
+    line-height: 1;
+}
+/* Активный фильтр по городам (оранжевый акцент) */
+#cityFilterBtn.filter-active {
+    border-color: #f59e0b !important;
+    color: #f59e0b !important;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+}
+
+#cityFilterBtn.filter-active svg {
+    fill: #f59e0b;
+}
+
+/* Стили для списка чекбоксов городов */
+.city-checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px 0;
+}
+.city-checkbox-item input {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
+/* Если выбраны не все города, подсвечиваем и чекбокс "Выбрать все" */
+#citySelectAll:indeterminate {
+    accent-color: #f59e0b;
+}
+
+/* Состояние загрузки для кнопки обновления */
+#refreshBtn.is-syncing svg {
+    animation: spin 1s linear infinite;
+    color: #f59e0b; /* Оранжевый во время синхронизации */
+}
+
+#refreshBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Затемнение фона при открытом фильтре городов */
+.filter-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 999;
+    display: none;
+    backdrop-filter: blur(2px); /* Легкое размытие для красоты */
+}
+/* ==========================================================================
+   СТИЛИ ДЛЯ ADDRESS PICKER (Группировка и Пилюли)
+   ========================================================================== */
+.address-pills-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.address-pill {
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    outline: none;
+}
+
+.address-pill:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(99, 102, 241, 0.05); /* Легкий фон при наведении */
+}
+
+/* Подсветка при навигации с клавиатуры */
+.address-pill.keyboard-active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--mark-text);
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.4);
+}
+
+/* Если дом кликабельный (режим house/any) */
+.selectable-house {
+    padding: 4px 8px;
+    margin-left: -8px;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.selectable-house:hover,
+.selectable-house.keyboard-active {
+    background: var(--table-row-hover);
+    color: var(--accent);
+}
+
+.recent-address-item:hover {
+    background: var(--table-row-hover);
+}
+/* Подложка для AddressPicker */
+#addressPickerBackdrop {
+    z-index: 999;
+}
+
+/* Выпадающий список адресов должен быть выше подложки */
+.address-picker-wrap .search-input + div {
+    z-index: 1000 !important;
+}
+/* ==========================================================================
+   АДАПТАЦИЯ ПОД НИЗКИЕ ЭКРАНЫ (Ноутбуки 768p и ниже)
+   Срабатывает, когда высота окна меньше 800px
+   ========================================================================== */
+@media (max-height: 800px) {
+
+    /* 1. Сжимаем шапку (навбар) */
+    .navbar {
+        padding: 0.6rem 5% !important;
+    }
+
+    .logo {
+        font-size: 1.1rem !important;
+    }
+
+    /* Корректируем высоту основного контейнера под новую высоту навбара */
+    .container {
+        height: calc(100vh - 53px) !important;
+        padding: 6px !important;
+    }
+
+    /* 2. Сжимаем блок "История" */
+    .history-wrapper {
+        height: 75px !important;
+        /* Было 142px */
+        margin-top: 0.5rem !important;
+        padding: 10px 12px 4px 12px !important;
+    }
+
+    .history-title {
+        font-size: 0.95rem !important;
+    }
+
+    .history-item {
+        font-size: 10px !important;
+        line-height: 1.1 !important;
+    }
+
+   
+
+    /* 3. Уменьшаем заголовки и отступы на страницах */
+    h1 {
+        font-size: 1.3rem !important;
+        margin-bottom: 0.2rem !important;
+        margin-top: 0 !important;
+    }
+
+    .search-container {
+        margin-bottom: 0.5rem !important;
+    }
+
+    .search-input {
+        padding: 0.5rem 0.8rem !important;
+        font-size: 0.9rem !important;
+    }
+
+    /* 4. Адаптация карточки заявки и форм */
+    .ticket-card-layout-grid {
+        padding-top: 5px !important;
+        gap: 1rem !important;
+    }
+
+    /* Уменьшаем поля ввода во всех формах (создание, карточка, логин) */
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select,
+    textarea {
+        padding: 6px 10px !important;
+        font-size: 13px !important;
+        margin-bottom: 4px !important;
+    }
+
+    /* Уменьшаем высоту текстовых областей (комментарии) */
+    textarea {
+        min-height: 60px !important;
+    }
+
+    /* Сжимаем кнопки */
+    .menu-item,
+    .btn-voice-mic {
+        padding: 6px 12px !important;
+        font-size: 13px !important;
+        min-height: 34px !important;
+    }
+}
+/* ==========================================================================
+   УПРАВЛЕНИЕ БЛОКОМ ИСТОРИИ (Сворачивание)
+   ========================================================================== */
+.history-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+}
+
+.history-toggle-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    border-radius: 4px;
+    transition: background 0.2s, color 0.2s;
+}
+
+.history-toggle-btn:hover {
+    background: var(--table-row-hover);
+    color: var(--accent);
+}
+
+.history-arrow {
+    transition: transform 0.3s ease;
+}
+
+/* Состояние "Свернуто" */
+.history-wrapper.is-collapsed {
+    height: 30px !important;
+    /* Оставляем только заголовок */
+    padding-bottom: 0 !important;
+    border-bottom: none !important;
+    overflow: visible !important;
+}
+
+.history-wrapper.is-collapsed .history-list-container,
+.history-wrapper.is-collapsed #apiStatusBlock,
+.history-wrapper.is-collapsed #inactivityStatusBlock {
+    display: none !important;
+}
+
+/* Поворачиваем стрелочку вниз, когда свернуто */
+.history-wrapper.is-collapsed .history-arrow {
+    transform: rotate(180deg);
+}
+
+/* ==========================================================================
+   ЭКСТРЕМАЛЬНО КОМПАКТНЫЙ РЕЖИМ ДЛЯ НИЗКИХ ЭКРАНОВ (Ноутбуки, 1080x768)
+   ========================================================================== */
+@media (max-height: 600px) {
+
+    /* Уменьшаем базовый шрифт */
+    body {
+        font-size: 13px !important;
+    }
+
+    /* 1. Шапка */
+    .navbar {
+        padding: 0.4rem 5% !important;
+    }
+
+    .logo {
+        font-size: 1rem !important;
+    }
+
+    .theme-toggle-btn {
+        width: 34px !important;
+        height: 34px !important;
+    }
+
+    .container {
+        height: calc(100vh - 48px) !important;
+        padding: 4px !important;
+    }
+
+    /* 2. Блок "История" (когда развернут) */
+    .history-wrapper {
+        height: 100px !important;
+        margin-top: 0.5rem !important;
+        padding: 10px 10px 4px 10px !important;
+    }
+
+    .history-title {
+        font-size: 0.9rem !important;
+    }
+
+    .history-item {
+        font-size: 9.5px !important;
+        line-height: 1.1 !important;
+    }
+
+    /* 3. Заголовки и поиск */
+    h1 {
+        font-size: 1.1rem !important;
+        margin-bottom: 0.2rem !important;
+        margin-top: 0 !important;
+    }
+
+    .search-container {
+        margin-bottom: 0.4rem !important;
+    }
+
+    .search-input {
+        padding: 4px 8px !important;
+        font-size: 12px !important;
+        height: 28px !important;
+    }
+
+    /* 4. Таблица */
+    #dataTable th {
+        padding: 4px 8px !important;
+        font-size: 11px !important;
+        height: 26px !important;
+    }
+
+    #dataTable td {
+        padding: 3px 8px !important;
+        font-size: 11px !important;
+        height: 28px !important;
+    }
+
+    /* 5. Карточки, формы и поля ввода */
+    .ticket-card-layout-grid {
+        padding-top: 2px !important;
+        gap: 0.5rem !important;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    input[type="date"],
+    select,
+    textarea {
+        padding: 4px 8px !important;
+        font-size: 12px !important;
+        margin-bottom: 2px !important;
+        min-height: 28px !important;
+    }
+
+    textarea {
+        min-height: 50px !important;
+    }
+
+    /* Уменьшаем лейблы полей (текст над полями) */
+    label {
+        font-size: 11px !important;
+        margin-bottom: 2px !important;
+    }
+
+    /* 6. Кнопки */
+    .menu-item,
+    .btn-voice-mic {
+        padding: 4px 10px !important;
+        font-size: 12px !important;
+        min-height: 30px !important;
+        border-width: 1px !important;
+    }
+
+    .ticket-actions-footer {
+        padding-top: 0.5rem !important;
+    }
+
+    /* Скрываем картинку-аватар в шапке на низких экранах для экономии места по ширине */
+    .user-name {
+        display: none !important;
+    }
+}
+/* ==========================================================================
+   КАСТОМНЫЙ СКРОЛЛ И ИСПРАВЛЕНИЕ ОБРЕЗКИ ДЛЯ ВЫПАДАЮЩЕГО СПИСКА
+   ========================================================================== */
+
+.address-picker-wrap .search-input+div {
+   
+    /* Тонкий скролл для Firefox */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+
+   
+}
+
+
+/* Кастомный скролл для Chrome / Edge / Yandex (Выпадающий список) */
+.address-picker-wrap .search-input+div::-webkit-scrollbar {
+    width: 6px;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 4px 0;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border-radius: 10px;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-secondary);
+}
+
+/* Кастомный скролл для Chrome / Edge / Yandex (Выпадающий список) */
+.address-picker-wrap .search-input+div::-webkit-scrollbar {
+    width: 6px;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 4px 0;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border-radius: 10px;
+}
+
+.address-picker-wrap .search-input+div::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   КАСТОМНЫЙ СКРОЛЛ ДЛЯ ОСНОВНОЙ ТАБЛИЦЫ
+   ========================================================================== */
+
+.table-wrapper {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+}
+
+.table-wrapper::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    /* Для горизонтального скролла */
+}
+
+.table-wrapper::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.table-wrapper::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border-radius: 8px;
+}
+
+.table-wrapper::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-secondary);
+}
+
+/* Убираем белый квадрат в правом нижнем углу таблицы (где пересекаются скроллы) */
+.table-wrapper::-webkit-scrollbar-corner {
+    background: transparent;
+}
+/* Запрещаем скролл страницы, когда список адресов докручен до конца */
+.address-picker-wrap .search-input+div {
+    /* ... твои предыдущие стили (padding-bottom, max-height и т.д.) ... */
+
+    /* Магия против скролла страницы */
+    overscroll-behavior: contain;
+
+    /* Для надежности на мобильных устройствах (iOS/Android) */
+    overscroll-behavior-y: contain;
+}
+/* ==========================================================================
+   БРОНЕБОЙНЫЙ ФИКС КНОПОК В ФУТЕРЕ (Создание заявки)
+   ========================================================================== */
+
+.ticket-actions-footer {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    /* Разрешаем перенос на новую строку */
+    gap: 12px !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+}
+
+/* Жестко фиксируем размеры кнопок */
+.ticket-actions-footer #saveTicketBtn,
+.ticket-actions-footer #cancelFormBtn {
+    flex: 0 0 auto !important;
+    /* Запрещаем сжиматься */
+    height: 44px !important;
+    /* Фиксированная высота */
+    min-width: 150px !important;
+    /* Минимальная ширина */
+    padding: 0 24px !important;
+    /* Убираем вертикальные отступы, оставляем горизонтальные */
+    box-sizing: border-box !important;
+    margin: 0 !important;
+
+    /* Центрируем текст */
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+
+    /* Запрещаем перенос текста на новую строку */
+    white-space: nowrap !important;
+    font-size: 14px !important;
+    line-height: 1 !important;
+    position: relative !important;
+}
+
+/* ==========================================================================
+   ФИКС СОСТОЯНИЙ КНОПКИ (Чтобы спиннер и галочки не ломали верстку)
+   ========================================================================== */
+
+/* Когда кнопка загружается или показывает успех/ошибку, скрываем текст */
+#saveTicketBtn.btn-loading,
+#saveTicketBtn.btn-success,
+#saveTicketBtn.btn-error {
+    color: transparent !important;
+}
+
+/* Иконки (спиннер, галочка, крестик) ставим ровно по центру */
+#saveTicketBtn.btn-loading::after,
+#saveTicketBtn.btn-success::after,
+#saveTicketBtn.btn-error::after {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    margin: 0 !important;
+}
+td.cell-alert-danger {
+    background-color: rgba(239, 68, 68, 0.15) !important;
+    color: #ef4444 !important;
+    font-weight: 700;
+}
+td.cell-alert-warning {
+    background-color: rgba(245, 158, 11, 0.15) !important;
+    color: #d97706 !important;
+    font-weight: 600;
+}
+td.cell-alert-info {
+    background-color: rgba(234, 179, 8, 0.15) !important;
+    color: #ca8a04 !important;
+    font-weight: 600;
+}
+/* ==========================================================================
+   МОБИЛЬНАЯ АДАПТАЦИЯ ТАБЛИЦЫ (Карточный вид v3 - Компактный)
+   ========================================================================== */
+@media screen and (max-width: 768px) {
+
+    /* 1. Скрываем шапку таблицы */
+    #dataTable thead {
+        display: none !important;
+    }
+
+    /* 2. Превращаем строки в карточки */
+    #dataTable,
+    #dataTable tbody {
+        display: block !important;
+        width: 100% !important;
+    }
+
+    #dataTable tr {
+        display: block !important;
+        margin-bottom: 10px !important;
+        /* Уменьшили отступ между карточками */
+        border: 2px solid var(--border-color);
+        border-radius: 8px;
+        background-color: var(--bg-secondary);
+        padding: 8px 12px !important;
+        /* Уменьшили внутренние отступы */
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        position: relative !important;
+    }
+
+    /* 3. Настраиваем ячейки (Убираем фиксированные ширины и фоны) */
+    #dataTable td {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        padding: 6px 0 !important;
+        /* Компактные отступы по вертикали */
+        border: none !important;
+        border-bottom: 1px dashed var(--border-color) !important;
+        white-space: normal !important;
+        height: auto !important;
+
+        /* КРИТИЧЕСКИ ВАЖНО: Убираем остатки липких колонок с ПК */
+        position: static !important;
+        background-color: transparent !important;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        text-align: left !important;
+        box-sizing: border-box !important;
+    }
+
+    #dataTable td:last-child {
+        border-bottom: none !important;
+        padding-bottom: 0 !important;
+    }
+
+    /* 4. Стилизация названия колонки */
+    #dataTable td::before {
+        content: attr(data-label);
+        font-weight: 700;
+        color: var(--text-secondary);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 2px;
+        /* Прижали заголовок к значению */
+    }
+
+    /* 5. Стилизация самого значения */
+    #dataTable td {
+        font-size: 13.5px;
+        color: var(--text-primary);
+        line-height: 1.3;
+    }
+
+    /* 6. Скрываем лишние колонки */
+    #dataTable td[data-col-id="staff_name"],
+    #dataTable td[data-col-id="notify_status"],
+    #dataTable td[data-col-id="staff_name2"],
+    #dataTable td[data-col-id="notify_status2"],
+    #dataTable td[data-col-id="staff_name3"],
+    #dataTable td[data-col-id="notify_status3"],
+    #dataTable td[data-col-id="department"],
+    #dataTable td[data-col-id="request"],
+    #dataTable td[data-col-id="group"],
+    #dataTable td[data-col-id="other"],
+    #dataTable td[data-col-id="close_name"],
+    #dataTable td[data-col-id="solution"] {
+        display: none !important;
+    }
+
+    /* Выделяем № и Адрес */
+    #dataTable td[data-col-id="id"] {
+        font-weight: 800;
+        font-size: 15px;
+        color: var(--accent);
+    }
+
+    #dataTable td[data-col-id="address"] {
+        font-weight: 600;
+    }
+
+    /* Выделяем время */
+    #dataTable td[data-col-id="date"],
+    #dataTable td[data-col-id="repair_time"],
+    #dataTable td[data-col-id="close_date"] {
+        font-weight: 600;
+        color: var(--text-secondary);
+    }
+
+    /* Убираем тень от зафиксированных колонок */
+    .sticky-freeze-border {
+        box-shadow: none !important;
+        border-right: none !important;
+    }
+
+    /* Кликабельность карточки */
+    #dataTable tbody tr {
+        cursor: pointer;
+    }
+
+    #dataTable tbody tr:active {
+        background-color: var(--table-row-hover);
+    }
+}

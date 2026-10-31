@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#6366f1" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <title>ЛИФТ-МОНИТОРИНГ SPA</title>
+    <script>
+      // Anti-FOUC: применяем сохранённую тему до первой отрисовки страницы.
+      // Модуль theme-controller.js отработает позже (на DOMContentLoaded), поэтому
+      // без этого скрипта при F5 в тёмной теме мелькал светлый фон.
+      (function () {
+        try {
+          var savedTheme = localStorage.getItem("theme") || "light";
+          document.documentElement.setAttribute("data-theme", savedTheme);
+        } catch (e) {
+          // Приватный режим или отключённый localStorage — молча падаем на светлую
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Навбар верхнего меню -->
+    <nav class="navbar">
+      <div style="display: flex; align-items: center; gap: 30px">
+        <div class="logo" style="cursor: pointer" id="navLogo">
+          ЛИФТ-МОНИТОРИНГ
+        </div>
+        <div id="dynamicMenu" class="spa-nav-menu"></div>
+      </div>
+      <div
+        style="
+          display: flex;
+          gap: 15px;
+          align-items: center;
+          position: relative;
+        "
+      >
+        <!-- Блок профиля пользователя (скрыт по умолчанию) -->
+        <div
+          class="user-profile-wrapper"
+          id="userProfileWrapper"
+          style="display: none"
+        >
+          <button class="user-profile-btn" id="userProfileBtn">
+            <!-- Аватарка (пока буква, но легко заменить на <img>) -->
+            <div class="user-avatar" id="navUserAvatar">А</div>
+            <span class="user-name" id="navUserName">Имя</span>
+            <svg
+              class="user-arrow"
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+            >
+              <path d="M7 10l5 5 5-5z" />
+            </svg>
+          </button>
+
+          <!-- Выпадающее меню -->
+          <div class="user-dropdown" id="userDropdown">
+            <a href="#/profile" class="dropdown-item">
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="currentColor"
+              >
+                <path
+                  d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+                />
+              </svg>
+              Личный кабинет
+            </a>
+            <hr class="dropdown-divider" />
+            <button class="dropdown-item dropdown-item-danger" id="logoutBtn">
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="currentColor"
+              >
+                <path
+                  d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"
+                />
+              </svg>
+              Выход
+            </button>
+          </div>
+        </div>
+
+        <!-- Кнопка темы -->
+        <button id="themeToggle" class="theme-toggle-btn">
+          <svg class="sun-icon" viewBox="0 0 24 24">
+            <path
+              d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58c-.39-.39-1.03-.39-1.41 0s-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37c-.39-.39-1.03-.39-1.41 0s-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41l-1.06-1.06zm1.06-12.37c-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06c.39-.38.39-1.02 0-1.41zM5.99 18.01l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06c.39-.39.39-1.03 0-1.41z"
+            />
+          </svg>
+          <svg class="moon-icon" viewBox="0 0 24 24">
+            <path
+              d="M12.3 22h-.1c-5.5 0-10-4.5-10-10 0-4.8 3.5-8.9 8.2-9.8.6-.1 1.2.3 1.3.9.1.6-.2 1.2-.8 1.4-3.1 1.2-5.1 4.2-5.1 7.5 0 4.4 3.6 8 8 8 3.3 0 6.3-2 7.5-5.1.2-.6.8-.9 1.4-.8.6.1 1 .7.9 1.3-.9 4.7-5 8.2-9.8 8.2z"
+            />
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Единый главный флекс-контейнер для разметки SPA и Подвала -->
+    <div class="container">
+      <!-- Сюда роутер монтирует таблицы или формы -->
+      <main
+        id="app"
+        style="
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          min-height: 0;
+          width: 100%;
+          overflow: hidden;
+        "
+      ></main>
+
+      <!-- БЛОК ИСТОРИИ -->
+      <div class="history-wrapper" id="historyWrapper" style="display: none">
+        <div class="history-title" id="historyTitle">
+          История
+          <button
+            id="historyToggleBtn"
+            class="history-toggle-btn"
+            title="Свернуть/Развернуть историю"
+          >
+            <svg
+              class="history-arrow"
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="currentColor"
+            >
+              <path d="M7 14l5-5 5 5z" />
+              <!-- Стрелочка вверх -->
+            </svg>
+          </button>
+        </div>
+
+        <div class="history-list-container">
+          <div class="history-item">
+            Автономный модуль SPA развернут успешно.
+          </div>
+        </div>
+
+        <div
+          id="apiStatusBlock"
+          class="api-status-field"
+          style="display: none"
+        ></div>
+        <div
+          id="inactivityStatusBlock"
+          class="api-status-field"
+          style="display: flex; justify-content: flex-end"
+        >
+          <span>До автовозврата: <b id="inactivityCountdown">30:00</b></span>
+        </div>
+      </div>
+    </div>
+    <div
+      id="networkLedIndicator"
+      class="network-led"
+      title="Статус сетевого шлюза"
+    ></div>
+    <div id="toastContainer" aria-live="polite"></div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

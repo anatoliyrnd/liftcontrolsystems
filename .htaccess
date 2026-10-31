@@ -1,0 +1,8 @@
+RewriteEngine On
+
+# Если запрос пришел на поддомен org.liftcs.ru
+RewriteCond %{HTTP_HOST} ^org\.liftcs\.ru$ [NC]
+# И он не ведет в папку /admin/
+RewriteCond %{REQUEST_URI} !^/admin/
+# Перенаправляем в /admin/
+RewriteRule ^(.*)$ /admin/$1 [L]
