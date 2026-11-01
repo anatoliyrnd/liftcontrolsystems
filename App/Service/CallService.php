@@ -51,10 +51,7 @@ class CallService
     {
         // === Если тенант на legacy — проксируем ===
         // LegacyProxyService сам конвертирует новый формат в legacy
-        if (
-            $this->tenant && property_exists($this->tenant, 'backendType')
-            && $this->tenant->backendType === 'legacy_proxy'
-        ) {
+        if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('callnew', $data, $user['id']);
 
             if (($result['status'] ?? '') === 'error') {

@@ -40,11 +40,24 @@ final class Registry
     public function save(array $data): void
     {
         if (isset($data['id']) && $data['id']) {
-            $sql = "UPDATE organizations SET org_name=:org_name, db_host=:db_host, db_port=:db_port, 
-                    db_name=:db_name, db_user=:db_user, db_password=:db_password, is_active=:is_active WHERE id=:id";
+            $sql = "UPDATE organizations SET 
+                org_name=:org_name, 
+                db_host=:db_host, 
+                db_port=:db_port,
+                db_name=:db_name, 
+                db_user=:db_user, 
+                db_password=:db_password, 
+                legacy_compat=:legacy_compat,
+                is_active=:is_active 
+                WHERE id=:id";
         } else {
-            $sql = "INSERT INTO organizations (subdomain, org_name, db_host, db_port, db_name, db_user, db_password, is_active) 
-                    VALUES (:subdomain, :org_name, :db_host, :db_port, :db_name, :db_user, :db_password, :is_active)";
+            $sql = "INSERT INTO organizations (
+                    subdomain, org_name, db_host, db_port, db_name, 
+                    db_user, db_password, legacy_compat, is_active
+                ) VALUES (
+                    :subdomain, :org_name, :db_host, :db_port, :db_name, 
+                    :db_user, :db_password, :legacy_compat, :is_active
+                )";
         }
 
         $stmt = self::$pdo->prepare($sql);
@@ -55,6 +68,7 @@ final class Registry
             'db_name' => $data['db_name'],
             'db_user' => $data['db_user'],
             'db_password' => \App\Support\Crypto::encrypt($data['db_password']),
+            'legacy_compat' => (int) ($data['legacy_compat'] ?? 1),
             'is_active' => (int) ($data['is_active'] ?? 1)
         ];
 
@@ -66,7 +80,6 @@ final class Registry
 
         $stmt->execute($params);
     }
-
     public function delete(int $id): void
     {
         $stmt = self::$pdo->prepare("DELETE FROM organizations WHERE id = :id");
