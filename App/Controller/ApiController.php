@@ -38,15 +38,13 @@ final class ApiController
         $noteRepo = new NoteRepository($db);
         $historyRepo = new HistoryRepository($db);
 
-        // ИСПРАВЛЕНО: Передаем URL и секрет
-        $legacyProxy = new LegacyProxyService(\LEGACY_API_URL, \LEGACY_API_SECRET);
-
+        $legacyProxy = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
         $configService = new ConfigService($db);
         $addressService = new AddressService($db);
 
         return new self(
             new AuthService($userRepo),
-            new CallService($callRepo, $noteRepo, $historyRepo, $legacyProxy, $tenant),
+            new CallService($callRepo, $noteRepo, $historyRepo, $legacyProxy, $configService, $tenant),
             $configService,
             $addressService
         );
