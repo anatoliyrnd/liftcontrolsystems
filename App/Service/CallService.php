@@ -40,10 +40,17 @@ class CallService
 
     /**
      * Создание новой заявки (с поддержкой legacy-прокси)
+     * 
+     * Фронтенд отправляет данные в формате API v4.0:
+     * - city_id, street_id, home_id, object_id (вместо address_*)
+     * - department_id, request_id, group_id (вместо call_*)
+     * - repair_time (Unix timestamp)
+     * - staff_id (вместо call_staff)
      */
     public function callnew(array $user, array $data): array
     {
         // === Если тенант на legacy — проксируем ===
+        // LegacyProxyService сам конвертирует новый формат в legacy
         if (
             $this->tenant && property_exists($this->tenant, 'backendType')
             && $this->tenant->backendType === 'legacy_proxy'
@@ -63,7 +70,7 @@ class CallService
             ];
         }
 
-        // === Прямое создание заявки в БД ===
+        // === Прямое создание заявки в БД (новый формат) ===
         $this->validateCallData($data);
 
         // Минимальная длина описания (ТЕХДОЛГ: читать из lift_options.min_length_text)
@@ -78,16 +85,19 @@ class CallService
         }
 
         // Валидация адреса одним JOIN-запросом
+        // Используем новые имена полей от фронтенда
         $address = $this->validateAddress($data);
+
+        // Используем fullAddress из фронтенда
+        $fullAddress = $data['fullAddress'] ?? $address['full_address'];
 
         // Определение alert_level
         $alertLevel = $this->determineAlertLevel($data);
 
-        // Срок ремонта
-        $repairDays = (int) ($data['repair_days'] ?? 3);
-        $expectedRepairTime = time() + ($repairDays * 86400);
+        // Срок ремонта: repair_time приходит как Unix timestamp
+        $expectedRepairTime = $this->resolveRepairTime($data);
 
-        // Формирование данных для INSERT
+        // Формирование данных для INSERT (маппинг в поля БД)
         $callData = [
             'call_status' => 0,
             'call_date' => time(),
@@ -95,17 +105,17 @@ class CallService
             'call_last_name' => $data['call_last_name'] ?? '',
             'call_phone' => $data['call_phone'] ?? '',
             'call_email' => $data['call_email'] ?? '',
-            'call_department' => (int) ($data['call_department'] ?? 22),
-            'call_request' => (int) ($data['call_request'] ?? 0),
-            'call_group' => (int) ($data['call_group'] ?? 0),
-            'call_adres' => $address['full_address'],
+            'call_department' => (int) ($data['department_id'] ?? 22),  // department_id → call_department
+            'call_request' => (int) ($data['request_id'] ?? 0),      // request_id → call_request
+            'call_group' => (int) ($data['group_id'] ?? 0),        // group_id → call_group
+            'call_adres' => $fullAddress,
             'call_details' => $details,
             'call_solution' => '',
-            'call_staff' => (int) ($data['call_staff'] ?? 0),
-            'address_city' => $address['city'],
-            'address_street' => $address['street'],
-            'address_home' => $address['home'],
-            'address_lift' => $address['lift'],
+            'call_staff' => (int) ($data['staff_id'] ?? 0),        // staff_id → call_staff
+            'address_city' => (int) ($data['city_id'] ?? 0),         // city_id → address_city
+            'address_street' => (int) ($data['street_id'] ?? 0),       // street_id → address_street
+            'address_home' => (int) ($data['home_id'] ?? 0),         // home_id → address_home
+            'address_lift' => (int) ($data['object_id'] ?? 0),       // object_id → address_lift
             'elevator_group_id' => (int) $address['group_id'],
             'address_not_verified' => 0,
             'expected_repair_time' => $expectedRepairTime,
@@ -128,6 +138,8 @@ class CallService
 
     /**
      * Редактирование заявки
+     * 
+     * Фронтенд отправляет: call_id, department_id, request_id, group_id, staff_id, notify_status, repair_time, details
      */
     public function calledit(array $user, array $data): array
     {
@@ -153,9 +165,20 @@ class CallService
             throw new ApiException(ErrorCode::Closed, "Заявка уже закрыта");
         }
 
+        // Маппинг полей из нового формата в поля БД
         $fields = [];
+
         if (array_key_exists('details', $data)) {
             $fields['call_details'] = $data['details'];
+        }
+        if (array_key_exists('department_id', $data)) {
+            $fields['call_department'] = (int) $data['department_id'];
+        }
+        if (array_key_exists('request_id', $data)) {
+            $fields['call_request'] = (int) $data['request_id'];
+        }
+        if (array_key_exists('group_id', $data)) {
+            $fields['call_group'] = (int) $data['group_id'];
         }
         if (array_key_exists('staff_id', $data)) {
             $fields['call_staff'] = $data['staff_id'] === null ? 0 : (int) $data['staff_id'];
@@ -178,6 +201,8 @@ class CallService
 
     /**
      * Закрытие заявки
+     * 
+     * Фронтенд отправляет: call_id, solution, user_id
      */
     public function callClose(array $user, array $data): array
     {
@@ -226,6 +251,8 @@ class CallService
 
     /**
      * Добавление комментария
+     * 
+     * Фронтенд отправляет: call_id, note
      */
     public function callnote(array $user, array $data): array
     {
@@ -258,14 +285,18 @@ class CallService
     // Приватные методы
     // ==========================================
 
+    /**
+     * Валидация данных заявки (новый формат API v4.0)
+     */
     private function validateCallData(array $data): void
     {
         if (empty($data['details'])) {
             throw new ApiException(ErrorCode::InvalidInput, 'Описание заявки обязательно');
         }
+        // Проверяем наличие всех компонентов адреса
         if (
-            empty($data['address_city']) || empty($data['address_street'])
-            || empty($data['address_home']) || empty($data['address_lift'])
+            empty($data['city_id']) || empty($data['street_id'])
+            || empty($data['home_id']) || empty($data['object_id'])
         ) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
@@ -274,12 +305,15 @@ class CallService
         }
     }
 
+    /**
+     * Валидация адреса через репозиторий (использует city_id, street_id, home_id, object_id)
+     */
     private function validateAddress(array $data): array
     {
-        $cityId = (int) $data['address_city'];
-        $streetId = (int) $data['address_street'];
-        $homeId = (int) $data['address_home'];
-        $liftId = (int) $data['address_lift'];
+        $cityId = (int) ($data['city_id'] ?? 0);
+        $streetId = (int) ($data['street_id'] ?? 0);
+        $homeId = (int) ($data['home_id'] ?? 0);
+        $liftId = (int) ($data['object_id'] ?? 0);
 
         $address = $this->callRepo->resolveAddress($cityId, $streetId, $homeId, $liftId);
 
@@ -304,12 +338,27 @@ class CallService
     {
         $alertLevel = 1;
 
-        if ((int) ($data['call_department'] ?? 0) === 23) {
+        // department_id в новом формате
+        if ((int) ($data['department_id'] ?? 0) === 23) {
             $alertLevel = 3; // Аварийная служба
-        } elseif ((int) ($data['call_request'] ?? 0) === 1) {
+        } elseif ((int) ($data['request_id'] ?? 0) === 1) {
             $alertLevel = 2; // Срочная
         }
 
         return $alertLevel;
+    }
+
+    /**
+     * Преобразование repair_time (Unix timestamp) в expected_repair_time
+     */
+    private function resolveRepairTime(array $data): int
+    {
+        // repair_time приходит как Unix timestamp от фронтенда
+        if (isset($data['repair_time']) && is_numeric($data['repair_time']) && $data['repair_time'] > 1000000000) {
+            return (int) $data['repair_time'];
+        }
+
+        // Дефолт: 3 дня от текущего момента
+        return time() + (3 * 86400);
     }
 }
