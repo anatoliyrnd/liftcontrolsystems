@@ -1,11 +1,6 @@
 <?php
 declare(strict_types=1);
 
-/**
- * Точка входа для приема заявок от СПульта
- * Использует: Tenant, DB, CallService, SpultClassifier
- */
-
 require_once __DIR__ . '/bootstrap.php';
 
 use App\Tenant;
@@ -71,7 +66,7 @@ try {
         exit('Failed: Organization mismatch');
     }
 
-    // Извлечение данных
+    // Извлечение данных из XML
     $streetRaw = (string) ($xml->DISP->STREET['Name'] ?? '');
     $homeRaw = (string) ($xml->DISP->STREET->HOME['Name'] ?? '');
     $liftName = (string) ($xml->DISP->STREET->HOME->LIFT['Name'] ?? '');
@@ -96,6 +91,9 @@ try {
         $city = trim(substr($streetRaw, $pos + 1));
         $street = trim(substr($streetRaw, 0, $pos));
     }
+
+    // Формируем полный адрес
+    $fullAddress = "{$city}, {$street}, {$homeRaw}, {$liftName}";
 
     // Разрешение адреса
     $cityNameClean = str_replace([' ', '.'], '', $city);
@@ -170,21 +168,25 @@ try {
     // Классификация
     $classification = SpultClassifier::classify($note);
 
-    // Формируем данные для callnew()
+    // ========================================
+    // Формируем данные для callnew() (НОВЫЙ ФОРМАТ API v4.0)
+    // ========================================
     $callData = [
         'call_first_name' => 'SPult ' . ($userSpult ?: 'Auto'),
         'call_last_name' => '',
         'call_phone' => '',
         'call_email' => 'spult@auto.local',
-        'call_department' => $classification['call_department'],
-        'call_request' => $classification['call_request'],
-        'call_group' => $classification['call_group'],
+        'department_id' => $classification['call_department'],
+        'request_id' => $classification['call_request'],
+        'group_id' => $classification['call_group'],
         'details' => $description,
-        'address_city' => $cityId,
-        'address_street' => $streetId,
-        'address_home' => $homeId,
-        'address_lift' => $liftId,
-        'repair_days' => $classification['repair_days'],
+        'fullAddress' => $fullAddress,
+        'city_id' => $cityId,
+        'street_id' => $streetId,
+        'home_id' => $homeId,
+        'object_id' => $liftId,
+        'repair_time' => time() + ($classification['repair_days'] * 86400),
+        'staff_id' => 0,
     ];
 
     // Системный пользователь
