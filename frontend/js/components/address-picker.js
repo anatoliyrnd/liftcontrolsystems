@@ -157,7 +157,7 @@ export function createAddressPicker(opts = {}) {
       }
     }
   }
-
+  window.addEventListener("addresses:updated", loadCities);
   function handleCityChange() {
     const cityId = citySelect.value;
     if (!cityId) {
@@ -441,6 +441,7 @@ export function createAddressPicker(opts = {}) {
       if (debounceTimer) clearTimeout(debounceTimer);
 
       // Удаляем глобальные слушатели
+      window.removeEventListener("addresses:updated", loadCities);
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("scroll", onWindowScroll, true);
       document.removeEventListener("click", onDocClick);

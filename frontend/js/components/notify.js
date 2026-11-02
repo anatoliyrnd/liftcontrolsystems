@@ -224,7 +224,7 @@ function show(type, text, opts = {}) {
         return;
     }
 
-    const toastData = {
+       const toastData = {
         id: 'toast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         type,
         text: cleanText,
@@ -235,7 +235,10 @@ function show(type, text, opts = {}) {
         count: 1,
         element: null,
         timerId: null,
-        closing: false
+        closing: false,
+        // НОВЫЕ ПОЛЯ ДЛЯ КНОПКИ ДЕЙСТВИЯ:
+        actionText: opts.actionText || null,
+        actionCallback: opts.onAction || null
     };
 
     ensureEscapeHandler();
@@ -291,6 +294,19 @@ function renderToast(data) {
             closeToast(data);
         });
         el.appendChild(link);
+    }
+    // НОВЫЙ БЛОК: Кнопка действия (например, "Обновить")
+    if (data.actionText && data.actionCallback) {
+        const actionBtn = document.createElement('button');
+        actionBtn.type = 'button';
+        actionBtn.className = 'toast-action-btn';
+        actionBtn.textContent = data.actionText;
+        actionBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            data.actionCallback(); // Вызываем коллбэк
+            closeToast(data);      // Закрываем тост
+        });
+        el.appendChild(actionBtn);
     }
 
     const closeBtn = document.createElement('button');

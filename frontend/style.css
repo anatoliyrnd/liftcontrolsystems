@@ -2277,3 +2277,35 @@ td.cell-alert-info {
         background-color: var(--table-row-hover);
     }
 }
+/* ==========================================================================
+   КНОПКА ДЕЙСТВИЯ ВНУТРИ ТОСТА (Для PWA Auto-Update)
+   ========================================================================== */
+.toast-action-btn {
+    display: inline-block;
+    margin-top: 8px;
+    margin-right: 10px;
+    padding: 5px 12px;
+    background-color: var(--accent);
+    color: var(--mark-text);
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.toast-action-btn:hover {
+    background-color: var(--accent-hover);
+}
+
+.toast-action-btn:active {
+    transform: scale(0.96);
+}
+
+/* Чтобы кнопка не наезжала на крестик закрытия, 
+   если текст тоста слишком длинный, сделаем его блочным */
+.toast-text {
+    display: block;
+    margin-bottom: 4px;
+}

@@ -20,7 +20,6 @@ export class TicketsController {
     this.dataType = dataType;
     this.selectedDays =
       localStorage.getItem("tablePeriod_" + this.dataType) || "1";
-
     this.rowsCache = [];
 
     // ВОССТАНАВЛИВАЕМ СОРТИРОВКУ ИЗ LOCALSTORAGE
@@ -28,22 +27,24 @@ export class TicketsController {
       "tableSortColumn_" + this.dataType,
     );
     this.currentSortColumnId = savedSortId ? parseInt(savedSortId, 10) : -1;
-
     const savedSortDir = localStorage.getItem("tableSortDir_" + this.dataType);
     this.isAscending = savedSortDir !== "desc"; // По умолчанию true (по возрастанию)
 
     this.refreshIntervalId = null;
-
     this.isLoaded = false;
     this._searchDebounceTimer = null;
     this._isPolling = false;
     this._filtersAbort = null;
-
     this._filters = {
       cities: [],
       hideLongRepair: false,
     };
     this._allCities = [];
+
+    // 🔥 ДОБАВЛЕНО: Защита от повторной подписки и биндинг обработчика
+    this._isSubscribedToAddresses = false;
+    this._onAddressesUpdated = this._onAddressesUpdated.bind(this);
+    
   }
 
   async mount(globalTicketsArrayRef) {
@@ -79,8 +80,8 @@ export class TicketsController {
 
     const loadData = async (isSilent) => {
       const fresh = await this._loadDataFromServer(isSilent);
-
       let offlineTickets = [];
+
       if (this.dataType === "open") {
         const outbox = await offlineDB.getAllFromOutbox();
         offlineTickets = outbox.map((o) => {
@@ -88,7 +89,6 @@ export class TicketsController {
           // Защита от миллисекунд в офлайн-заявках
           const dateInSeconds =
             createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
-
           return {
             ...o.payload,
             id: o.uuid,
@@ -104,14 +104,12 @@ export class TicketsController {
         // 1. Если сеть есть — показываем свежие данные
         globalTicketsArrayRef.length = 0;
         globalTicketsArrayRef.push(...offlineTickets, ...fresh);
-
         // И сохраняем их в кэш (на случай, если следующий раз откроем без сети)
         await offlineDB.saveTickets(this.dataType, fresh);
       } else {
         // 2. Если сети нет (fresh === null) — берем данные из кэша!
         logHistoryAction("Нет соединения. Загрузка из офлайн-кэша...");
         const cached = await offlineDB.getTickets(this.dataType);
-
         if (cached.length > 0) {
           globalTicketsArrayRef.length = 0;
           globalTicketsArrayRef.push(...offlineTickets, ...cached);
@@ -121,6 +119,7 @@ export class TicketsController {
       }
 
       this._renderTableFull(dataTable, globalTicketsArrayRef);
+
       if (this.currentSortColumnId !== -1) {
         this._reApplyCurrentSort();
       }
@@ -144,6 +143,7 @@ export class TicketsController {
           this.unmount();
           return;
         }
+
         if (this._isPolling) return;
         this._isPolling = true;
 
@@ -157,6 +157,12 @@ export class TicketsController {
         }
       }, API.TICKETS_REFRESH_MS);
     }
+
+    // 🔥 ДОБАВЛЕНО: Подписка на событие обновления адресов (с защитой от дублей)
+    if (!this._isSubscribedToAddresses) {
+      window.addEventListener("addresses:updated", this._onAddressesUpdated);
+      this._isSubscribedToAddresses = true;
+    }
   }
 
   unmount() {
@@ -168,12 +174,33 @@ export class TicketsController {
       this._filtersAbort.abort();
       this._filtersAbort = null;
     }
-    this._isPolling = false;
+    this.isPolling = false;
     this.api.abortTag("tickets_" + this.dataType);
 
     if (this._searchDebounceTimer) {
       clearTimeout(this._searchDebounceTimer);
       this._searchDebounceTimer = null;
+    }
+
+    // 🔥 ДОБАВЛЕНО: Отписка от события обновления адресов
+    if (this._isSubscribedToAddresses) {
+      window.removeEventListener("addresses:updated", this._onAddressesUpdated);
+      this._isSubscribedToAddresses = false;
+    }
+  }
+
+  // 🔥 ДОБАВЛЕНО: Обработчик фонового обновления справочника адресов
+  async _onAddressesUpdated() {
+    console.log("[TicketsController] Адреса загружены в фоне, обновляем фильтр городов.");
+    this._allCities = await offlineDB.getCities();
+
+    if (this._allCities.length > 0) {
+      // Если фильтр был пуст (так как кэш был пуст при старте), выбираем все города
+      if (this._filters.cities.length === 0) {
+        this._filters.cities = this._allCities.map((c) => c.id);
+      }
+      this._renderCityDropdown();
+      this._applyLocalFilters(); // Перерисовываем таблицу с новыми городами
     }
   }
 
@@ -219,13 +246,14 @@ export class TicketsController {
 
   _renderTableFull(dataTable, globalTicketsArrayRef) {
     this._currentTicketsRef = globalTicketsArrayRef;
-
     let filteredData = [...globalTicketsArrayRef];
+
     if (this.dataType === "open") {
       // Фильтрация по timestamp (в секундах)
       // Явно переводим Date.now() в секунды
       const nowSeconds = Math.floor(Date.now() / 1000);
       const maxDateTs = nowSeconds + UI.FILTER_REPAIR_DAYS * 24 * 60 * 60;
+
       const cityFilterActive =
         this._allCities.length > 0 && this._filters.cities.length > 0;
 
@@ -237,12 +265,14 @@ export class TicketsController {
         ) {
           return false;
         }
+
         if (this._filters.hideLongRepair) {
           const rTs = Number(t.repair_time);
           if (rTs && rTs > maxDateTs) {
             return false;
           }
         }
+
         return true;
       });
     }
@@ -296,6 +326,7 @@ export class TicketsController {
 
   _initPeriodSelector(globalTicketsArrayRef) {
     if (this.dataType !== "close") return;
+
     const container = document.getElementById("periodSelectorContainer");
     renderPeriodSelector(container, this.selectedDays, (value) => {
       this.unmount();
@@ -359,10 +390,12 @@ export class TicketsController {
 
   _reApplyCurrentSort() {
     if (this.currentSortColumnId === -1) return;
+
     this._applySort(this.currentSortColumnId, this.isAscending);
 
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
+
     const sortedTh = dataTable.querySelector(
       `th[data-id="${this.currentSortColumnId}"]`,
     );
@@ -377,6 +410,7 @@ export class TicketsController {
   refreshFromMemory(ticketsArrayRef) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
+
     this._renderTableFull(dataTable, ticketsArrayRef);
     if (this.currentSortColumnId !== -1) {
       this._reApplyCurrentSort();
@@ -389,9 +423,9 @@ export class TicketsController {
 
     const tbody = dataTable.querySelector("tbody");
     const rows = Array.from(tbody.querySelectorAll("tr"));
-
     sortRows(rows, columnId, isAscending);
     rows.forEach((row) => tbody.appendChild(row));
+
     this._refreshRowsCache();
   }
 
@@ -404,8 +438,8 @@ export class TicketsController {
 
     const savedCities = localStorage.getItem("filter_cities");
     const savedHideLong = localStorage.getItem("filter_hide_long");
-
     this._filters.hideLongRepair = savedHideLong === "true";
+
     const hideCheck = document.getElementById("hideLongRepair");
     if (hideCheck) hideCheck.checked = this._filters.hideLongRepair;
 
@@ -421,6 +455,7 @@ export class TicketsController {
 
     const cityBtn = document.getElementById("cityFilterBtn");
     const cityDropdown = document.getElementById("cityFilterDropdown");
+
     if (!cityBtn || !cityDropdown) return;
 
     let backdrop = document.getElementById("cityFilterBackdrop");
@@ -429,7 +464,6 @@ export class TicketsController {
       backdrop.id = "cityFilterBackdrop";
       backdrop.className = "filter-backdrop";
       document.body.appendChild(backdrop);
-
       backdrop.onclick = () => {
         cityDropdown.style.display = "none";
         backdrop.style.display = "none";
@@ -493,8 +527,8 @@ export class TicketsController {
     const btn = document.getElementById("cityFilterBtn");
     const btnText = document.getElementById("cityFilterText");
     const selectAllCb = document.getElementById("citySelectAll");
-    if (!list || !btn) return;
 
+    if (!list || !btn) return;
     list.innerHTML = "";
 
     if (this._allCities.length === 0) {
@@ -546,6 +580,7 @@ export class TicketsController {
         this._renderCityDropdown();
         this._applyLocalFilters();
       };
+
       list.appendChild(item);
     });
 
@@ -580,6 +615,7 @@ export class TicketsController {
   _applyLocalFilters() {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
+
     // Убрали пустой цикл, оставили только перерисовку
     this._renderTableFull(dataTable, this._currentTicketsRef);
   }
@@ -588,6 +624,7 @@ export class TicketsController {
     const count = await offlineDB.getOutboxCount();
     const btn = document.getElementById("refreshBtn");
     const badge = document.getElementById("syncBadge");
+
     if (!btn || !badge) return;
 
     if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
@@ -616,7 +653,6 @@ export class TicketsController {
       btn.title = `Нажмите, чтобы синхронизировать ${count} офлайн-заявок`;
       badge.textContent = count;
       badge.style.display = "block";
-
       btn.onclick = (e) => {
         e.preventDefault();
         window.dispatchEvent(new Event("triggerSync"));
@@ -625,7 +661,6 @@ export class TicketsController {
       btn.style.color = "var(--text-primary)";
       btn.title = "Перезагрузить данные";
       badge.style.display = "none";
-
       btn.onclick = (e) => {
         if (e) e.preventDefault();
         this.unmount();

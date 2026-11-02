@@ -29,6 +29,7 @@ import { logHistoryAction } from "./js/history-logger.js";
 import { offlineDB } from "./js/offline-db.js";
 import { flattenAddresses } from "./js/utils/address-flattener.js";
 import { syncTableSettingsFromStorage } from "./js/table/settings.js";
+import { registerSW } from 'virtual:pwa-register';
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -119,6 +120,7 @@ async function initAppData() {
       if (response && response.status === "ok") {
         const flatData = flattenAddresses(response);
         await offlineDB.saveAddresses(flatData);
+         window.dispatchEvent(new CustomEvent("addresses:updated"));
         notify.success(`Справочник адресов загружен (${flatData.length} шт.)`, {
           once: true,
         });
@@ -301,14 +303,27 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.syncManagerInstance = syncManager;
   if (navigator.onLine) setTimeout(() => syncManager.startSync(), 1000);
 
-  // 9. Service Worker
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker
-        .register("./sw.js")
-        .catch((err) => console.error("❌ Ошибка SW:", err));
-    });
-  }
+   // 9. Service Worker & PWA Auto-Update
+  const updateSW = registerSW({
+    onNeedRefresh() {
+      // Этот код сработает, когда приложение скачает новую версию в фоне
+      notify.warning("Доступна новая версия приложения", {
+        timeout: 0, // 0 = висит, пока пользователь не закроет или не нажмет кнопку
+        persistent: true,
+        actionText: "Обновить сейчас",
+        onAction: () => {
+          // Передаем true, чтобы после обновления страница перезагрузилась
+          updateSW(true); 
+        }
+      });
+    },
+    onOfflineReady() {
+      notify.success("Приложение готово к работе офлайн", { once: true });
+    },
+    onRegisterError(error) {
+      console.error('❌ Ошибка регистрации SW:', error);
+    }
+  });
 
   // 10. Старт роутера
   router._handleRoute();
