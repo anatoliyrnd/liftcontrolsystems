@@ -18,6 +18,7 @@ class CallService
         private readonly HistoryRepository $historyRepo,
         private readonly LegacyProxyService $legacyProxy,
         private readonly ConfigService $configService,
+        private readonly NotificationsService $notificationsService,
         private readonly ?Tenant $tenant = null
     ) {
     }
@@ -126,7 +127,13 @@ class CallService
         // Запись в историю
         $historyText = "Создана заявка пользователем {$user['name']}";
         $this->historyRepo->add($callId, $historyText, (int) $user['id']);
-
+        // Отправка уведомления
+        $this->notificationsService->ticketCreated(
+            $callId,
+            $fullAddress,
+            $user['name'],
+            (int) $user['id']
+        );
         return [
             'message' => "Заявка №{$callId} успешно создана",
             'call_id' => $callId,
@@ -146,7 +153,7 @@ class CallService
         }
 
         // Legacy-режим
-        if ($this->tenant && property_exists($this->tenant, 'legacyCompat') && $this->tenant->legacyCompat) {
+        if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('calledit', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
                 throw new ApiException(ErrorCode::InternalError, $result['message'] ?? 'Ошибка');
@@ -165,8 +172,22 @@ class CallService
         // Маппинг полей из нового формата в поля БД
         $fields = [];
 
+        // === APPEND-ONLY для details ===
+// Защита от потери данных: если фронтенд прислал только дополнение,
+// добавим его к текущему тексту, а не заменим
         if (array_key_exists('details', $data)) {
-            $fields['call_details'] = $data['details'];
+            $newDetails = trim((string) $data['details']);
+            $currentDetails = (string) ($call['call_details'] ?? '');
+
+            if ($newDetails === '') {
+                // Пустое значение — игнорируем (не удаляем существующее)
+            } elseif ($currentDetails === '' || str_contains($newDetails, $currentDetails)) {
+                // Старое пусто ИЛИ новое содержит старое (фронтенд правильно сформировал)
+                $fields['call_details'] = $newDetails;
+            } else {
+                // Новое НЕ содержит старое — добавляем как дополнение
+                $fields['call_details'] = $currentDetails . "\n\n" . $newDetails;
+            }
         }
         if (array_key_exists('department_id', $data)) {
             $fields['call_department'] = (int) $data['department_id'];
@@ -192,7 +213,7 @@ class CallService
             $this->callRepo->updateFields($callId, $fields);
             $this->historyRepo->add($callId, "Отредактирована пользователем {$user['name']}", (int) $user['id']);
         }
-
+        $this->notificationsService->ticketEdited($callId, $user['name'], (int) $user['id']);
         return ['message' => "Изменения по заявке №{$callId} сохранены."];
     }
 
@@ -214,7 +235,7 @@ class CallService
         }
 
         // Legacy-режим
-        if ($this->tenant && property_exists($this->tenant, 'legacyCompat') && $this->tenant->legacyCompat) {
+        if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('callClose', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
                 throw new ApiException(ErrorCode::InternalError, $result['message'] ?? 'Ошибка');
@@ -242,7 +263,7 @@ class CallService
             "Закрыта пользователем {$user['name']}. Решение: {$solution}",
             (int) $user['id']
         );
-
+        $this->notificationsService->ticketClosed($callId, $solution, $user['name'], (int) $user['id']);
         return ['message' => "Заявка №{$callId} успешно закрыта."];
     }
 
@@ -263,8 +284,9 @@ class CallService
             throw new ApiException(ErrorCode::InvalidInput, 'Текст минимум 6 символов');
         }
 
-        // Legacy-режим
-        if ($this->tenant && property_exists($this->tenant, 'legacyCompat') && $this->tenant->legacyCompat) {
+        // Legacy-режим — проксируем, БЕЗ локального уведомления
+        // (в legacy-БД нет таблицы lift_notifications)
+        if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('callnote', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
                 throw new ApiException(ErrorCode::InternalError, $result['message'] ?? 'Ошибка');
@@ -272,8 +294,10 @@ class CallService
             return ['message' => "Комментарий добавлен (Legacy)."];
         }
 
+        // Новый режим — сохраняем локально + отправляем уведомление
         $this->noteRepo->add($callId, $user['id'], $note);
         $this->historyRepo->add($callId, "Добавлена заметка: {$note}", (int) $user['id']);
+        $this->notificationsService->ticketNote($callId, $user['name'], (int) $user['id']);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
     }

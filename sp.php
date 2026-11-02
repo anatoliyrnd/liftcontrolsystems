@@ -6,7 +6,13 @@ require_once __DIR__ . '/bootstrap.php';
 use App\Tenant;
 use App\Database\DB;
 use App\Repository\{CallRepository, NoteRepository, HistoryRepository};
-use App\Service\{CallService, LegacyProxyService, ConfigService};
+use App\Service\{
+    CallService,
+    LegacyProxyService,
+    ConfigService,
+    NotificationsService,
+    AddressCacheService
+};
 use App\Support\SpultClassifier;
 use App\Exceptions\ApiException;
 use App\Http\ErrorCode;
@@ -83,7 +89,12 @@ try {
     }
     $description = !empty($statuses) ? implode(', ', $statuses) : $note;
 
-    // Город
+    // ========================================
+    // Разрешение адреса (логика как в legacy xml.php)
+    // ========================================
+    $addressChanged = false;  // ← ИНИЦИАЛИЗАЦИЯ
+
+    // Город (из настроек по умолчанию или из улицы через разделитель)
     $city = $parameters['city_default'] ?? 'г. Ростов-на-Дону';
     $street = $streetRaw;
     $pos = strpos($streetRaw, $parameters['city_separator'] ?? '#');
@@ -92,80 +103,140 @@ try {
         $street = trim(substr($streetRaw, 0, $pos));
     }
 
-    // Формируем полный адрес
     $fullAddress = "{$city}, {$street}, {$homeRaw}, {$liftName}";
 
-    // Разрешение адреса
+    error_log(sprintf(
+        'SPult ADDR: raw city="%s" street="%s" home="%s" lift="%s"',
+        $city,
+        $street,
+        $homeRaw,
+        $liftName
+    ));
+
+    // --- ГОРОД ---
     $cityNameClean = str_replace([' ', '.'], '', $city);
     $cityRow = $db->fetchOne(
         "SELECT id FROM lift_city WHERE REPLACE(REPLACE(city_name,' ',''),'.','') = ?",
         [$cityNameClean]
     );
 
-    if (!$cityRow && ($parameters['XML_add'] ?? '0') === '1') {
-        $db->execute("INSERT INTO lift_city (city_name, vis) VALUES (?, 1)", [$city]);
-        $cityRow = $db->fetchOne(
-            "SELECT id FROM lift_city WHERE REPLACE(REPLACE(city_name,' ',''),'.','') = ?",
-            [$cityNameClean]
-        );
+    if (!$cityRow) {
+        if (($parameters['XML_add'] ?? '0') === '1') {
+            error_log("SPult ADDR: Creating city '$city'");
+            $db->execute("INSERT INTO lift_city (city_name, vis) VALUES (?, 1)", [$city]);
+            $cityRow = $db->fetchOne(
+                "SELECT id FROM lift_city WHERE REPLACE(REPLACE(city_name,' ',''),'.','') = ?",
+                [$cityNameClean]
+            );
+            $addressChanged = true;
+        } else {
+            error_log("SPult ADDR: City '$city' not found, XML_add disabled");
+        }
     }
     $cityId = (int) ($cityRow['id'] ?? 0);
+    error_log("SPult ADDR: city_id = $cityId");
 
+    // --- УЛИЦА ---
     $streetNameClean = str_replace([' ', '.'], '', $street);
     $streetRow = $cityId ? $db->fetchOne(
         "SELECT id FROM lift_street WHERE REPLACE(REPLACE(street_name,' ',''),'.','') = ? AND city_id = ?",
         [$streetNameClean, $cityId]
     ) : null;
 
-    if (!$streetRow && $cityId && ($parameters['XML_add'] ?? '0') === '1') {
-        $db->execute(
-            "INSERT INTO lift_street (street_name, city_id, timestamp, vis) VALUES (?, ?, CURRENT_TIMESTAMP, 1)",
-            [$street, $cityId]
-        );
-        $streetRow = $db->fetchOne(
-            "SELECT id FROM lift_street WHERE REPLACE(REPLACE(street_name,' ',''),'.','') = ? AND city_id = ?",
-            [$streetNameClean, $cityId]
-        );
+    if (!$streetRow && $cityId) {
+        if (($parameters['XML_add'] ?? '0') === '1') {
+            error_log("SPult ADDR: Creating street '$street' in city_id=$cityId");
+            $db->execute(
+                "INSERT INTO lift_street (street_name, city_id, vis) VALUES (?, ?, 1)",
+                [$street, $cityId]
+            );
+            $streetRow = $db->fetchOne(
+                "SELECT id FROM lift_street WHERE REPLACE(REPLACE(street_name,' ',''),'.','') = ? AND city_id = ?",
+                [$streetNameClean, $cityId]
+            );
+            $addressChanged = true;
+        } else {
+            error_log("SPult ADDR: Street '$street' not found, XML_add disabled");
+        }
     }
     $streetId = (int) ($streetRow['id'] ?? 0);
+    error_log("SPult ADDR: street_id = $streetId");
 
-    $homeClean = str_replace([' ', '.', 'д', 'д.'], '', $homeRaw);
+    // --- ДОМ (нормализация как в legacy xml.php) ---
+    $homeNormalized = str_replace('д.', '', $homeRaw);
+    $homeNameClean = str_replace([' ', '.'], '', $homeNormalized);
+
     $homeRow = $streetId ? $db->fetchOne(
-        "SELECT id FROM lift_home WHERE REPLACE(REPLACE(home_name,' ',''),'.','') = ? AND street_id = ?",
-        [$homeClean, $streetId]
+        "SELECT id FROM lift_home WHERE REPLACE(REPLACE(REPLACE(home_name,'д.',''),' ',''),'.','') = ? AND street_id = ?",
+        [$homeNameClean, $streetId]
     ) : null;
 
-    if (!$homeRow && $streetId && ($parameters['XML_add'] ?? '0') === '1') {
-        $db->execute(
-            "INSERT INTO lift_home (home_name, street_id, timestamp, vis) VALUES (?, ?, CURRENT_TIMESTAMP, 1)",
-            [$homeRaw, $streetId]
-        );
-        $homeRow = $db->fetchOne(
-            "SELECT id FROM lift_home WHERE REPLACE(REPLACE(home_name,' ',''),'.','') = ? AND street_id = ?",
-            [$homeClean, $streetId]
-        );
+    if (!$homeRow && $streetId) {
+        if (($parameters['XML_add'] ?? '0') === '1') {
+            error_log(sprintf(
+                "SPult ADDR: Creating home '%s' (clean: '%s') on street_id=%d",
+                $homeRaw,
+                $homeNameClean,
+                $streetId
+            ));
+            $db->execute(
+                "INSERT INTO lift_home (home_name, street_id, vis) VALUES (?, ?, 1)",
+                [$homeRaw, $streetId]
+            );
+            $homeRow = $db->fetchOne(
+                "SELECT id FROM lift_home WHERE REPLACE(REPLACE(REPLACE(home_name,'д.',''),' ',''),'.','') = ? AND street_id = ?",
+                [$homeNameClean, $streetId]
+            );
+            error_log(sprintf(
+                "SPult ADDR: After INSERT homeRow = %s",
+                $homeRow ? "id=" . $homeRow['id'] : "NULL"
+            ));
+            $addressChanged = true;
+        } else {
+            error_log("SPult ADDR: Home '$homeRaw' not found, XML_add disabled");
+        }
     }
     $homeId = (int) ($homeRow['id'] ?? 0);
+    error_log("SPult ADDR: home_id = $homeId");
 
+    // --- ЛИФТ (нормализация как в legacy xml.php) ---
     $liftNameClean = str_replace([' ', '.'], '', $liftName);
+
     $liftRow = $homeId ? $db->fetchOne(
         "SELECT id FROM lift_object WHERE REPLACE(REPLACE(object_name,' ',''),'.','') = ? AND home_id = ?",
         [$liftNameClean, $homeId]
     ) : null;
 
-    if (!$liftRow && $homeId && ($parameters['XML_add'] ?? '0') === '1') {
-        $db->execute(
-            "INSERT INTO lift_object (object_name, home_id, timestamp, vis, abbreviated_name, group_id) VALUES (?, ?, CURRENT_TIMESTAMP, 1, ?, 1)",
-            [$liftName, $homeId, $spultId]
-        );
-        $liftRow = $db->fetchOne(
-            "SELECT id FROM lift_object WHERE REPLACE(REPLACE(object_name,' ',''),'.','') = ? AND home_id = ?",
-            [$liftNameClean, $homeId]
-        );
+    if (!$liftRow && $homeId) {
+        if (($parameters['XML_add'] ?? '0') === '1') {
+            error_log(sprintf(
+                "SPult ADDR: Creating lift '%s' (spult_id=%s) in home_id=%d",
+                $liftName,
+                $spultId,
+                $homeId
+            ));
+            $db->execute(
+                "INSERT INTO lift_object (object_name, home_id, vis, abbreviated_name, group_id) 
+                 VALUES (?, ?, 1, ?, 1)",
+                [$liftName, $homeId, $spultId]
+            );
+            $liftRow = $db->fetchOne(
+                "SELECT id FROM lift_object WHERE REPLACE(REPLACE(object_name,' ',''),'.','') = ? AND home_id = ?",
+                [$liftNameClean, $homeId]
+            );
+            error_log(sprintf(
+                "SPult ADDR: After INSERT liftRow = %s",
+                $liftRow ? "id=" . $liftRow['id'] : "NULL"
+            ));
+            $addressChanged = true;
+        } else {
+            error_log("SPult ADDR: Lift '$liftName' not found, XML_add disabled");
+        }
     }
     $liftId = (int) ($liftRow['id'] ?? 0);
+    error_log("SPult ADDR: object_id = $liftId");
 
-    // Классификация
+    // --- КЛАССИФИКАЦИЯ ---
     $classification = SpultClassifier::classify($note);
 
     // ========================================
@@ -196,13 +267,25 @@ try {
         'role' => 'administrator',
     ];
 
-    // Создаём заявку через CallService
+    // === ИНВАЛИДАЦИЯ КЭША ДО создания заявки ===
+// Фронтенд поллит notifications endpoint каждые 120 сек,
+// и должен увидеть обновление версий справочников сразу
+    if ($addressChanged) {
+        $addressCache = new \App\Service\AddressCacheService($db);
+        $addressCache->invalidateCache();
+        error_log('SPult ADDR: Address cache invalidated (version incremented)');
+    }
+
+    // Создаём заявку через CallService (с NotificationsService!)
+    $notificationsService = new \App\Service\NotificationsService($db);
+
     $callService = new CallService(
         new CallRepository($db),
         new NoteRepository($db),
         new HistoryRepository($db),
         new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? ''),
         new ConfigService($db),
+        $notificationsService,
         $tenant
     );
 
@@ -211,7 +294,6 @@ try {
     http_response_code(200);
     header('Content-Type: text/plain');
     echo "OK: " . ($result['message'] ?? 'Created');
-
 } catch (ApiException $e) {
     error_log('SPult ApiException: ' . $e->getMessage());
     http_response_code(400);
