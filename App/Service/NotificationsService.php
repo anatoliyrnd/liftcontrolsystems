@@ -109,15 +109,14 @@ final class NotificationsService
         ];
     }
 
-    /**
-     * Очистить старые уведомления (старше 7 дней)
-     */
     public function cleanup(): void
     {
-        $weekAgo = time() - (7 * 24 * 3600);
+        // 30 минут = 30 * 60 секунд
+        $thirtyMinutesAgo = time() - (30 * 60); 
+        
         $this->db->execute(
-            "DELETE FROM lift_notifications WHERE created_at < :week_ago",
-            ['week_ago' => $weekAgo]
+            "DELETE FROM lift_notifications WHERE created_at < :thirty_min_ago",
+            ['thirty_min_ago' => $thirtyMinutesAgo]
         );
     }
 
@@ -126,6 +125,12 @@ final class NotificationsService
      */
     private function create(array $data): void
     {
+        // Вероятностная очистка: 20% шанс запустить удаление старых записей 
+        
+        if (random_int(1, 100) <= 20) {
+            $this->cleanup();
+        }
+
         $sql = "INSERT INTO lift_notifications 
                 (event_type, ticket_id, user_id, text, sound, timeout, created_at)
                 VALUES 

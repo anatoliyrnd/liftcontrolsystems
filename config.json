@@ -1,0 +1,57 @@
+{
+  "user_permissions": {
+    "role": "administrator",
+    "can_add_ticket": true,
+    "can_view_reports": true,
+    "can_view_settings": true
+  },
+  "menu_structure": [
+    {
+      "id": "create",
+      "title": "Добавить заявку",
+      "type": "icon-button",
+      "icon_svg": "<svg viewBox='0 0 24 24' width='20' height='20' fill='currentColor'><path d='M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z'/></svg>",
+      "target_hash": "#/create",
+      "required_permission": "can_add_ticket"
+    },
+    {
+      "id": "open_tickets",
+      "title": "Открытые заявки",
+      "type": "nav-link",
+      "target_hash": "#/",
+      "is_default": true
+    },
+    {
+      "id": "closed_tickets",
+      "title": "Закрытые заявки",
+      "type": "nav-link",
+      "target_hash": "#/closed"
+    },
+    {
+      "id": "reports",
+      "title": "Отчеты",
+      "type": "nav-link",
+      "target_hash": "#/reports",
+      "required_permission": "can_view_reports"
+    },
+    {
+      "id": "addresses",
+      "title": "Адреса",
+      "type": "nav-link",
+      "target_hash": "#/addresses"
+    },
+    {
+      "id": "settings",
+      "title": "Настройки",
+      "type": "nav-link",
+      "target_hash": "#/settings",
+      "required_permission": "can_view_settings"
+    },
+    {
+      "id": "more",
+      "title": "Прочее",
+      "type": "nav-link",
+      "target_hash": "#/more"
+    }
+  ]
+}
