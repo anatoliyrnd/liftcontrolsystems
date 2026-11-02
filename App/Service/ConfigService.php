@@ -3,41 +3,32 @@ declare(strict_types=1);
 namespace App\Service;
 
 use App\Database\DB;
+use App\Tenant;
 
 final class ConfigService
 {
-    public function __construct(private readonly DB $db)
-    {
+    public function __construct(
+        private readonly DB $db,
+        private readonly Tenant $tenant
+    ) {
     }
 
+    // ✅ Убрали $includeLegacy из аргументов
     public function getConfig(array $user): array
     {
         // Получаем флаги для доп. проверок
         $u = $this->db->fetchOne("SELECT user_add_call FROM lift_users WHERE user_id = :id", ['id' => $user['id']]) ?: [];
 
-        // ДОВЕРЯЕМ РОЛИ ИЗ AuthService, а не старым флагам!
+        // ДОВЕРЯЕМ РОЛИ ИЗ AuthService
         $role = $user['role'] ?? 'guest';
-
         $isAdmin = ($role === 'administrator');
         $isDisp = ($role === 'dispatcher');
         $canAdd = $isAdmin || $isDisp || !empty($u['user_add_call']);
         $readAll = $isAdmin || $isDisp;
 
-        // Старый формат прав (для совместимости)
-        $nav = [
-            $user['id'],       // 0: user_id
-            $readAll,          // 1: read_all
-            $isAdmin || $isDisp, // 2: edit_call
-            $isAdmin || $isDisp, // 3: close_call
-            true,              // 4: note_call
-            $canAdd,           // 5: add_call
-            $isAdmin,          // 6: edit_user
-            $isAdmin,          // 7: edit_obj
-            $isAdmin           // 8: local_admin
-        ];
-
         // Новый формат меню (v4.0)
         $menu = [];
+        
         if ($canAdd) {
             $menu[] = [
                 'id' => 'create',
@@ -48,19 +39,31 @@ final class ConfigService
                 'required_permission' => 'can_add_ticket'
             ];
         }
+        
         $menu[] = ['id' => 'open_tickets', 'title' => 'Открытые заявки', 'type' => 'nav-link', 'target_hash' => '#/', 'is_default' => true];
         $menu[] = ['id' => 'closed_tickets', 'title' => 'Закрытые заявки', 'type' => 'nav-link', 'target_hash' => '#/closed'];
 
-        return [
+        if ($isAdmin || $isDisp) {
+            $menu[] = ['id' => 'reports', 'title' => 'Отчеты', 'type' => 'nav-link', 'target_hash' => '#/reports'];
+            $menu[] = ['id' => 'addresses', 'title' => 'Адреса', 'type' => 'nav-link', 'target_hash' => '#/addresses'];
+        }
+
+        if ($isAdmin) {
+            $menu[] = ['id' => 'settings', 'title' => 'Настройки', 'type' => 'nav-link', 'target_hash' => '#/settings'];
+        }
+
+        $menu[] = ['id' => 'more', 'title' => 'Прочее', 'type' => 'nav-link', 'target_hash' => '#/more'];
+
+        $result = [
             'user_permissions' => [
                 'role' => $role,
                 'user_id' => $user['id'],
                 'can_add_ticket' => $canAdd,
-                'can_view_reports' => true,
-                'can_view_settings' => true
+                'can_view_reports' => $isAdmin || $isDisp,
+                'can_view_settings' => $isAdmin
             ],
+            'is_legacy' => $this->tenant->legacyCompat, // Отдаем флаг на фронт
             'menu_structure' => $menu,
-            'nav' => $nav,
             'staff' => $this->getDict(5),
             'staff_list' => $this->getStaffList(),
             'department' => $this->getDict(1),
@@ -68,6 +71,24 @@ final class ConfigService
             'group' => $this->getDict(3),
             'repair_time' => ['не указан', '30 мин', 'Сегодня', 'Завтра', 'Три дня', '7 дней', '10 дней', '15 дней', '1 месяц', '3 месяца']
         ];
+
+        // 🔥 ИСПРАВЛЕНО: Проверяем свойство тенанта, а не аргумент
+        if ($this->tenant->legacyCompat) {
+            $nav = [
+                $user['id'],           // 0: user_id
+                $readAll,              // 1: read_all
+                $isAdmin || $isDisp,   // 2: edit_call
+                $isAdmin || $isDisp,   // 3: close_call
+                true,                  // 4: note_call
+                $canAdd,               // 5: add_call
+                $isAdmin,              // 6: edit_user
+                $isAdmin,              // 7: edit_obj
+                $isAdmin               // 8: local_admin
+            ];
+            $result['nav'] = $nav;
+        }
+
+        return $result;
     }
 
     private function getDict(int $type): array

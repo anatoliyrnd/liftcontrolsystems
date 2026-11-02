@@ -58,7 +58,7 @@ final class ApiController
         $historyRepo = new HistoryRepository($db);
 
         $legacyProxy = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
-        $configService = new ConfigService($db);
+       $configService = new ConfigService($db, $tenant); 
         $addressService = new AddressService($db);
         $notificationsService = new NotificationsService($db);
         $addressCacheService = new AddressCacheService($db);
@@ -91,7 +91,7 @@ final class ApiController
 
         return match ($request->action) {
             'config' => new Response(['status' => 'ok'] + $this->configService->getConfig($user)),
-            'loadAddress' => Response::ok(['action' => 'loadAddress', 'message' => $this->addressService->getAddresses()]),
+               'loadAddress' => Response::ok(['action' => 'loadAddress', 'message' => $this->addressService->getAddresses()]),
             'open' => new Response($this->callService->open($user)),
             'close' => new Response($this->callService->close($user, $request->input('period'))),
             'calledit' => Response::ok($this->callService->calledit($user, $request->body)),
