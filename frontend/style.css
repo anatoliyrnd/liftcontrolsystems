@@ -647,7 +647,7 @@ th.no-drag {
     }
 }
 
-@media screen and (max-width: 920px) {
+@media screen and (max-width: 768px) {
     .menu-hamburger-trigger {
         display: inline-flex !important;
         background: var(--bg-secondary);
@@ -742,7 +742,7 @@ table[data-mode="open"] td[data-col-id="close_date"] {
 }
 
 /* Медиа-запрос: Если экран сужается меньше 920px (мобильные, планшеты, сжатая IDE) */
-@media screen and (max-width: 920px) {
+@media screen and (max-width: 768px) {
     /* Переводим сетку в один вертикальный столбец */
     .ticket-card-layout-grid {
         grid-template-columns: 1fr !important;
@@ -2308,4 +2308,218 @@ td.cell-alert-info {
 .toast-text {
     display: block;
     margin-bottom: 4px;
+}
+/* ==========================================================================
+   БЕЙДЖИ ОЖИДАНИЯ СИНХРОНИЗАЦИИ В ТАБЛИЦЕ
+   ========================================================================== */
+
+#dataTable tbody tr.row-offline-close td[data-col-id="id"]::after,
+#dataTable tbody tr.row-offline-edit td[data-col-id="id"]::after,
+#dataTable tbody tr.row-offline-comment td[data-col-id="id"]::after {
+    content: ' ⏳';
+    font-size: 11px;
+    opacity: 0.9;
+    margin-left: 2px;
+}
+
+#dataTable tbody tr.row-offline-close {
+    opacity: 0.75;
+}
+
+#dataTable tbody tr.row-offline-close td[data-col-id="id"]::after {
+    content: ' ⏳';
+    color: #f59e0b;
+}
+
+#dataTable tbody tr.row-offline-edit td[data-col-id="id"]::after {
+    color: var(--accent);
+}
+
+#dataTable tbody tr.row-offline-comment td[data-col-id="id"]::after {
+    color: #f59e0b;
+    opacity: 0.6;
+}
+/* ==========================================================================
+   ФАЗА 4 — ИНДИКАТОР ОЧЕРЕДИ, ПЛАШКА ОФЛАЙН, ОЧЕРЕДЬ, МОДАЛКА ДУБЛЕЙ
+   ========================================================================== */
+
+/* ---- Индикатор в шапке ---- */
+.sync-indicator {
+    position: relative;
+    background: transparent;
+    border: 2px solid var(--border-color);
+    color: var(--text-secondary);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+.sync-indicator:hover { background: var(--bg-primary); border-color: var(--accent); color: var(--accent); }
+.sync-indicator svg { width: 20px; height: 20px; }
+
+.sync-indicator.sync-idle    { color: #22c55e; border-color: rgba(34,197,94,0.4); }
+.sync-indicator.sync-pending { color: #f59e0b; border-color: rgba(245,158,11,0.6); }
+.sync-indicator.sync-error   { color: #ef4444; border-color: rgba(239,68,68,0.7); animation: syncIndicatorPulse 2s ease-in-out infinite; }
+
+@keyframes syncIndicatorPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+    50%      { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+}
+
+.sync-indicator-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    background: currentColor;
+    color: #fff;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid var(--bg-secondary);
+    box-sizing: border-box;
+}
+.sync-indicator.sync-pending .sync-indicator-badge { background: #f59e0b; }
+.sync-indicator.sync-error   .sync-indicator-badge { background: #ef4444; }
+
+/* ---- Плашка «Вы офлайн» ---- */
+.offline-banner {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: rgba(245, 158, 11, 0.15);
+    border-bottom: 2px solid #f59e0b;
+    color: #d97706;
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+.offline-banner.offline-banner--error {
+    background: rgba(239, 68, 68, 0.15);
+    border-bottom-color: #ef4444;
+    color: #ef4444;
+}
+.offline-banner-btn {
+    background: transparent;
+    border: 1px solid currentColor;
+    color: inherit;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+.offline-banner-btn:hover { background: rgba(255,255,255,0.1); }
+
+/* ---- Экран очереди ---- */
+#queueTable { font-size: 13px; }
+#queueTable th { font-size: 12px; }
+#queueTable td { white-space: nowrap; }
+#queueTable .queue-delete-btn {
+    background: transparent;
+    border: 1px solid #ef4444;
+    color: #ef4444;
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+#queueTable .queue-delete-btn:hover {
+    background: rgba(239,68,68,0.1);
+}
+
+/* ---- Модалка дубликатов ---- */
+.duplicate-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100000;
+    padding: 16px;
+    transition: background 0.2s ease;
+}
+.duplicate-modal-overlay--visible {
+    background: rgba(0, 0, 0, 0.45);
+}
+.duplicate-modal {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    width: 100%;
+    max-width: 480px;
+    padding: 20px;
+    color: var(--text-primary);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.duplicate-modal-overlay--visible .duplicate-modal {
+    opacity: 1;
+    transform: translateY(0);
+}
+.duplicate-modal-btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    transition: background 0.15s ease;
+}
+.duplicate-modal-btn--cancel {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.duplicate-modal-btn--cancel:hover { background: var(--table-row-hover); }
+.duplicate-modal-btn--confirm {
+    background: var(--accent);
+    color: var(--mark-text);
+    border-color: var(--accent);
+}
+.duplicate-modal-btn--confirm:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+@media (max-width: 768px) {
+    .sync-indicator { width: 38px; height: 38px; }
+    .offline-banner { font-size: 12px; padding: 6px 10px; }
+}
+/* ==========================================================================
+   ЖЕСТКАЯ ФИКСАЦИЯ ДВУХ КОЛОНОК ДЛЯ ДЕСКТОПА
+   ========================================================================== */
+@media screen and (min-width: 769px) {
+    .ticket-card-layout-grid {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 2rem !important;
+        align-items: stretch !important;
+    }
+    
+    .ticket-info-panel, 
+    .ticket-notes-panel {
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+    }
 }

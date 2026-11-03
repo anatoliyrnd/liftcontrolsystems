@@ -12,7 +12,8 @@ import { appState } from './app-state.js';
 import { escapeHtml } from './utils/escape-html.js';
 import { offlineDB } from './offline-db.js';
 import { nowTs, formatTs } from './utils/date-utils.js';
-import { authStore } from './auth-store.js'; // Добавлено для fallback user_id
+import { authStore } from './auth-store.js';
+import { outboxQueue } from './outbox-queue.js';
 
 const CAPS_REGEX = VALIDATION.CAPS_REGEX;
 const MIN_SOLUTION_LEN = VALIDATION.MIN_SOLUTION_LEN;
@@ -62,6 +63,7 @@ export class DetailsController {
         this._staffChangedInSession = false;
         this._autoOpenPending = false;
         this._ticketSnapshot = null;
+        this._pendingCommands = [];
     }
 
     async mount(ticketId, combinedTicketsArray = []) {
@@ -99,10 +101,10 @@ export class DetailsController {
         }
 
         this.ticket = ticket;
+        await this._applyPendingToTicket();
         this._renderCard(container);
     }
 
-    // ИСПРАВЛЕНО: Добавлены поля ID ('staff_id', 'staff_id2', 'staff_id3')
     async _refreshTicketAfterSave() {
         try {
             const fresh = await this._fetchTicketFromServer(this.ticket.id);
@@ -143,6 +145,62 @@ export class DetailsController {
         return null;
     }
 
+    async _applyPendingToTicket() {
+        this._pendingCommands = [];
+        if (!this.ticket || !this.ticket.id || this.ticket.isOffline) return;
+        if (String(this.ticket.id).startsWith('offline_')) return;
+
+        const cmds = await outboxQueue.getPendingByTicket(this.ticket.id);
+        this._pendingCommands = cmds;
+
+        for (const cmd of cmds) {
+            const p = cmd.payload || {};
+
+            if (cmd.command_type === 'EditTicket') {
+                if (p.staff_id != null && (!this.ticket.staff_id || this.ticket.staff_id === '0')) {
+                    this.ticket.staff_id = p.staff_id;
+                    this.ticket.staff_name = staffStore.getById(p.staff_id)?.name || null;
+                    this.ticket._pendingStaff = true;
+                }
+                if (p.notify_status != null && (!this.ticket.notify_status || this.ticket.notify_status === 0)) {
+                    this.ticket.notify_status = p.notify_status;
+                    this.ticket.notify_date = cmd.created_at;
+                    this.ticket._pendingNotify = true;
+                }
+                if (p.repair_time != null && (!this.ticket.repair_time || this.ticket.repair_time === '0')) {
+                    this.ticket.repair_time = p.repair_time;
+                    this.ticket._pendingRepair = true;
+                }
+                if (p.details) {
+                    this.ticket.details = (this.ticket.details || '')
+                        + (this.ticket.details ? '\n\n' : '')
+                        + p.details;
+                    this.ticket._pendingDetails = true;
+                }
+            } else if (cmd.command_type === 'AddComment') {
+                if (!Array.isArray(this.ticket.note)) {
+                    this.ticket.note = this.ticket.note ? Object.values(this.ticket.note) : [];
+                }
+                this.ticket.note.push({
+                    id: 'pending_' + cmd.command_uuid,
+                    user: cmd.offline_author_name || 'Вы',
+                    body: p.text || '',
+                    date: cmd.created_at,
+                    type: 0,
+                    _pending: true
+                });
+                this.ticket.note_num = (this.ticket.note_num || 0) + 1;
+            } else if (cmd.command_type === 'CloseTicket') {
+                this.ticket._pendingClose = {
+                    solution: p.solution || '',
+                    close_date: cmd.created_at,
+                    close_name: cmd.offline_author_name || '—',
+                    command_uuid: cmd.command_uuid
+                };
+            }
+        }
+    }
+
     _getTicketSnapshotKeys() {
         return [
             'details', 'repair_time',
@@ -168,19 +226,30 @@ export class DetailsController {
     _renderCard(container) {
         const t = this.ticket;
         const isOffline = t.isOffline === true;
-        const isOpen = t.type !== 'close';
-        const isClosed = t.type === 'close';
+        const pendingClose = t._pendingClose || null;
+        const isClosed = t.type === 'close' || !!pendingClose;
+        const isOpen = !isClosed;
 
         const isAssigned = userStore.isAssignedTo(t, userStore.userId);
-        const canEdit = userStore.can('add_details', { isAssigned });
-        const canClose = isOpen && (
+        const canEdit = isOpen && !isOffline && !pendingClose && userStore.can('add_details', { isAssigned });
+        const canClose = isOpen && !isOffline && !pendingClose && (
             userStore.can('close_ticket', { isAssigned }) ||
             Number(t.closureallowed) === 1
         );
 
-        const statusLabel = isOpen ? 'В РАБОТЕ' : 'ЗАКРЫТА';
-        const statusBg = isOpen ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)';
-        const statusColor = isOpen ? '#ef4444' : '#22c55e';
+        const pendingList = this._pendingCommands || [];
+        const hasPendingEdit = pendingList.some(c => c.command_type === 'EditTicket');
+        const hasPendingComment = pendingList.some(c => c.command_type === 'AddComment');
+
+        const statusLabel = isClosed
+            ? (pendingClose ? '⏳ ЗАКРЫТА ЛОКАЛЬНО' : 'ЗАКРЫТА')
+            : (hasPendingEdit ? '⏳ В РАБОТЕ (изменена)' : 'В РАБОТЕ');
+        const statusBg = isClosed ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
+        const statusColor = isClosed ? '#22c55e' : '#ef4444';
+
+        const solutionText = pendingClose ? pendingClose.solution : (t.solution || '');
+        const closeDate    = pendingClose ? pendingClose.close_date : t.close_date;
+        const closeName    = pendingClose ? pendingClose.close_name : (t.close_name || '—');
 
         container.innerHTML = `
             <div class="ticket-card-layout-grid">
@@ -198,6 +267,18 @@ export class DetailsController {
                     ${isOffline ? `
                     <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 8px; padding: 10px; color: #d97706; font-size: 13px; font-weight: 600; text-align: center; margin-top: 5px;">
                         ⏳ Заявка ожидает синхронизации с сервером. Редактирование недоступно.
+                    </div>` : ''}
+                    ${pendingClose && !isOffline ? `
+                    <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 8px; padding: 10px; color: #d97706; font-size: 13px; font-weight: 600; text-align: center; margin-top: 5px;">
+                        ⏳ Закрыта локально. Ожидает синхронизации с сервером.
+                    </div>` : ''}
+                    ${hasPendingEdit && !pendingClose && !isOffline ? `
+                    <div style="background: rgba(99, 102, 241, 0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 10px; color: var(--accent); font-size: 12px; font-weight: 600; text-align: center; margin-top: 5px;">
+                        ⏳ Есть неотправленные изменения. Синхронизируются при восстановлении сети.
+                    </div>` : ''}
+                    ${hasPendingComment && !hasPendingEdit && !pendingClose && !isOffline ? `
+                    <div style="background: rgba(99, 102, 241, 0.08); border-radius: 6px; padding: 6px 8px; color: var(--text-secondary); font-size: 11px; text-align: center; margin-top: 5px;">
+                        ⏳ Есть неотправленный комментарий.
                     </div>` : ''}
                         
                     <div id="ticketScrollArea" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; padding-right: 6px;">
@@ -249,21 +330,28 @@ export class DetailsController {
 
                             ${isClosed ? `
                             <div class="info-group" style="border-top: 1px dashed var(--border-color); padding-top: 1rem;">
-                                <label style="font-size: 11px; font-weight: 700; color: #22c55e; text-transform: uppercase;">✅ Принятое решение</label>
-                                <div style="font-size: 14px; margin-top: 2px; font-weight: 500; white-space: pre-wrap;">${escapeHtml(t.solution || '—')}</div>
+                                <label style="font-size: 11px; font-weight: 700; color: #22c55e; text-transform: uppercase;">
+                                    ${pendingClose ? '⏳ Решение (ожидает синхронизации)' : '✅ Принятое решение'}
+                                </label>
+                                <div style="font-size: 14px; margin-top: 2px; font-weight: 500; white-space: pre-wrap;">${escapeHtml(solutionText || '—')}</div>
                                 
                                 <div style="font-size: 13px; color: var(--text-secondary); margin-top: 8px;">
-                                    Закрыл: <b>${escapeHtml(t.close_name || '—')}</b> · ${formatTs(t.close_date)}
+                                    Закрыл: <b>${escapeHtml(closeName)}</b> · ${formatTs(closeDate)}
                                 </div>
 
-                                ${(userStore.isAdmin() && t.full_history) ? `
+                                ${pendingClose ? `
+                                <div style="margin-top: 8px; padding: 8px; border-radius: 6px; background: rgba(245,158,11,0.08); border: 1px solid #f59e0b; color: #d97706; font-size: 12px;">
+                                    Действие будет синхронизировано при восстановлении сети.
+                                </div>` : ''}
+
+                                ${(!pendingClose && userStore.isAdmin() && t.full_history) ? `
                                 <details style="margin-top: 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary);">
                                     <summary style="cursor: pointer; font-size: 12px; font-weight: 600; padding: 8px 12px; user-select: none; outline: none;">📜 Показать полную историю</summary>
                                     <div style="font-size: 12px; padding: 0 12px 12px; white-space: pre-wrap; color: var(--text-secondary);">${formatFullHistory(t.full_history)}</div>
                                 </details>
                                 ` : ''}
                             </div>` : ''}
-                        </div>
+                        </div> <!-- ⬅️ КОНЕЦ ticketBodyBlock -->
 
                         <div id="closeBlock" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 1rem;">
                             <label style="font-size: 11px; font-weight: 700; color: #22c55e; text-transform: uppercase;">🔒 Решение по заявке</label>
@@ -276,7 +364,7 @@ export class DetailsController {
                             </label>
                         </div>
                         <div id="editErrorBanner" style="display: none; padding: 8px 12px; background: rgba(239,68,68,0.1); border: 1px solid #ef4444; border-radius: 8px; color: #ef4444; font-size: 13px;"></div>
-                    </div>
+                    </div> <!-- ⬅️ КОНЕЦ ticketScrollArea -->
 
                     <div class="ticket-actions-footer">
                         <button class="menu-item" id="backBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">← Вернуться в журнал</button>
@@ -295,8 +383,9 @@ export class DetailsController {
                     </h3>
                     <div id="notesContainerDOM" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 5px; margin-bottom: 8px; min-height: 0;"></div>
 
-                    ${userStore.can('add_note', { isAssigned: userStore.isAssignedTo(t, userStore.userId) }) ? `
-                    <div id="noteComposer" style="border-top: 1px dashed var(--border-color); padding-top: 10px; flex-shrink: 0;"></div>
+                                       <!-- Поле ввода показываем только для открытых заявок -->
+                    ${!isClosed ? `
+                    <div id="noteComposer" style="border-top: 1px dashed var(--border-color); padding-top: 10px; flex-shrink: 0; display: flex; flex-direction: column;"></div>
                     ` : ''}
                 </div>
             </div>
@@ -444,8 +533,13 @@ export class DetailsController {
 
         const keyStaffId = 'staff_id' + suffix;
         const isNewlyAssigned = keyStaffId in this.pendingChanges;
+        
+        // ИСПРАВЛЕНО: Синтаксическая ошибка (добавлено продолжение условия)
+        const notifyEditable = isEdit && 
+            (isAdmin || (isNewlyAssigned && canAssign)) && 
+            (!slot.notifyStatus || slot.notifyStatus === 0);
 
-        if (isEdit && (isAdmin || (isNewlyAssigned && canAssign))) {
+        if (notifyEditable) {
             const notifyWrap = document.createElement('label');
             notifyWrap.className = 'editable-field editable-field--checkbox';
             notifyWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; font-size: 12px; width: fit-content;';
@@ -505,15 +599,6 @@ export class DetailsController {
             row.appendChild(actionsRow);
         }
 
-        const isMySlot = String(slot.id) === String(userStore.userId);
-        if (isOpen && isMySlot && !slot.notifyStatus && userStore.isEngineer()) {
-            const acceptBtn = document.createElement('button');
-            acceptBtn.textContent = '✓ Принял в работу (WEB)';
-            acceptBtn.style.cssText = 'margin-top: 4px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; font-weight: 600;';
-            acceptBtn.onclick = () => this._onAcceptAssignment(slotNumber);
-            row.appendChild(acceptBtn);
-        }
-
         container.appendChild(row);
     }
 
@@ -547,7 +632,6 @@ export class DetailsController {
         container.appendChild(row);
     }
 
-    // ИСПРАВЛЕНО: Чистая очистка полей по контракту API v4.0
     _onUnassignStaff(slotNumber) {
         const suffix = slotNumber === 1 ? '' : slotNumber;
         const keyId = 'staff_id' + suffix;
@@ -628,7 +712,6 @@ export class DetailsController {
         confirmBtn.textContent = 'Подтвердить';
         confirmBtn.style.cssText = 'margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: pointer; font-size: 12px; font-weight: 600;';
 
-        // ИСПРАВЛЕНО: Запись строго по новому API v4.0 + защита ID от NaN
         confirmBtn.onclick = () => {
             const selectedId = staffSelect.getValue();
             if (!selectedId) return;
@@ -639,7 +722,6 @@ export class DetailsController {
             const keyNotifyDate = 'notify_date' + suffix;
             const keyName = 'staff_name' + suffix;
 
-            // Безопасное сохранение типа идентификатора (число или строка)
             const finalId = isNaN(selectedId) ? selectedId : Number(selectedId);
 
             this.pendingChanges[keyId] = finalId;
@@ -678,36 +760,6 @@ export class DetailsController {
         row.appendChild(cancelBtn);
 
         setTimeout(() => staffSelect.focus(), 30);
-    }
-
-    async _onAcceptAssignment(slotNumber) {
-        const keyNotify = 'notify_status' + (slotNumber === 1 ? '' : slotNumber);
-        const keyNotifyDate = 'notify_date' + (slotNumber === 1 ? '' : slotNumber);
-        const payload = {
-            action: 'calledit',
-            call_id: this.ticket.id,
-            [keyNotify]: ACCEPT_CHANNEL
-        };
-
-        try {
-            const response = await this.api.post(payload, 'Отметка «Принял в работу»...', 'details');
-            if (response && response.status === 'ok') {
-                this.ticket[keyNotify] = ACCEPT_CHANNEL;
-                this.ticket[keyNotifyDate] = nowTs();
-                this._renderStaffSlots();
-                const msg = response.message || 'Статус уведомления обновлён.';
-                logHistoryAction(msg);
-                notify.success(msg);
-            } else {
-                const msg = (response && response.message) || 'Не удалось обновить статус.';
-                logHistoryAction(msg);
-                notify.error(msg);
-            }
-        } catch (err) {
-            console.error('[DetailsController] Accept error:', err);
-            logHistoryAction('Сбой сети при отметке «Принял в работу».');
-            notify.error('Не удалось обновить статус. Проверьте соединение.');
-        }
     }
 
     _bindEvents() {
@@ -769,33 +821,40 @@ export class DetailsController {
             { key: 'group',      action: 'change_group',      idField: 'group_id',      ref: 'groupSelect', blockId: 'groupEditBlock', currentValue: this.ticket.group_id }
         ];
 
-        dictRules.forEach(rule => {
-            if (!userStore.can(rule.action, { currentValue: rule.currentValue })) return;
+        if (!navigator.onLine) {
+            ['deptDisplay', 'reqDisplay', 'groupDisplay'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.title = '🔒 Редактирование доступно только онлайн';
+            });
+        } else {
+            dictRules.forEach(rule => {
+                if (!userStore.can(rule.action, { currentValue: rule.currentValue })) return;
 
-            const block = document.getElementById(rule.blockId);
-            if (!block) return;
-            block.style.display = 'block';
+                const block = document.getElementById(rule.blockId);
+                if (!block) return;
+                block.style.display = 'block';
 
-            if (!this[rule.ref]) {
-                const comp = createDictSelect({
-                    key: rule.key,
-                    initialValue: rule.currentValue || null,
-                    placeholder: '— выберите —',
-                    required: true,
-                    onChange: (value) => {
-                        if (value) {
-                            this.pendingChanges[rule.idField] = String(value);
-                        } else {
-                            delete this.pendingChanges[rule.idField];
+                if (!this[rule.ref]) {
+                    const comp = createDictSelect({
+                        key: rule.key,
+                        initialValue: rule.currentValue || null,
+                        placeholder: '— выберите —',
+                        required: true,
+                        onChange: (value) => {
+                            if (value) {
+                                this.pendingChanges[rule.idField] = String(value);
+                            } else {
+                                delete this.pendingChanges[rule.idField];
+                            }
+                            this._updateSaveButtonState();
                         }
-                        this._updateSaveButtonState();
-                    }
-                });
-                block.innerHTML = '';
-                block.appendChild(comp.element);
-                this[rule.ref] = comp;
-            }
-        });
+                    });
+                    block.innerHTML = '';
+                    block.appendChild(comp.element);
+                    this[rule.ref] = comp;
+                }
+            });
+        }
 
         const isAssigned = userStore.isAssignedTo(this.ticket, userStore.userId);
         if (userStore.can('set_repair_time', { isAssigned })) {
@@ -884,18 +943,16 @@ export class DetailsController {
         const display = document.getElementById('detailsDisplay');
         if (display) display.textContent = this.ticket.details || 'Описание отсутствует.';
 
-        // 1. Уничтожаем и зануляем пикер даты ремонта
         const repairBlock = document.getElementById('repairTimeEditBlock');
         if (repairBlock) {
             repairBlock.style.display = 'none';
-            repairBlock.innerHTML = ''; // Очищаем DOM
+            repairBlock.innerHTML = '';
         }
         if (this.repairPicker) {
             if (typeof this.repairPicker.destroy === 'function') this.repairPicker.destroy();
-            this.repairPicker = null; // Зануляем ссылку
+            this.repairPicker = null;
         }
 
-        // 2. Уничтожаем и зануляем селекты справочников (Отдел, Тип, Группа)
         [
             { blockId: 'deptEditBlock',  ref: 'deptSelect',  displayId: 'deptDisplay',  field: 'department' },
             { blockId: 'reqEditBlock',   ref: 'reqSelect',   displayId: 'reqDisplay',   field: 'request' },
@@ -904,17 +961,16 @@ export class DetailsController {
             const block = document.getElementById(item.blockId);
             if (block) {
                 block.style.display = 'none';
-                block.innerHTML = ''; // Очищаем DOM
+                block.innerHTML = '';
             }
             if (this[item.ref]) {
                 if (typeof this[item.ref].destroy === 'function') this[item.ref].destroy();
-                this[item.ref] = null; // Зануляем ссылку (это и исправляет баг)
+                this[item.ref] = null;
             }
             const display = document.getElementById(item.displayId);
             if (display) display.textContent = this.ticket[item.field] || '—';
         });
 
-        // 3. Уничтожаем селект выбора механика (если он был открыт)
         if (this.currentStaffSelect && typeof this.currentStaffSelect.destroy === 'function') {
             this.currentStaffSelect.destroy();
             this.currentStaffSelect = null;
@@ -931,15 +987,17 @@ export class DetailsController {
         const text = input.value.trim();
         if (!text || CAPS_REGEX.test(text)) return;
 
-        const currentDetails = this.pendingChanges.details !== undefined
-            ? this.pendingChanges.details
-            : (this.ticket.details || '');
-
-        const separator = currentDetails ? '\n\n' : '';
-        this.pendingChanges.details = currentDetails + separator + '📝 Дополнение: ' + text;
+        // Сервер append-only: отправляем ТОЛЬКО новый текст, склеит сам
+        const existing = this.pendingChanges.details || '';
+        const separator = existing ? '\n\n' : '';
+        this.pendingChanges.details = existing + separator + '📝 Дополнение: ' + text;
 
         const display = document.getElementById('detailsDisplay');
-        if (display) display.textContent = this.pendingChanges.details;
+        if (display) {
+            const base = this.ticket.details || '';
+            const sep = base ? '\n\n' : '';
+            display.textContent = base + sep + this.pendingChanges.details;
+        }
 
         input.value = '';
         this._updateSaveButtonState();
@@ -1033,6 +1091,17 @@ export class DetailsController {
 
     async _onSave() {
         if (this.mode === 'edit' && Object.keys(this.pendingChanges).length === 0) return;
+
+        if (!navigator.onLine) {
+            if (this.mode === 'edit') {
+                await this._saveEditOffline();
+                return;
+            }
+            if (this.mode === 'close') {
+                await this._saveCloseOffline();
+                return;
+            }
+        }
 
         let payload;
 
@@ -1198,6 +1267,9 @@ export class DetailsController {
         const container = document.getElementById('noteComposer');
         if (!container) return;
 
+        // Очищаем контейнер, чтобы при перерисовке не дублировались поля
+        container.innerHTML = '';
+
         this.noteField = createValidatedTextarea({
             placeholder: 'Введите комментарий к заявке...',
             rows: 3,
@@ -1215,7 +1287,9 @@ export class DetailsController {
         const submitBtn = document.createElement('button');
         submitBtn.textContent = 'Добавить комментарий';
         submitBtn.disabled = true;
-        submitBtn.style.cssText = 'margin-top: 6px; padding: 8px 14px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: not-allowed; font-size: 13px; font-weight: 600; opacity: 0.5;';
+        
+        // Жестко задаем стили для кнопки (прижимаем к правому краю)
+        submitBtn.style.cssText = 'align-self: flex-end; margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: not-allowed; font-size: 13px; font-weight: 600; opacity: 0.5; transition: all 0.2s ease;';
         submitBtn.onclick = () => this._onAddNote();
 
         this.noteSubmitBtn = submitBtn;
@@ -1228,6 +1302,11 @@ export class DetailsController {
         const text = this.noteField ? this.noteField.getValue() : '';
         if (!text) return;
         if (this.noteField && !this.noteField.isValid()) return;
+
+        if (!navigator.onLine) {
+            await this._saveNoteOffline(text);
+            return;
+        }
 
         const payload = {
             action: 'callnote',
@@ -1295,9 +1374,157 @@ export class DetailsController {
         }
     }
 
+    async _saveNoteOffline(text) {
+        try {
+            await outboxQueue.enqueueComment(this.ticket.id, text);
+            logHistoryAction('Комментарий сохранён локально.');
+            notify.offline('Комментарий сохранён. Будет синхронизирован при восстановлении сети.');
+
+            const note = {
+                id: 'pending_' + Date.now(),
+                user: authStore.getUser()?.name || 'Вы',
+                body: text,
+                date: nowTs(),
+                type: 0,
+                _pending: true
+            };
+
+            if (Array.isArray(this.ticket.note)) {
+                this.ticket.note.push(note);
+            } else if (this.ticket.note && typeof this.ticket.note === 'object') {
+                this.ticket.note[Object.keys(this.ticket.note).length + 1] = note;
+            } else {
+                this.ticket.note = [note];
+            }
+
+            this._renderNotesList(this.ticket.note);
+            this.noteField.reset();
+            if (this.noteSubmitBtn) {
+                this.noteSubmitBtn.textContent = 'Добавить комментарий';
+                this.noteSubmitBtn.disabled = true;
+                this.noteSubmitBtn.style.opacity = '0.5';
+            }
+        } catch (err) {
+            console.error('[DetailsController] Offline note save error:', err);
+            notify.error('Не удалось сохранить комментарий локально.');
+        }
+    }
+
+    async _saveEditOffline() {
+        const patch = {};
+
+        if (this.pendingChanges.details) {
+            patch.details = this.pendingChanges.details;
+        }
+
+        if (this.pendingChanges.staff_id != null) {
+            if (!this.ticket.staff_id || this.ticket.staff_id === '0') {
+                patch.staff_id = this.pendingChanges.staff_id;
+            } else {
+                notify.warning('Ответственный уже назначен — изменение не будет синхронизировано офлайн.');
+            }
+        }
+
+        if (this.pendingChanges.notify_status != null) {
+            const currentStatus = this.ticket.notify_status;
+            if (!currentStatus || currentStatus === 0 || currentStatus === '0') {
+                patch.notify_status = this.pendingChanges.notify_status;
+            } else {
+                notify.warning('Статус уведомления уже установлен — изменение не будет синхронизировано офлайн.');
+            }
+        }
+
+        if (this.pendingChanges.repair_time != null) {
+            if (!this.ticket.repair_time || this.ticket.repair_time === '0') {
+                patch.repair_time = this.pendingChanges.repair_time;
+            } else {
+                notify.warning('Время ремонта уже установлено — изменение не будет синхронизировано офлайн.');
+            }
+        }
+
+        if (Object.keys(patch).length === 0) {
+            notify.warning('Нет изменений для офлайн-синхронизации. Возможные изменения доступны только онлайн.');
+            return;
+        }
+
+        try {
+            await outboxQueue.enqueueEdit(this.ticket.id, patch);
+
+            logHistoryAction('Изменения сохранены локально.');
+            notify.offline('Изменения сохранены. Будут синхронизированы при восстановлении сети.');
+
+            this._ticketSnapshot = null;
+            this._staffChangedInSession = false;
+            this._autoOpenPending = false;
+
+            if (patch.details) {
+                this.ticket.details = (this.ticket.details || '')
+                    + (this.ticket.details ? '\n\n' : '')
+                    + patch.details;
+            }
+            if (patch.staff_id != null) {
+                this.ticket.staff_id = patch.staff_id;
+                this.ticket.staff_name = staffStore.getById(patch.staff_id)?.name || null;
+            }
+            if (patch.notify_status != null) {
+                this.ticket.notify_status = patch.notify_status;
+                this.ticket.notify_date = nowTs();
+            }
+            if (patch.repair_time != null) {
+                this.ticket.repair_time = patch.repair_time;
+            }
+
+            this.pendingChanges = {};
+            this.mode = 'view';
+
+            await this._applyPendingToTicket();
+            const container = document.getElementById('ticketDetailsDynamicContainer');
+            if (container) this._renderCard(container);
+        } catch (err) {
+            console.error('[DetailsController] Offline edit save error:', err);
+            notify.error('Не удалось сохранить изменения локально.');
+        }
+    }
+
+    async _saveCloseOffline() {
+        const sol = document.getElementById('solutionInput');
+        const solutionText = sol ? sol.value.trim() : '';
+
+        try {
+            await outboxQueue.enqueueClose(this.ticket.id, solutionText);
+
+            logHistoryAction('Заявка закрыта локально.');
+            notify.offline('Заявка закрыта. Будет синхронизирована при восстановлении сети.');
+
+            this.ticket._pendingClose = {
+                solution: solutionText,
+                close_date: nowTs(),
+                close_name: authStore.getUser()?.name || '—'
+            };
+
+            this.pendingChanges = {};
+            this.mode = 'view';
+
+            await this._applyPendingToTicket();
+            const container = document.getElementById('ticketDetailsDynamicContainer');
+            if (container) this._renderCard(container);
+        } catch (err) {
+            console.error('[DetailsController] Offline close save error:', err);
+            notify.error('Не удалось закрыть заявку локально.');
+        }
+    }
+
     unmount() {
         this._staffChangedInSession = false;
         this._autoOpenPending = false;
+        this._pendingCommands = [];
+        if (this.ticket) {
+            delete this.ticket._pendingClose;
+            delete this.ticket._pendingStaff;
+            delete this.ticket._pendingNotify;
+            delete this.ticket._pendingRepair;
+            delete this.ticket._pendingDetails;
+        }
         destroyVoiceInput();
         this._unlockCard();
         this.api.abortTag('details');

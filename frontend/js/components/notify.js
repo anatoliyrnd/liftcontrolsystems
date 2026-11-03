@@ -473,9 +473,31 @@ export const notify = {
     warning: (text, opts) => show('warning', text, opts),
     info:    (text, opts) => show('info',    text, opts),
     clear,
-    batch
-};
+    batch,
 
+    /** Действие сохранено локально. */
+    offline: (text, opts = {}) =>
+        show('warning', text, { timeout: opts.timeout ?? 5000, ...opts }),
+
+    /** Частичный успех синхронизации (архивация/игнор). */
+    syncPartial: ({ archived = 0, message } = {}) => {
+        if (!archived) return;
+        show('warning', message || `Действия в архив: ${archived}`, { timeout: 8000 });
+    },
+
+    /** Синхронизация завершена успешно. */
+    syncSuccess: ({ success = 0 } = {}) => {
+        if (!success) return;
+        show('success', `Синхронизировано действий: ${success}`, { timeout: 4000 });
+    },
+
+    /** Ошибка синхронизации (5+ retry или rate-limit). */
+    syncError: ({ reason, retryAfter } = {}) => {
+        const suffix = retryAfter ? ` Повторите через ${retryAfter}с.` : '';
+        show('error', `Синхронизация не удалась: ${reason || 'неизвестная ошибка'}.${suffix}`,
+            { timeout: 8000 });
+    }
+};
 /**
  * Массовая загрузка уведомлений (обычно с сервера).
  * @param {Array<{id?, type, text, ticketId?, timeout?, once?, persistent?, sound?}>} list

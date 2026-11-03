@@ -50,7 +50,7 @@ export class TicketsController {
   async mount(globalTicketsArrayRef) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
-
+await this._loadPendingState();
     dataTable.setAttribute("data-mode", this.dataType);
 
     if (this.dataType === "open") {
@@ -191,6 +191,7 @@ export class TicketsController {
 
   // 🔥 ДОБАВЛЕНО: Обработчик фонового обновления справочника адресов
   async _onAddressesUpdated() {
+    await this._loadPendingState();
     console.log("[TicketsController] Адреса загружены в фоне, обновляем фильтр городов.");
     this._allCities = await offlineDB.getCities();
 
@@ -203,7 +204,33 @@ export class TicketsController {
       this._applyLocalFilters(); // Перерисовываем таблицу с новыми городами
     }
   }
+/**
+ * Кэширует pending-команды в памяти контроллера:
+ *   _pendingCommandMap: Map<ticket_id, cmd[]>  (Edit/Close/Comment для серверных заявок)
+ *   _pendingCloseMap:   Map<ticket_id, cmd>    (только CloseTicket)
+ *   _openCache:         Array (для синтетических закрытых из pending)
+ */
+async _loadPendingState() {
+    const all = await offlineDB.getAllPending();
+    this._pendingCommandMap = new Map();
+    this._pendingCloseMap = new Map();
 
+    for (const cmd of all) {
+        if (cmd.status !== 'pending') continue;
+        if (cmd.ticket_id == null) continue; // офлайн-созданные обрабатываются отдельно
+        const key = String(cmd.ticket_id);
+        if (!this._pendingCommandMap.has(key)) this._pendingCommandMap.set(key, []);
+        this._pendingCommandMap.get(key).push(cmd);
+
+        if (cmd.command_type === 'CloseTicket') {
+            this._pendingCloseMap.set(key, cmd);
+        }
+    }
+
+    if (this.dataType === 'close' && this._pendingCloseMap.size > 0) {
+        this._openCache = await offlineDB.getTickets('open');
+    }
+}
   async _loadDataFromServer(isSilent = false) {
     try {
       const postPayload = { data: this.dataType };
@@ -257,26 +284,54 @@ export class TicketsController {
       const cityFilterActive =
         this._allCities.length > 0 && this._filters.cities.length > 0;
 
-      filteredData = filteredData.filter((t) => {
-        if (
-          cityFilterActive &&
-          t.city_id &&
-          !this._filters.cities.includes(Number(t.city_id))
-        ) {
-          return false;
-        }
-
-        if (this._filters.hideLongRepair) {
-          const rTs = Number(t.repair_time);
-          if (rTs && rTs > maxDateTs) {
-            return false;
-          }
-        }
-
-        return true;
-      });
+   filteredData = filteredData.filter((t) => {
+    if (
+        cityFilterActive &&
+        t.city_id &&
+        !this._filters.cities.includes(Number(t.city_id))
+    ) {
+        return false;
     }
 
+    if (this._filters.hideLongRepair) {
+        const rTs = Number(t.repair_time);
+        if (rTs && rTs > maxDateTs) {
+            return false;
+        }
+    }
+
+    // Pending offline close — не показываем в «Открытых»
+    if (this._pendingCloseMap && this._pendingCloseMap.has(String(t.id))) {
+        return false;
+    }
+
+    return true;
+});
+    }
+    if (
+        this.dataType === "close" &&
+        this._pendingCloseMap &&
+        this._pendingCloseMap.size > 0
+    ) {
+        const synthetic = [];
+        for (const [ticketId, cmd] of this._pendingCloseMap) {
+            const original = (this._openCache || []).find(
+                (t) => String(t.id) === ticketId
+            );
+            if (!original) continue;
+            synthetic.push({
+                ...original,
+                type: "close",
+                _isOfflineClose: true,
+                solution: cmd.payload.solution || "",
+                close_date: cmd.created_at,
+                close_name: cmd.offline_author_name || "—",
+            });
+        }
+        if (synthetic.length > 0) {
+            filteredData = [...synthetic, ...filteredData];
+        }
+    }
     // Пересоздаем шапку, если ее нет
     const thead = dataTable.querySelector("thead");
     if (!thead || !thead.firstElementChild) {
@@ -289,7 +344,7 @@ export class TicketsController {
 
     // Рендерим тело таблицы
     renderTableBody(dataTable, filteredData);
-
+this._applyPendingRowDecorations(dataTable)
     // Восстанавливаем индикатор сортировки
     if (this.currentSortColumnId !== -1) {
       const sortedTh = dataTable.querySelector(
@@ -323,7 +378,30 @@ export class TicketsController {
       applyFilter(this.rowsCache, searchInput.value.trim().toLowerCase());
     }
   }
+_applyPendingRowDecorations(dataTable) {
+    if (!this._pendingCommandMap || this._pendingCommandMap.size === 0) return;
 
+    dataTable.querySelectorAll('tbody tr').forEach(row => {
+        const idCell = row.querySelector('td[data-col-id="id"]');
+        if (!idCell) return;
+        const ticketId = idCell.textContent.trim();
+        const cmds = this._pendingCommandMap.get(ticketId);
+        if (!cmds || cmds.length === 0) return;
+
+        const types = cmds.map(c => c.command_type);
+
+        if (types.includes('CloseTicket')) {
+            row.classList.add('row-offline-close');
+            row.title = '⏳ Закрыта локально. Ожидает синхронизации.';
+        } else if (types.includes('EditTicket')) {
+            row.classList.add('row-offline-edit');
+            row.title = '⏳ Изменена локально. Ожидает синхронизации.';
+        } else if (types.includes('AddComment')) {
+            row.classList.add('row-offline-comment');
+            row.title = '⏳ Есть неотправленный комментарий.';
+        }
+    });
+}
   _initPeriodSelector(globalTicketsArrayRef) {
     if (this.dataType !== "close") return;
 
@@ -621,52 +699,62 @@ export class TicketsController {
   }
 
   async _updateSyncButton() {
-    const count = await offlineDB.getOutboxCount();
+    const [pending, failed] = await Promise.all([
+        offlineDB.getOutboxCount(),
+        offlineDB.getFailedCount()
+    ]);
     const btn = document.getElementById("refreshBtn");
     const badge = document.getElementById("syncBadge");
 
     if (!btn || !badge) return;
 
     if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
-      btn.disabled = true;
-      btn.title = "Идет синхронизация...";
-      return;
+        btn.disabled = true;
+        btn.title = "Идет синхронизация...";
+        return;
     }
 
     if (
-      window.syncManagerInstance &&
-      Date.now() < window.syncManagerInstance._cooldownUntil
+        window.syncManagerInstance &&
+        Date.now() < window.syncManagerInstance._cooldownUntil
     ) {
-      const waitMins = Math.ceil(
-        (window.syncManagerInstance._cooldownUntil - Date.now()) / 60000,
-      );
-      btn.disabled = true;
-      btn.title = `Синхронизация заблокирована на ${waitMins} мин. из-за ошибки.`;
-      btn.style.color = "var(--text-secondary)";
-      return;
+        const waitMins = Math.ceil(
+            (window.syncManagerInstance._cooldownUntil - Date.now()) / 60000,
+        );
+        btn.disabled = true;
+        btn.title = `Синхронизация заблокирована на ${waitMins} мин. из-за ошибки.`;
+        btn.style.color = "var(--text-secondary)";
+        return;
     }
 
     btn.disabled = false;
 
-    if (count > 0) {
-      btn.style.color = "#f59e0b";
-      btn.title = `Нажмите, чтобы синхронизировать ${count} офлайн-заявок`;
-      badge.textContent = count;
-      badge.style.display = "block";
-      btn.onclick = (e) => {
-        e.preventDefault();
-        window.dispatchEvent(new Event("triggerSync"));
-      };
+    const total = pending + failed;
+
+    if (total > 0) {
+        // 🔴 если есть failed, 🟡 если только pending
+        const isError = failed > 0;
+        btn.style.color = isError ? "#ef4444" : "#f59e0b";
+        btn.title = isError
+            ? `Ошибка синхронизации: ${failed} действий. Нажмите, чтобы повторить.`
+            : `Нажмите, чтобы синхронизировать ${pending} офлайн-действий`;
+        badge.textContent = total;
+        badge.style.display = "block";
+        badge.style.background = isError ? "#ef4444" : "#f59e0b";
+        btn.onclick = (e) => {
+            e.preventDefault();
+            window.dispatchEvent(new Event("triggerSync"));
+        };
     } else {
-      btn.style.color = "var(--text-primary)";
-      btn.title = "Перезагрузить данные";
-      badge.style.display = "none";
-      btn.onclick = (e) => {
-        if (e) e.preventDefault();
-        this.unmount();
-        this.isLoaded = false;
-        this.mount(this._currentTicketsRef);
-      };
+        btn.style.color = "var(--text-primary)";
+        btn.title = "Перезагрузить данные";
+        badge.style.display = "none";
+        btn.onclick = (e) => {
+            if (e) e.preventDefault();
+            this.unmount();
+            this.isLoaded = false;
+            this.mount(this._currentTicketsRef);
+        };
     }
-  }
+}
 }

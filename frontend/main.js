@@ -30,6 +30,11 @@ import { offlineDB } from "./js/offline-db.js";
 import { flattenAddresses } from "./js/utils/address-flattener.js";
 import { syncTableSettingsFromStorage } from "./js/table/settings.js";
 import { registerSW } from 'virtual:pwa-register';
+import { syncIndicator } from "./js/components/sync-indicator.js";
+import { offlineBanner } from "./js/components/offline-banner.js";
+import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js";
+import { queuePageTemplate } from "./js/route/pages/queue.js";
+import { QueueController } from "./js/queue-controller.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -44,7 +49,7 @@ const detailsCtrl = new DetailsController(api, router);
 const loginCtrl = new LoginController(api, router);
 const settingsCtrl = new SettingsController(api, router);
 const profileCtrl = new ProfileController(api, router);
-
+const queueCtrl = new QueueController(api, router);
 let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
@@ -56,9 +61,9 @@ async function initAuthorizedApp() {
     menuManager = new MenuManager(api, router, "dynamicMenu");
   }
   await menuManager.initialize();
-  initAppData(); // Загрузка адресов
+  initAppData();
 }
-// 1. Синхронизация шапки (профиль, история)
+
 function syncAuthUI() {
   const historyWrapper = document.getElementById("historyWrapper");
   const userProfileWrapper = document.getElementById("userProfileWrapper");
@@ -73,7 +78,6 @@ function syncAuthUI() {
     if (userProfileWrapper) userProfileWrapper.style.display = "flex";
     if (navUserName) {
       if (user.surname || user.name) {
-        // Если пришли раздельные поля, склеиваем их. Иначе используем старый fallback-вариант name
         const formattedName = user.surname
           ? `${user.surname} ${user.name || ""}`.trim()
           : user.name;
@@ -111,7 +115,6 @@ function syncAuthUI() {
   }
 }
 
-// 2. Фоновая загрузка адресов
 async function initAppData() {
   try {
     let cities = await offlineDB.getCities();
@@ -120,7 +123,7 @@ async function initAppData() {
       if (response && response.status === "ok") {
         const flatData = flattenAddresses(response);
         await offlineDB.saveAddresses(flatData);
-         window.dispatchEvent(new CustomEvent("addresses:updated"));
+        window.dispatchEvent(new CustomEvent("addresses:updated"));
         notify.success(`Справочник адресов загружен (${flatData.length} шт.)`, {
           once: true,
         });
@@ -134,20 +137,21 @@ async function initAppData() {
 
 // --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 document.addEventListener("DOMContentLoaded", async () => {
-  // 1. Базовая инициализация (тема, тосты, настройки таблиц)
+
+  // 1. Базовая инициализация
   new ThemeController("themeToggle");
   setNotifyRouter(router);
   syncTableSettingsFromStorage();
-
-  // 2. Подписка на события
-  window.addEventListener("triggerSync", () => {
-    if (syncManager) syncManager.startSync();
-  });
+ syncIndicator.init();
+  offlineBanner.init();
+  // 2. Подписки на события
+  // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
+  // (см. sync-manager._bindTriggers). Здесь их НЕ дублируем.
   window.addEventListener("refreshSyncState", () => {
     if (openTicketsCtrl) openTicketsCtrl._updateSyncButton();
   });
   window.addEventListener("auth:updated", () => {
-    syncAuthUI(); // Перерисовываем шапку после смены профиля
+    syncAuthUI();
   });
   window.addEventListener("auth:loggedin", async () => {
     syncAuthUI();
@@ -163,9 +167,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     logHistoryAction(msg);
     notify.warning(msg);
     router.navigate("#/login");
+    // Outbox НЕ очищаем — при следующем логине синхронизация продолжится.
   });
 
-  // 3. АУТЕНТИФИКАЦИЯ (сначала проверяем, кто мы)
+  // 3. Аутентификация
   if (AUTH.BYPASS_AUTH) {
     authStore.setSession("mock-token", Date.now() + 86400000, {
       id: 1,
@@ -176,13 +181,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     await api.tryAutoLogin();
   }
 
-  // 4. ИНИЦИАЛИЗАЦИЯ UI ПОСЛЕ АВТОРИЗАЦИИ
+  // 4. Инициализация UI после авторизации
   syncAuthUI();
   if (authStore.hasAccess()) {
     await initAuthorizedApp();
   }
 
-  // 5. Обработчики шапки (Меню профиля и Выход)
+  // 5. Обработчики шапки
   const userProfileBtn = document.getElementById("userProfileBtn");
   const userDropdown = document.getElementById("userDropdown");
   const userProfileWrapper = document.getElementById("userProfileWrapper");
@@ -207,7 +212,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       await api.logout();
       authStore.clear();
 
-      // Очищаем данные заявок в памяти
       openTicketsArray.length = 0;
       closedTicketsArray.length = 0;
 
@@ -215,73 +219,82 @@ document.addEventListener("DOMContentLoaded", async () => {
       logHistoryAction("Вы вышли из системы");
       notify.info("Вы вышли из системы");
       router.navigate("#/login");
+      // Outbox сохраняется — синхронизируется при следующем логине
+      // (в т.ч. другим диспетчером, с маркером авторства).
     };
   }
 
   const navLogo = document.getElementById("navLogo");
+    // Обёртка для mountFn, которая гарантирует unmount контроллера #/queue
+  // при переходе на любой другой роут. Идемпотентна: queueCtrl.unmount()
+  // безопасно вызывать даже когда экран очереди ни разу не монтировался.
+  const withQueueUnmount = (mountFn) => (...args) => {
+    try { queueCtrl.unmount(); } catch (e) { /* ignore */ }
+    return mountFn(...args);
+  };
   if (navLogo) navLogo.addEventListener("click", () => router.navigate("#/"));
 
   // 6. Роутинг
   router.addRoute(
     "#/login",
     () => loginPageTemplate(),
-    () => loginCtrl.mount(),
+    withQueueUnmount(() => loginCtrl.mount()),
   );
   router.addRoute(
     "#/",
     () => mainPageTemplate(),
-    () => {
+    withQueueUnmount(() => {
       closedTicketsCtrl.unmount();
       openTicketsCtrl.mount(openTicketsArray);
-    },
+    }),
   );
   router.addRoute(
     "#/closed",
     () => mainPageTemplate(),
-    () => {
+    withQueueUnmount(() => {
       openTicketsCtrl.unmount();
       closedTicketsCtrl.mount(closedTicketsArray);
-    },
+    }),
   );
   router.addRoute(
     "#/create",
     () => createPageTemplate(),
-    () => {
+    withQueueUnmount(() => {
       openTicketsCtrl.unmount();
       createCtrl.unmount();
       createCtrl.mount(openTicketsArray);
-    },
+    }),
   );
   router.addRoute(
     "#/ticket",
     (id) => detailsPageTemplate(id),
-    (id) => {
+    withQueueUnmount((id) => {
       openTicketsCtrl.unmount();
       detailsCtrl.mount(id, [...openTicketsArray, ...closedTicketsArray]);
-    },
+    }),
   );
   router.addRoute(
     "#/settings",
     () => settingsPageTemplate(),
-    () => settingsCtrl.mount(),
+    withQueueUnmount(() => settingsCtrl.mount()),
   );
   router.addRoute(
     "#/profile",
     () => profilePageTemplate(),
-    () => profileCtrl.mount(),
+    withQueueUnmount(() => profileCtrl.mount()),
+  );
+  // Экран «Очередь синхронизации» 
+   router.addRoute(
+    "#/queue",
+    () => queuePageTemplate(),
+    () => queueCtrl.mount(),
   );
 
   const createPlaceholderRoute = (title) => () =>
     `<div class="container"><h1>${title}</h1><p style="color:var(--text-secondary); margin-top:10px;">Экран в разработке.</p></div>`;
   router.addRoute("#/reports", createPlaceholderRoute("Аналитические Отчеты"));
-  router.addRoute(
-    "#/addresses",
-    createPlaceholderRoute("Реестр лифтовых адресов"),
-  );
-  router.addRoute(
-    "#/more",
-    createPlaceholderRoute("Прочие инструменты диспетчера"),
-  );
+  router.addRoute("#/addresses", createPlaceholderRoute("Реестр лифтовых адресов"));
+  router.addRoute("#/more", createPlaceholderRoute("Прочие инструменты диспетчера"));
 
   // 7. Сворачивание истории
   const historyWrapper = document.getElementById("historyWrapper");
@@ -292,37 +305,48 @@ document.addEventListener("DOMContentLoaded", async () => {
       historyWrapper.classList.toggle("is-collapsed");
   }
 
-  // 8. Синхронизация
-  syncManager = new SyncManager(api, router, (newTickets) => {
-    openTicketsArray.length = 0;
-    openTicketsArray.push(...newTickets);
-    if (window.location.hash === "#/" || window.location.hash === "") {
-      openTicketsCtrl.refreshFromMemory(openTicketsArray);
-    }
-  });
-  window.syncManagerInstance = syncManager;
-  if (navigator.onLine) setTimeout(() => syncManager.startSync(), 1000);
+  // 8. Синхронизация outbox
+  syncManager = new SyncManager(
+    api,
+    router,
+    (newTickets) => {
+      openTicketsArray.length = 0;
+      openTicketsArray.push(...newTickets);
+      if (window.location.hash === "#/" || window.location.hash === "") {
+        openTicketsCtrl.refreshFromMemory(openTicketsArray);
+      }
+    },
+       {
+      onDuplicateDetected: (record, existingTickets) =>
+        duplicateTicketModal.show(record, existingTickets),
+    },
+  );
 
-   // 9. Service Worker & PWA Auto-Update
+  // Стартовая синхронизация — триггер «открытие SPA».
+  // Внутри SyncManager сработают: _cooldownUntil, navigator.onLine,
+  // Web Locks (мультитаб), проверка непустого outbox.
+  if (navigator.onLine) {
+    setTimeout(() => syncManager.startSync(), 1000);
+  }
+
+  // 9. Service Worker & PWA Auto-Update
   const updateSW = registerSW({
     onNeedRefresh() {
-      // Этот код сработает, когда приложение скачает новую версию в фоне
       notify.warning("Доступна новая версия приложения", {
-        timeout: 0, // 0 = висит, пока пользователь не закроет или не нажмет кнопку
+        timeout: 0,
         persistent: true,
         actionText: "Обновить сейчас",
         onAction: () => {
-          // Передаем true, чтобы после обновления страница перезагрузилась
-          updateSW(true); 
-        }
+          updateSW(true);
+        },
       });
     },
     onOfflineReady() {
       notify.success("Приложение готово к работе офлайн", { once: true });
     },
     onRegisterError(error) {
-      console.error('❌ Ошибка регистрации SW:', error);
-    }
+      console.error("❌ Ошибка регистрации SW:", error);
+    },
   });
 
   // 10. Старт роутера

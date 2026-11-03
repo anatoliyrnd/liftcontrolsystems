@@ -14,6 +14,7 @@ import { createAddressPicker } from "./components/address-picker.js";
 import { offlineDB } from "./offline-db.js";
 import { authStore } from "./auth-store.js";
 import { nowTs } from "./utils/date-utils.js";
+import { outboxQueue } from "./outbox-queue.js";
 
 export class CreateController {
   constructor(apiInstance, routerInstance) {
@@ -438,66 +439,52 @@ export class CreateController {
     btn.style.cursor = allFilled ? "pointer" : "not-allowed";
   }
 
-  async _saveOffline(ticketPayload, globalTicketsArrayRef) {
+async _saveOffline(ticketPayload, globalTicketsArrayRef) {
     try {
-      const count = await offlineDB.getOutboxCount();
-      if (count >= OFFLINE.MAX_OFFLINE_TICKETS) {
-        this._setSaveBtnState("error");
-        const msg = `Достигнут лимит офлайн-заявок (${OFFLINE.MAX_OFFLINE_TICKETS}). Дождитесь синхронизации.`;
-        notify.error(msg);
-        logHistoryAction(msg);
-        setTimeout(() => {
-          this._unlockForm();
-          this._setSaveBtnState("idle");
-        }, UI.ERROR_UNLOCK_MS);
-        return;
-      }
+        const count = await offlineDB.getOutboxCount();
+        if (count >= OFFLINE.MAX_OFFLINE_TICKETS) {
+            this._setSaveBtnState("error");
+            const msg = `Достигнут лимит офлайн-заявок (${OFFLINE.MAX_OFFLINE_TICKETS}). Дождитесь синхронизации.`;
+            notify.error(msg);
+            logHistoryAction(msg);
+            setTimeout(() => {
+                this._unlockForm();
+                this._setSaveBtnState("idle");
+            }, UI.ERROR_UNLOCK_MS);
+            return;
+        }
 
-      const user = authStore.getUser();
-      const uuid =
-        "offline_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
+        const cmd = await outboxQueue.enqueueCreate(ticketPayload);
+        const offlineUuid = cmd.offline_uuid;
 
-      const offlineTicket = {
-        uuid: uuid,
-        offline_uuid: uuid,
-        offline_author_id: user ? user.id : 0,
-        offline_author_name: user ? user.name : "Неизвестный",
-        payload: ticketPayload, // чистый payload без action
-        created_at: nowTs(),
-      };
+                this._setSaveBtnState("success");
+        notify.offline('Заявка сохранена. Будет синхронизирована при восстановлении сети.');
+        logHistoryAction('Заявка сохранена локально (нет сети).');
 
-      await offlineDB.addToOutbox(offlineTicket);
+        globalTicketsArrayRef.unshift({
+            ...ticketPayload,
+            id: offlineUuid,
+            offline_uuid: offlineUuid,
+            type: "open",
+            address: ticketPayload.fullAddress,
+            date: nowTs(),
+            isOffline: true,
+        });
 
-      this._setSaveBtnState("success");
-      const msg =
-        "Заявка сохранена локально (нет сети). Синхронизация при восстановлении связи.";
-      notify.info(msg);
-      logHistoryAction(msg);
-
-      // Временно добавляем в память для отображения в журнале
-      globalTicketsArrayRef.unshift({
-        ...ticketPayload,
-        id: uuid,
-        type: "open",
-        address: ticketPayload.fullAddress, // маппинг для таблицы
-        date: new Date().toLocaleString("ru"), // временная дата для UI
-        isOffline: true,
-      });
-
-      if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
-      this.autoReturnTimer = setTimeout(() => {
-        this.router.navigate("#/");
-      }, UI.AUTO_RETURN_MS);
+        if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
+        this.autoReturnTimer = setTimeout(() => {
+            this.router.navigate("#/");
+        }, UI.AUTO_RETURN_MS);
     } catch (e) {
-      console.error("[CreateController] Offline save error:", e);
-      this._setSaveBtnState("error");
-      notify.error("Сбой локальной базы данных.");
-      setTimeout(() => {
-        this._unlockForm();
-        this._setSaveBtnState("idle");
-      }, UI.ERROR_UNLOCK_MS);
+        console.error("[CreateController] Offline save error:", e);
+        this._setSaveBtnState("error");
+        notify.error("Сбой локальной базы данных.");
+        setTimeout(() => {
+            this._unlockForm();
+            this._setSaveBtnState("idle");
+        }, UI.ERROR_UNLOCK_MS);
     }
-  }
+}
 
   unmount() {
     destroyVoiceInput();

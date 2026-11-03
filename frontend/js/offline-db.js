@@ -1,31 +1,75 @@
 import { openDB } from './vendor/idb.js';
 
+/**
+ * IndexedDB SPA — версия 2 (офлайн-синхронизация по API_PROTOCOL.md v4.2).
+ *
+ * Ключевое решение: outbox — ГЛОБАЛЬНЫЙ на устройстве. Команды
+ * синхронизируются ЛЮБЫМ залогиненным пользователем. Авторство
+ * сохраняется в offline_author_id / offline_author_name и попадает
+ * в payload при сборке пачки (см. batch-builder.js: applyAuthorMarker).
+ *
+ * Изменения от v1:
+ *   - outbox: keyPath 'uuid' → 'command_uuid'; новая схема команд
+ *     (command_type, ticket_id, offline_uuid, payload, status,
+ *      retry_count, next_retry_at, last_error,
+ *      offline_author_id, offline_author_name).
+ *   - Индексы outbox: status, created_at, ticket_id, offline_uuid,
+ *     offline_author_id.
+ *   - При upgrade v1→v2 старый outbox УДАЛЯЕТСЯ (согласовано: п.9).
+ *   - tickets_cache, address_flat, config — без изменений.
+ *
+ * Shim-методы (addToOutbox, getOutboxBatch, getAllFromOutbox,
+ * deleteFromOutbox) — для совместимости до Фаз 1–3.
+ * После Фаз 1–3 shim удаляется.
+ */
+
+const DB_NAME = 'LiftCallsDB';
+const DB_VERSION = 2;
+
+function createOutboxStore(db) {
+    const store = db.createObjectStore('outbox', { keyPath: 'command_uuid' });
+    store.createIndex('status', 'status');
+    store.createIndex('created_at', 'created_at');
+    store.createIndex('ticket_id', 'ticket_id');
+    store.createIndex('offline_uuid', 'offline_uuid');
+    store.createIndex('offline_author_id', 'offline_author_id');
+    return store;
+}
+
 class OfflineDB {
     constructor() {
-        this.dbPromise = openDB('LiftCallsDB', 1, {
-            upgrade(db) {
-                // Настройки и кэш конфига
-                if (!db.objectStoreNames.contains('config')) {
-                    db.createObjectStore('config', { keyPath: 'key' });
+        this.dbPromise = openDB(DB_NAME, DB_VERSION, {
+            upgrade(db, oldVersion) {
+                // v0 → v1
+                if (oldVersion < 1) {
+                    if (!db.objectStoreNames.contains('config')) {
+                        db.createObjectStore('config', { keyPath: 'key' });
+                    }
+                    if (!db.objectStoreNames.contains('address_flat')) {
+                        const store = db.createObjectStore('address_flat', { keyPath: 'id' });
+                        store.createIndex('city_id', 'city_id');
+                    }
+                    if (!db.objectStoreNames.contains('tickets_cache')) {
+                        db.createObjectStore('tickets_cache', { keyPath: 'id' });
+                    }
                 }
-                // Плоский список адресов для поиска
-                if (!db.objectStoreNames.contains('address_flat')) {
-                    const store = db.createObjectStore('address_flat', { keyPath: 'id' });
-                    store.createIndex('city_id', 'city_id');
-                }
-                // Очередь неотправленных заявок
-                if (!db.objectStoreNames.contains('outbox')) {
-                    db.createObjectStore('outbox', { keyPath: 'uuid' });
-                }
-                // Кэш заявок (для отображения без сети)
-                if (!db.objectStoreNames.contains('tickets_cache')) {
-                    db.createObjectStore('tickets_cache', { keyPath: 'id' });
+
+                // v1 → v2: пересоздаём outbox под новую схему.
+                // Старый формат (callNewOffline) не мигрируем — чистим (п.9).
+                if (oldVersion < 2) {
+                    if (db.objectStoreNames.contains('outbox')) {
+                        db.deleteObjectStore('outbox');
+                    }
+                    createOutboxStore(db);
                 }
             }
         });
     }
 
-    // --- Конфиг ---
+    // =========================================================================
+    // Конфиг
+    // =========================================================================
+
     async setConfig(key, value) {
         const db = await this.dbPromise;
         await db.put('config', { key, value });
@@ -37,29 +81,21 @@ class OfflineDB {
         return res ? res.value : null;
     }
 
-    // --- Адреса ---
+    // =========================================================================
+    // Адреса
+    // =========================================================================
+
     async saveAddresses(flatAddresses) {
         const db = await this.dbPromise;
-
-        // Создаем ОДНУ транзакцию на весь процесс
         const tx = db.transaction('address_flat', 'readwrite');
         const store = tx.objectStore('address_flat');
-
-        // Очищаем старые данные
         store.clear();
 
-        // Пишем пачками внутри одной транзакции
         const CHUNK_SIZE = 2000;
         for (let i = 0; i < flatAddresses.length; i += CHUNK_SIZE) {
             const chunk = flatAddresses.slice(i, i + CHUNK_SIZE);
-
-            // Promise.all ждет завершения записи пачки,
-            // но не закрывает транзакцию (так как это все еще запросы к store).
-            // Это дает браузеру "подышать" и не переполняет буфер.
             await Promise.all(chunk.map(addr => store.put(addr)));
         }
-
-        // Закрываем транзакцию после записи всего массива
         await tx.done;
     }
 
@@ -74,6 +110,7 @@ class OfflineDB {
         }
         return Array.from(citiesMap.values()).sort((a, b) => a.name.localeCompare(b.name));
     }
+
     async searchAddresses(cityId, query) {
         const db = await this.dbPromise;
         const tx = db.transaction('address_flat', 'readonly');
@@ -83,101 +120,234 @@ class OfflineDB {
         const tokens = q ? q.split(' ').filter(t => t.length > 0) : [];
         const results = [];
 
-        // Открываем курсор только по нужному городу
         let cursor = await index.openCursor(IDBKeyRange.only(cityId));
-
         while (cursor) {
             const item = cursor.value;
-
             if (tokens.length === 0) {
-                // Если поиск пустой — набираем первые 50
                 results.push(item);
             } else {
                 const words = item.search_string.split(' ');
                 const isMatch = tokens.every(token => words.some(word => word.startsWith(token)));
-                if (isMatch) {
-                    results.push(item);
-                }
+                if (isMatch) results.push(item);
             }
-
-            if (results.length >= 50) break; // Останавливаемся, как только набрали 50
+            if (results.length >= 50) break;
             cursor = await cursor.continue();
         }
-
         await tx.done;
         return results;
     }
-    // --- Очередь заявок (Outbox) ---
-    async addToOutbox(ticket) {
+
+    // =========================================================================
+    // Outbox — НОВЫЙ API (Фазы 1–3)
+    // =========================================================================
+
+    /**
+     * Положить команду в outbox.
+     * @param {Object} cmd
+     * @param {string} cmd.command_uuid
+     * @param {string} cmd.command_type      'CreateTicket'|'EditTicket'|'CloseTicket'|'AddComment'|'AcceptTicket'
+     * @param {number|null} cmd.ticket_id
+     * @param {string|null} cmd.offline_uuid
+     * @param {Object} cmd.payload
+     * @param {number} [cmd.created_at]      unix ts (секунды)
+     * @param {number|null} [cmd.offline_author_id]
+     * @param {string|null} [cmd.offline_author_name]
+     */
+    async addOutboxCommand(cmd) {
         const db = await this.dbPromise;
-        await db.put('outbox', ticket);
+        const record = {
+            command_uuid: cmd.command_uuid,
+            command_type: cmd.command_type,
+            ticket_id: cmd.ticket_id ?? null,
+            offline_uuid: cmd.offline_uuid ?? null,
+            payload: cmd.payload || {},
+            created_at: cmd.created_at || Math.floor(Date.now() / 1000),
+            retry_count: cmd.retry_count ?? 0,
+            next_retry_at: cmd.next_retry_at ?? 0,
+            last_error: cmd.last_error ?? null,
+            status: cmd.status || 'pending',
+            offline_author_id: cmd.offline_author_id ?? null,
+            offline_author_name: cmd.offline_author_name ?? null
+        };
+        await db.put('outbox', record);
+        return record;
     }
 
-    async getOutboxCount() {
+    /**
+     * ВСЕ команды любого статуса, любого автора.
+     * Используется: sync-manager (для сборки пачки — фильтр по status='pending'
+     * внутри), queue-controller (список), tickets-controller (бейджи).
+     * НЕ фильтрует по offline_author_id — это осознанное решение v1.
+     */
+    async getAllPending() {
         const db = await this.dbPromise;
-        return await db.count('outbox');
+        return db.getAll('outbox');
     }
 
-   async getOutboxBatch(limit = 10) {
-    const db = await this.dbPromise;
-    const tx = db.transaction('outbox', 'readonly');
-    const store = tx.objectStore('outbox');
-
-    // Курсор не читает оставшиеся записи — в отличие от getAll.
-    const batch = [];
-    let cursor = await store.openCursor();
-    while (cursor && batch.length < limit) {
-        batch.push(cursor.value);
-        cursor = await cursor.continue();
-    }
-    await tx.done;
-    return batch;
-}
-    async getAllFromOutbox() {
+    /**
+     * Только pending, FIFO (created_at asc), любые авторы.
+     * Используется batch-builder'ом.
+     */
+    async getPendingBatch(limit = 20) {
         const db = await this.dbPromise;
-        return await db.getAll('outbox');
+        const tx = db.transaction('outbox', 'readonly');
+        const index = tx.objectStore('outbox').index('status');
+        const batch = [];
+        let cursor = await index.openCursor(IDBKeyRange.only('pending'));
+        while (cursor && batch.length < limit) {
+            batch.push(cursor.value);
+            cursor = await cursor.continue();
+        }
+        await tx.done;
+        // Сортируем по created_at для стабильного FIFO
+        batch.sort((a, b) => a.created_at - b.created_at);
+        return batch;
     }
-    async deleteFromOutbox(uuids) {
+
+    /**
+     * Pending-команды, привязанные к заявке (любые авторы).
+     * Используется tickets-controller / details-controller для бейджей «⏳».
+     */
+    async getPendingByTicket(ticketId) {
+        const db = await this.dbPromise;
+        const tx = db.transaction('outbox', 'readonly');
+        const index = tx.objectStore('outbox').index('ticket_id');
+        const list = await index.getAll(IDBKeyRange.only(ticketId));
+        await tx.done;
+        return list.filter(c => c.status === 'pending');
+    }
+
+    /**
+     * Pending-команды конкретного автора.
+     * Используется ТОЛЬКО для UI-фильтра «Только мои» в экране очереди.
+     * НЕ используется для синхронизации.
+     */
+    async getPendingByAuthor(authorId) {
+        const db = await this.dbPromise;
+        const tx = db.transaction('outbox', 'readonly');
+        const index = tx.objectStore('outbox').index('offline_author_id');
+        const list = await index.getAll(IDBKeyRange.only(authorId));
+        await tx.done;
+        return list.filter(c => c.status === 'pending');
+    }
+
+    /** Обновить поля команды. */
+    async updateOutboxCommand(commandUuid, patch) {
+        const db = await this.dbPromise;
+        const existing = await db.get('outbox', commandUuid);
+        if (!existing) return null;
+        const merged = { ...existing, ...patch, command_uuid: commandUuid };
+        await db.put('outbox', merged);
+        return merged;
+    }
+
+    /** Удалить команды по command_uuid[]. */
+    async deleteOutboxCommands(uuids) {
+        if (!uuids || uuids.length === 0) return;
         const db = await this.dbPromise;
         const tx = db.transaction('outbox', 'readwrite');
-        for (const id of uuids) {
-            tx.objectStore('outbox').delete(id);
-        }
+        for (const id of uuids) tx.objectStore('outbox').delete(id);
         await tx.done;
     }
 
-        async clearOutbox() {
+    /** Количество pending (любые авторы). */
+    async getOutboxCount() {
+        const db = await this.dbPromise;
+        return db.countFromIndex('outbox', 'status', 'pending');
+    }
+
+    /** Количество failed (любые авторы). */
+    async getFailedCount() {
+        const db = await this.dbPromise;
+        return db.countFromIndex('outbox', 'status', 'failed');
+    }
+
+    async clearOutbox() {
         const db = await this.dbPromise;
         await db.clear('outbox');
     }
 
-    // --- Кэш заявок ---
+    // =========================================================================
+    // Outbox — SHIM (старый API, до Фаз 1–3)
+    // =========================================================================
+
+    /**
+     * @deprecated create-controller.js до Фазы 3.
+     * Принимает старый формат, мапит в новый.
+     */
+    async addToOutbox(oldCmd) {
+        return this.addOutboxCommand({
+            command_uuid: oldCmd.uuid || ('cmd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10)),
+            command_type: 'CreateTicket',
+            ticket_id: null,
+            offline_uuid: oldCmd.offline_uuid || null,
+            payload: oldCmd.payload || {},
+            created_at: oldCmd.created_at || Math.floor(Date.now() / 1000),
+            offline_author_id: oldCmd.offline_author_id ?? null,
+            offline_author_name: oldCmd.offline_author_name ?? null
+        });
+    }
+
+    /**
+     * @deprecated sync-manager.js до Фазы 2.
+     * Отдаёт pending в СТАРОМ формате. Всех авторов.
+     */
+    async getOutboxBatch(limit = 10) {
+        const cmds = await this.getPendingBatch(limit);
+        return cmds.map(c => ({
+            uuid: c.command_uuid,
+            offline_uuid: c.offline_uuid,
+            offline_author_id: c.offline_author_id,
+            offline_author_name: c.offline_author_name,
+            payload: c.payload,
+            created_at: c.created_at
+        }));
+    }
+
+    /**
+     * @deprecated tickets-controller.js / details-controller.js до Фазы 3.
+     * Отдаёт ТОЛЬКО CreateTicket — для UI «офлайн-заявок». Всех авторов.
+     */
+    async getAllFromOutbox() {
+        const all = await this.getAllPending();
+        return all
+            .filter(c => c.command_type === 'CreateTicket' && c.status === 'pending')
+            .map(c => ({
+                uuid: c.command_uuid,
+                offline_uuid: c.offline_uuid,
+                offline_author_id: c.offline_author_id,
+                offline_author_name: c.offline_author_name,
+                payload: c.payload,
+                created_at: c.created_at
+            }));
+    }
+
+    /** @deprecated sync-manager.js до Фазы 2. */
+    async deleteFromOutbox(uuids) {
+        return this.deleteOutboxCommands(uuids);
+    }
+
+    // =========================================================================
+    // Кэш заявок (без изменений)
+    // =========================================================================
+
     async saveTickets(type, tickets) {
-    const db = await this.dbPromise;
-    const tx = db.transaction('tickets_cache', 'readwrite');
-    const store = tx.objectStore('tickets_cache');
+        const db = await this.dbPromise;
+        const tx = db.transaction('tickets_cache', 'readwrite');
+        const store = tx.objectStore('tickets_cache');
 
-    // Точечно вычищаем старый кэш нужного типа через курсор — не читаем
-    // чужие типы (open/close) в память, как это делал getAll().
-    let cursor = await store.openCursor();
-    while (cursor) {
-        if (cursor.value._type === type) {
-            // Fire-and-forget: операция копится в буфере текущей транзакции,
-            // курсор не теряет позицию. .catch(() => {}) гасит возможный
-            // unhandled rejection — реальная ошибка всплывёт в tx.done ниже.
-            cursor.delete().catch(() => {});
+        let cursor = await store.openCursor();
+        while (cursor) {
+            if (cursor.value._type === type) {
+                cursor.delete().catch(() => {});
+            }
+            cursor = await cursor.continue();
         }
-        cursor = await cursor.continue();
-    }
 
-    // Записываем новые данные пачкой
-    for (const t of tickets) {
-        store.put({ ...t, _type: type });
-    }
-
-    // Закрываем транзакцию — здесь браузер атомарно применит
-    // все удаления и записи на диск, либо откатит целиком.
-    await tx.done;
+        for (const t of tickets) {
+            store.put({ ...t, _type: type });
+        }
+        await tx.done;
     }
 
     async getTickets(type) {
@@ -186,15 +356,11 @@ class OfflineDB {
         const store = tx.objectStore('tickets_cache');
         const results = [];
 
-        // Используем курсор вместо getAll
         let cursor = await store.openCursor();
         while (cursor) {
-            if (cursor.value._type === type) {
-                results.push(cursor.value);
-            }
+            if (cursor.value._type === type) results.push(cursor.value);
             cursor = await cursor.continue();
         }
-
         await tx.done;
         return results;
     }

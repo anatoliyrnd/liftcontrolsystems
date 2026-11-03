@@ -155,61 +155,67 @@ export class ApiService {
       const data = await response.json();
 
       // Ошибка внутри JSON
-      if (data && data.status === "error" && !skipAuthHandling) {
-        // Если тестовый режим — просто отдаем ошибку, не выкидываем на логин
-        if (AUTH.BYPASS_AUTH) {
-          return data;
-        }
-        const code = data.code || "";
+     if (data && data.status === "error" && !skipAuthHandling) {
+    if (AUTH.BYPASS_AUTH) {
+        return data;
+    }
 
-        if (
-          code === "token_expired" ||
-          code === "missing_token" ||
-          code === "token_invalid"
-        ) {
-          // Пробуем refresh и retry (только один раз)
-          const okRefresh = await this._refreshSession();
-          if (okRefresh) {
+    const code = data.code || data.error?.code || "";
+
+    if (
+        code === "token_expired" ||
+        code === "missing_token" ||
+        code === "token_invalid"
+    ) {
+        const okRefresh = await this._refreshSession();
+        if (okRefresh) {
             networkLed.reportSuccess();
-            // Повтор исходного запроса — уже с новым токеном
-            return this._sendPostRequest(
-              url,
-              payloadData,
-              actionComment,
-              tag,
-              true,
-            );
-          } else {
+            return this._sendPostRequest(url, payloadData, actionComment, tag, true);
+        } else {
             networkLed.reportFailure();
             this._emitAuthLost(code);
             return data;
-          }
         }
+    }
 
-        if (code === "device_mismatch" || code === "user_blocked") {
-          networkLed.reportFailure();
-          this._emitAuthLost(code);
-          return data;
-        }
-      }
+    if (code === "device_mismatch" || code === "user_blocked") {
+        networkLed.reportFailure();
+        this._emitAuthLost(code);
+        return data;
+    }
 
+    // Rate-limit: извлекаем retry_after, чтобы SyncManager мог
+    // поставить cooldown на нужное время (API_PROTOCOL.md v4.2, разд. 11.3).
+    if (code === "rate_limited") {
+        const rawRetry =
+            data.retry_after ??
+            data.error?.details?.retry_after ??
+            data.details?.retry_after ??
+            60;
+        const retryAfterSec = Math.max(1, parseInt(rawRetry, 10) || 60);
+        data.retryAfterSec = retryAfterSec;   // мутируем — вернётся вместе с data
+        networkLed.reportFailure();
+        return data;
+    }
+}
       networkLed.reportSuccess();
       return data;
     } catch (err) {
-      clearTimeout(timeoutId);
+    clearTimeout(timeoutId);
 
-      if (err.name === "AbortError") {
+    if (err.name === "AbortError") {
         networkLed.reportAborted();
         return { status: "error", code: "aborted", message: "Запрос отменён." };
-      }
+    }
 
-      networkLed.reportFailure();
-      return {
+    networkLed.reportFailure();
+    return {
         status: "error",
         code: "network_error",
+        offline: true,                 // ← ключевой флаг для SyncManager
         message: "Ошибка сети: " + (err.message || "неизвестная ошибка"),
-      };
-    } finally {
+    };
+} finally {
       if (showStatus) {
         apiStatus.hide();
       }
