@@ -1,0 +1,101 @@
+-- ============================================
+-- Группы лифтов (минимально, для совместимости)
+-- ============================================
+CREATE TABLE IF NOT EXISTS `elevator_groups` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `is_system` tinyint(1) NOT NULL DEFAULT 0 COMMENT '1 = системная, нельзя удалить',
+  `is_active` tinyint(1) NOT NULL DEFAULT 1,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Системная группа «Без группы»
+INSERT INTO `elevator_groups` (`id`, `name`, `is_system`) 
+VALUES (1, 'Без группы', 1);
+ALTER TABLE `lift_object`
+  ADD COLUMN `group_id` int(11) NOT NULL DEFAULT 1
+    COMMENT 'Группа лифтов. 1 = Без группы. Задел на новый бэкенд'
+    AFTER `home_id`;
+
+ALTER TABLE `lift_object`
+  ADD KEY `idx_objects_group` (`group_id`);
+  ALTER TABLE `lift_calls`
+  ADD COLUMN `elevator_group_id` int(11) DEFAULT 1
+    COMMENT 'Группа лифта на момент создания. Задел на новый бэкенд'
+    AFTER `address_lift`,
+  ADD COLUMN `address_not_verified` tinyint(1) NOT NULL DEFAULT 0
+    COMMENT '1 = адрес не прошёл валидацию (офлайн-заявка)'
+    AFTER `elevator_group_id`;
+
+ALTER TABLE `lift_calls`
+  ADD KEY `idx_calls_group` (`elevator_group_id`),
+  ADD KEY `idx_calls_staff_active` (`call_staff`, `call_status`)
+    COMMENT 'Для выборки заявок механика: свои открытые';
+
+-- Привязать существующие заявки к системной группе
+UPDATE `lift_calls` SET `elevator_group_id` = 1 WHERE `elevator_group_id` IS NULL;
+
+ALTER TABLE `lift_users`
+  ADD COLUMN `user_position` varchar(50) DEFAULT NULL
+    COMMENT 'Должность: admin, dispatcher, foreman, mechanic, guest'
+    AFTER `user_role`,
+  ADD COLUMN `allow_dispatcher_quick_login` tinyint(1) NOT NULL DEFAULT 1
+    COMMENT 'Показывать в списке быстрого входа диспетчера'
+    AFTER `user_position`;
+
+ALTER TABLE `lift_users`
+  ADD KEY `idx_users_position` (`user_position`);
+
+-- Заполнить user_position на основе текущих данных
+UPDATE `lift_users` SET `user_position` = 'admin'
+  WHERE `user_role` = 'administrator';
+
+UPDATE `lift_users` SET `user_position` = 'dispatcher'
+  WHERE `user_role` = 'dispatcher' AND `user_login` != 'foreman';
+
+UPDATE `lift_users` SET `user_position` = 'foreman'
+  WHERE `user_login` = 'foreman';
+
+UPDATE `lift_users` SET `user_position` = 'mechanic'
+  WHERE `user_role` = 'engineer';
+
+UPDATE `lift_users` SET `user_position` = 'guest'
+  WHERE `user_role` = 'guest';
+-- уведомления
+-- Таблица для хранения уведомлений
+CREATE TABLE IF NOT EXISTS `lift_notifications` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `event_type` varchar(50) NOT NULL COMMENT 'Тип события: ticket_created, ticket_closed, ticket_edited',
+  `ticket_id` int(11) DEFAULT NULL COMMENT 'ID заявки',
+  `user_id` int(11) DEFAULT NULL COMMENT 'ID пользователя-инициатора',
+  `text` varchar(500) NOT NULL COMMENT 'Текст уведомления',
+  `sound` tinyint(1) NOT NULL DEFAULT 0 COMMENT 'Воспроизводить звук',
+  `timeout` int(11) DEFAULT NULL COMMENT 'Время показа тоста в мс',
+  `created_at` int(11) NOT NULL COMMENT 'Unix timestamp',
+  PRIMARY KEY (`id`),
+  KEY `idx_created_at` (`created_at`),
+  KEY `idx_ticket_id` (`ticket_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Таблица для версий справочников
+CREATE TABLE IF NOT EXISTS `lift_dict_versions` (
+  `dict_name` varchar(50) NOT NULL,
+  `version` int(11) NOT NULL DEFAULT 1,
+  `updated_at` int(11) NOT NULL,
+  PRIMARY KEY (`dict_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`) VALUES
+('staff', 1, UNIX_TIMESTAMP()),
+('dicts', 1, UNIX_TIMESTAMP()),
+('addresses', 1, UNIX_TIMESTAMP())
+ON DUPLICATE KEY UPDATE `version` = `version`;
+
+
+
+  --admin	admin	administrator	Администратор Системы	Полный доступ ко всему
+dispatcher	123456	dispatcher	Иванов Иван Иванович	Обычный диспетчер
+foreman	123456	dispatcher	Петров Пётр Петрович	Прораб
+mechanic	123456	engineer	Сергеенко Сергей Сергеевич	Механик
+guest	guest	guest	Аудитор УК	Только чтение 
