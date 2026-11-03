@@ -1,48 +1,61 @@
-# Обновлённый `API_PROTOCOL.md` (v4.1)
+# Сообщение 1 из 3: `API_PROTOCOL.md` v4.2
 
-**Версия:** 4.1  
+```markdown
+# 📋 API_PROTOCOL.md — v4.2
+
+**Версия:** 4.2  
 **Статус:** Актуально (согласовано)  
-**Дата:** 01.11.2026  
-**Изменения от v4.0:** добавлены actions для отчётов (`/reports/calls/*`), обновлён `get_org_users` (фильтр по `user_position`), добавлены параметры `include_hidden` / `is_hidden` / `suspended_at` для `loadAddress`, обновлён `callNewOffline` (только открытые заявки), добавлены коды ошибок `token_revoked`, `contract_terminated`, `call_already_closed`.
+**Дата:** 03.11.2026  
 
-**Связанные документы:** AUTH_PROTOCOL.md, OFFLINE_PROTOCOL.md, TECHNICAL_DEBT.md, MASTER_PLAN.md, bisness.md
+**Изменения от v4.1:**
+- ❌ Удалён `callNewOffline` (не был в продакшене, заменён на `syncCommands`)
+- ✅ Добавлен `syncCommands` (универсальная офлайн-синхронизация, 5 типов команд)
+- ✅ Обновлена сводная таблица полей заявки (`call_id` + `call_number`)
+- ✅ Добавлен раздел «Синхронизация офлайн-команд»
+
+**Связанные документы:** `AUTH_PROTOCOL.md`, `OFFLINE_PROTOCOL.md` v3.0, `API_syncCommands.md`, `TECHNICAL_DEBT.md`
 
 ---
 
 ## 📑 Содержание
 
-- [Глобальные параметры сетевого шлюза](#-глобальные-параметры-сетевого-шлюза)
-- [Форматы данных](#-форматы-данных)
-- [Перечень доступных Экшенов (Actions)](#-перечень-доступных-экшенов-actions)
-- [Обработка ошибок](#-обработка-ошибок-сетевого-шлюза-error-handling)
-- [Сводная таблица полей заявки](#-сводная-таблица-полей-заявки)
-- [Профиль и настройки](#11-профиль-и-настройки-интерфейса)
-- [Интеграция с ключом организации](#12-интеграция-с-ключом-организации)
-- **13. Отчёты и поиск (новое)**
-- **14. Мультитенантность (новое)**
+1. [Глобальные параметры сетевого шлюза](#-глобальные-параметры-сетевого-шлюза)
+2. [Форматы данных](#-форматы-данных)
+3. [Перечень доступных Экшенов (Actions)](#-перечень-доступных-экшенов-actions)
+4. [Синхронизация офлайн-команд (`syncCommands`)](#4-синхронизация-офлайн-команд-synccommands)
+5. [Обработка ошибок](#-обработка-ошибок-сетевого-шлюза-error-handling)
+6. [Сводная таблица полей заявки](#-сводная-таблица-полей-заявки)
+7. [Профиль и настройки](#7-профиль-и-настройки)
+8. [Интеграция с ключом организации](#8-интеграция-с-ключом-организации)
+9. [Отчёты и поиск](#9-отчёты-и-поиск)
+10. [Мультитенантность](#10-мультитенантность)
 
 ---
 
 ## 🌐 Глобальные параметры сетевого шлюза
 
-Соглашение о ключе запроса:
+### Соглашение о ключе запроса
 
-- Чтение данных (`config`, `open`, `close`, `loadAddress`, `notifications`, `get_user_settings`, `check_org_key`, `get_org_users`) — отправляются с ключом `"data"`.
-- Команды и отправка данных (`callnew`, `calledit`, `callClose`, `callnote`, `callNewOffline`, `save_user_settings`) — отправляются с ключом `"action"`.
+| Ключ | Назначение | Примеры |
+|------|-----------|---------|
+| `"data"` | Чтение данных | `config`, `open`, `close`, `loadAddress`, `notifications`, `get_user_settings`, `check_org_key`, `get_org_users` |
+| `"action"` | Команды и отправка данных | `callnew`, `calledit`, `callClose`, `callnote`, **`syncCommands`**, `save_user_settings` |
+
+### Параметры соединения
 
 | Параметр | Значение |
-|---|---|
+|----------|----------|
 | Рабочий шлюз (legacy) | `https://sh.e-rcs.ru` |
 | Шлюз liftcs | `https://l3.liftcs.ru` (урезанный, Трек А) |
 | Новый API (Трек Б) | `https://api.liftcs.ru` |
-| Метод запроса | POST |
+| Метод запроса | `POST` |
 | Content-Type | `application/json; charset=utf-8` |
 | Accept | `application/json` |
 | Архитектурный стиль | RPC-over-POST |
 | Таймаут фронтенда | 15 секунд (AbortController) |
-| CORS | Разрешены предварительные OPTIONS-запросы, сервер возвращает 200 OK с заголовками разрешения |
+| CORS | Разрешены предварительные OPTIONS-запросы, сервер возвращает 200 OK |
 
-**Мультитенантность:** новый API определяет тенант по заголовку `X-Tenant: <subdomain>`, JWT (`tenant_id`) или `org_key` в теле. Подробнее — раздел 14.
+**Мультитенантность:** новый API определяет тенант по заголовку `X-Tenant: <subdomain>`, JWT (`tenant_id`) или `org_key` в теле. Подробнее — раздел 10.
 
 ---
 
@@ -51,16 +64,16 @@
 ⚠️ **Важно:** Начиная с версии 4.0, все даты и время передаются как Unix timestamp (целое число секунд).
 
 | Тип поля | Формат | Пример |
-|---|---|---|
-| Дата + время | Unix timestamp (секунды) | 1761214500 (23.10.2026@12:15) |
-| Числовые ID | Integer | 35732 |
-| `alert_level` | Integer 1–3 | 3 |
+|----------|--------|--------|
+| Дата + время | Unix timestamp (секунды) | `1761214500` (23.10.2026@12:15) |
+| Числовые ID | Integer | `35732` |
+| alert_level | Integer 1–3 | `3` |
 | Флаг заметок | String `"Есть заметки (N)"` | `"Есть заметки (3)"` |
 
 ### 🔔 Каналы уведомления (`notify_status`)
 
 | Код | Канал | Суффикс |
-|---|---|---|
+|-----|-------|---------|
 | 0 | — (не уведомлён) | «Не уведомлен» |
 | 1 | 📞 Телефон | « - по телефону» |
 | 2 | 🖥 WEB | « - онлайн» |
@@ -95,76 +108,24 @@
     "can_view_settings": false,
     "can_manage_dispatchers": false
   },
-  "menu_structure": [
-    {
-      "id": "create",
-      "title": "Добавить заявку",
-      "type": "icon-button",
-      "icon_svg": "<svg ...>",
-      "target_hash": "#/create",
-      "required_permission": "can_add_ticket"
-    },
-    {
-      "id": "open_tickets",
-      "title": "Открытые заявки",
-      "type": "nav-link",
-      "target_hash": "#/",
-      "is_default": true
-    },
-    {
-      "id": "closed_tickets",
-      "title": "Закрытые заявки",
-      "type": "nav-link",
-      "target_hash": "#/closed"
-    },
-    {
-      "id": "reports",
-      "title": "Отчёты",
-      "type": "nav-link",
-      "target_hash": "#/reports",
-      "required_permission": "can_view_reports"
-    }
-  ],
-  "staff_list": [
-    { "id": 1, "name": "Иванов Иван", "phone": "+7 (900) 111-11-11" },
-    { "id": 2, "name": "Степанов Степан", "phone": "+7 (900) 222-22-22" },
-    { "id": 3, "name": "Сергеенко Сергей", "phone": null }
-  ],
+  "menu_structure": [ ... ],
+  "staff_list": [ ... ],
   "department": { "22": "1.Электромеханики", "23": "2.Аварийная служба" },
   "request": { "1": "1.Срочная", "2": "2.Обычная", "3": "3.Не срочная" },
-  "group": {
-    "4": "1.Застревание",
-    "5": "2.Мелкая неисправность",
-    "6": "3.Неисправность лифта",
-    "7": "4.Дополнительные работы",
-    "8": "5.Длительный ремонт",
-    "24": "6.Неисправность дисп. об.",
-    "9": "7.Прочее"
-  },
-  "elevator_groups": [
-    { "id": 1, "name": "ЖК Солнечный" },
-    { "id": 2, "name": "Дом Ленина 10" }
-  ]
+  "group": { "4": "1.Застревание", ... },
+  "elevator_groups": [ { "id": 1, "name": "ЖК Солнечный" }, ... ]
 }
 ```
-
-**Новое поле `user_permissions.user_position`** — должностной тип (для UI, фильтрации).
-
-**Новое поле `user_permissions.can_manage_dispatchers`** — если `true`, пользователь может управлять диспетчерами (старший диспетчер).
-
-**Новое поле `elevator_groups`** — список доступных пользователю групп лифтов (для фильтра и формы создания).
 
 **Роли:**
 
 | Роль | Описание |
-|---|---|
+|------|----------|
 | `administrator` | Полные права |
 | `dispatcher` | Создаёт и редактирует заявки в своих группах |
 | `engineer` | Механик. Видит закреплённые лифты и свои заявки |
 | `guest` | Только чтение |
 | `reserved` | Резерв |
-
----
 
 ### 2. Получение списка открытых заявок (`open`)
 
@@ -173,18 +134,7 @@
 { "data": "open" }
 ```
 
-**Response:** массив объектов (структура — см. сводную таблицу в конце).
-
-**Новые поля в каждой заявке:**
-
-- `elevator_group_id` — ID группы лифтов.
-- `elevator_group_name` — название группы.
-- `is_emergency` — заявка Аварийной службы (boolean).
-- `can_close` — может ли текущий пользователь закрыть заявку (boolean, рассчитывается сервером).
-- `can_edit` — может ли редактировать.
-- `can_comment` — может ли комментировать.
-
----
+**Response:** массив объектов (структура — см. сводную таблицу в разделе 6).
 
 ### 3. Получение списка закрытых заявок (`close`)
 
@@ -195,10 +145,6 @@
 
 **Параметр `period`:** 1 / 2 / 3 / 7 (дней). Максимум 7 дней.
 
-**Response:** структура идентична `open`, но `solution`, `close_name`, `close_date` заполнены.
-
----
-
 ### 4. Получение справочника адресов (`loadAddress`)
 
 **Request:**
@@ -206,48 +152,7 @@
 { "data": "loadAddress", "include_hidden": false }
 ```
 
-**Новый параметр `include_hidden`** — если `true`, возвращаются скрытые лифты (`vis=0`) с полями `is_hidden`, `hidden_reason`, `suspended_at`.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "action": "loadAddress",
-  "message": {
-    "city": [{ "id": 1, "city_name": "г. Ростов-на-Дону" }],
-    "street": [{ "id": 2, "street_name": "ул. Ленина", "city_id": 1 }],
-    "home": [{ "id": 5, "home_name": "5", "street_id": 2 }],
-    "object": [
-      {
-        "id": 209,
-        "object_name": "п.1 пасс.",
-        "home_id": 5,
-        "vis": 1,
-        "is_hidden": false,
-        "hidden_reason": null,
-        "suspended_at": null,
-        "group_id": 1,
-        "contractor_id": 1,
-        "object_kind": "real"
-      },
-      {
-        "id": 210,
-        "object_name": "п.2 груз.",
-        "home_id": 5,
-        "vis": 0,
-        "is_hidden": true,
-        "hidden_reason": "Договор расторгнут 01.09.2026",
-        "suspended_at": 1756684800,
-        "group_id": 1,
-        "contractor_id": 1,
-        "object_kind": "real"
-      }
-    ]
-  }
-}
-```
-
----
+**Параметр `include_hidden`:** если `true`, возвращаются скрытые лифты (`vis=0`) с полями `is_hidden`, `hidden_reason`, `suspended_at`.
 
 ### 5. Регистрация новой заявки (`callnew`)
 
@@ -269,17 +174,14 @@
 }
 ```
 
-**Проверка при создании:**
-
-- Если `lift_object.vis = 0` и пользователь **не** Админ и **не** Прораб с `can_manage_contract_status` → ошибка `contract_terminated`.
+**Проверки при создании:**
+- Если `lift_object.vis = 0` и пользователь не Админ/Прораб с `can_manage_contract_status` → ошибка `contract_terminated`.
 - Проверка прав `CallPolicy::canCreate($user, $groupId)`.
 
 **Response:**
 ```json
 { "status": "ok", "message": "Заявка успешно зарегистрирована.", "generated_id": 35733 }
 ```
-
----
 
 ### 6. Частичное редактирование заявки (`calledit`)
 
@@ -298,22 +200,13 @@
 ```
 
 **Ограничения:**
-
 - Адрес менять нельзя.
 - Закрытие через `calledit` запрещено.
 - За один запрос — одно назначение или снятие ответственного.
 
-**Response:**
-```json
-{ "status": "ok", "message": "Изменения по заявке №35732 успешно сохранены." }
-```
-
 **Новые коды ошибок:**
-
 - `call_already_closed` — заявка уже закрыта.
 - `forbidden` — нет прав.
-
----
 
 ### 7. Закрытие заявки (`callClose`)
 
@@ -327,14 +220,7 @@
 }
 ```
 
-**Response:**
-```json
-{ "status": "ok", "message": "Заявка №35732 успешно закрыта." }
-```
-
 **Новый код ошибки:** `call_already_closed` (409) — если заявка уже закрыта, с именем закрывшего и датой.
-
----
 
 ### 8. Добавление комментария (`callnote`)
 
@@ -348,63 +234,9 @@
 }
 ```
 
-`photo_base64` — опционально. Лимит: **2 фото на всю заявку**.
+`photo_base64` — опционально. **Лимит: 2 фото на всю заявку.**
 
-**Response:**
-```json
-{ "status": "ok", "message": "Комментарий успешно добавлен к заявке №35732.", "note_id": 143 }
-```
-
----
-
-### 9. Синхронизация офлайн-пачки (`callNewOffline`)
-
-**Request:**
-```json
-{
-  "action": "callNewOffline",
-  "batch_id": "uuid-...",
-  "tickets": [
-    {
-      "offline_uuid": "offline_1714567890123_x7k2p",
-      "offline_author_id": 3,
-      "offline_author_name": "Сергеенко Сергей",
-      "city_id": "1",
-      "street_id": "2",
-      "home_id": "3",
-      "object_id": "11",
-      "fullAddress": "...",
-      "group_id": "8",
-      "request_id": "2",
-      "department_id": "22",
-      "repair_time": 1761220800,
-      "details": "...",
-      "staff_id": 3
-    }
-  ]
-}
-```
-
-**Особенности:**
-
-- Максимум 10 заявок в пачке.
-- Атомарность: либо вся пачка, либо ничего.
-- Идемпотентность: `offline_uuid` UNIQUE.
-- Если адрес не валидируется — сохраняется с `address_not_verified = 1`.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "message": "Пачка из 10 заявок успешно синхронизирована.",
-  "created": [35740, 35741, ...],
-  "skipped": []
-}
-```
-
----
-
-### 10. Получение событий-уведомлений (`notifications`)
+### 9. Получение событий-уведомлений (`notifications`)
 
 **Request:**
 ```json
@@ -415,204 +247,32 @@
 }
 ```
 
-**Response:** массив событий (см. v4.0), + `last_id`, `versions`, `outdated`.
-
 ---
 
-### 11. Профиль и настройки (`get_user_settings` / `save_user_settings`)
+## 4. Синхронизация офлайн-команд (`syncCommands`)
 
-Без изменений от v4.0. См. полную структуру в исходном документе.
+⚠️ **Универсальный эндпоинт для пакетной синхронизации офлайн-действий.**
 
----
+Поддерживает **5 типов команд**:
+- `CreateTicket` — создание заявки (только диспетчер/админ)
+- `EditTicket` — редактирование заявки (только диспетчер/админ, Soft Merge)
+- `CloseTicket` — закрытие заявки (диспетчер + механик)
+- `AddComment` — добавление комментария (диспетчер + механик)
+- `AcceptTicket` — принятие в работу (диспетчер + механик)
 
-### 12. Интеграция с ключом организации (`check_org_key` / `get_org_users`)
+**Полная спецификация:** см. отдельный документ **`API_syncCommands.md`**.
 
-#### 12.1. `check_org_key`
+**Краткая сводка:**
 
-**Request:**
-```json
-{ "data": "check_org_key", "org_key": "XXXX-XXXX-XXXX" }
-```
-
-**Response:**
-```json
-{ "status": "ok", "message": "Ключ действителен" }
-```
-
-#### 12.2. `get_org_users`
-
-**Request:**
-```json
-{ "data": "get_org_users", "org_key": "XXXX-XXXX-XXXX" }
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "users": [
-    { "user_id": 3, "name": "Иванов Иван" },
-    { "user_id": 4, "name": "Петров Петр" }
-  ]
-}
-```
-
-**⚠️ Критично:** сервер возвращает **только пользователей с `user_position = 'dispatcher'`** (старшие диспетчеры тоже попадают, так как у них `user_position = 'dispatcher'`).
-
-Прораб, админ, механик, связист, инженер-электронщик, гость — **не попадают**.
-
----
-
-### 13. Отчёты и поиск (новое в v4.1)
-
-#### 13.1. Поиск заявок (`GET /reports/calls/search`)
-
-**Request:**
-```json
-{
-  "call_number": "357",
-  "object_id": 11,
-  "home_id": 3,
-  "mechanic_id": 3,
-  "date_from": 1761000000,
-  "date_to": 1761300000,
-  "status": "all",
-  "exclude_emergency": true,
-  "page": 1,
-  "per_page": 50
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "data": {
-    "calls": [
-      {
-        "id": 35732,
-        "call_number": "35732",
-        "type": "open",
-        "fullAddress": "...",
-        "object_id": 11,
-        "home_id": 3,
-        "details": "...",
-        "staff_id": 3,
-        "staff_name": "Сергеенко Сергей",
-        "department": "1.Электромеханики",
-        "group": "1-я группа",
-        "request": "Застревание",
-        "date": 1761214200,
-        "repair_time": 1761220800,
-        "solution": "—",
-        "close_name": "—",
-        "close_date": null,
-        "alert_level": 3,
-        "is_emergency": false
-      }
-    ],
-    "total": 1,
-    "page": 1,
-    "per_page": 50,
-    "pages": 1
-  }
-}
-```
-
-**Правила фильтрации:**
-
-- `call_number` — частичное совпадение (`LIKE %...%`).
-- `exclude_emergency = true` — исключить заявки с `is_emergency = true`.
-- Механик видит только свои заявки (где `call_staff = user_id`).
-- Диспетчер видит заявки своих групп.
-- Админ — все.
-
-**Ограничения:**
-
-- Максимум 10 000 строк за запрос.
-- `per_page` — от 1 до 500.
-
-#### 13.2. Экспорт в PDF (`GET /reports/calls/export/pdf`)
-
-**Request:** те же параметры, что и `search`, без `page` / `per_page` (либо с ними — экспортируется одна страница).
-
-**Response:** `application/pdf` (бинарь) или `{ "status": "ok", "url": "..." }`, если экспорт асинхронный.
-
-**Rate-limit:** 10 запросов в час на пользователя.
-
-**Аудит:** `audit_log: report.export` с параметрами фильтров.
-
-#### 13.3. Экспорт в Excel (`GET /reports/calls/export/excel`)
-
-Аналогично PDF. `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
-
----
-
-### 14. Мультитенантность (новое в v4.1)
-
-#### 14.1. Определение тенанта
-
-**Заголовок `X-Tenant`** (рекомендуется для legacy-совместимости):
-```
-X-Tenant: l3
-```
-
-**Или `org_key` в теле** (только для `login`, `check_org_key`, `get_org_users`):
-```json
-{ "data": "check_org_key", "org_key": "XXXX-XXXX-XXXX" }
-```
-
-**Или JWT `tenant_id`** (после логина, основной способ для нового API):
-```json
-// payload JWT
-{ "user_id": 3, "tenant_id": 1, "role": "dispatcher", "position": "dispatcher" }
-```
-
-#### 14.2. Приоритет
-
-1. JWT `tenant_id` (если токен есть).
-2. `X-Tenant` (если токена нет — для `login`).
-3. `org_key` (только для `check_org_key`, `get_org_users`, `login`).
-
-Если ни один не определён → **401 `tenant_not_resolved`**.
-
-#### 14.3. Login в мультитенантном сценарии
-
-**Request:**
-```json
-{
-  "login": "ivanov",
-  "password": "...",
-  "org_key": "l3",
-  "device_fingerprint": "..."
-}
-```
-
-**Response:**
-```json
-{
-  "ok": true,
-  "data": {
-    "access_token": "eyJ...",
-    "refresh_token": "abc...",
-    "user": {
-      "user_id": 3,
-      "name": "Иванов И.И.",
-      "role": "dispatcher",
-      "position": "dispatcher",
-      "tenant_id": 1
-    }
-  }
-}
-```
-
-#### 14.4. Коды ошибок мультитенантности
-
-| Код | HTTP | Когда |
-|---|---|---|
-| `tenant_not_resolved` | 401 | Тенант не определён по JWT / X-Tenant / org_key |
-| `tenant_suspended` | 403 | Тенант в статусе `suspended` |
-| `tenant_not_found` | 404 | Тенант не найден в master-реестре |
+| Параметр | Значение |
+|----------|----------|
+| Endpoint | `POST /calls/syncCommands` |
+| Максимум команд в пачке | 20 |
+| Максимальный вес пачки | 3.5 МБ (JSON) |
+| Максимальный размер запроса | 10 MB (Nginx `client_max_body_size`) |
+| Атомарность | Частичный успех (Partial Success) |
+| Идемпотентность | `batch_id` + `command_uuid` |
+| Таймаут клиента | 30 секунд |
 
 ---
 
@@ -629,10 +289,10 @@ X-Tenant: l3
 }
 ```
 
-**Новые коды ошибок (v4.1):**
+### Коды ошибок (v4.2)
 
 | Код | HTTP (факт. тело) | Когда |
-|---|---|---|
+|-----|:-----------------:|-------|
 | `token_revoked` | 200 | Токен отозван (смена прав, блокировка) |
 | `forbidden` | 200 | Нет прав (Policy) |
 | `contract_terminated` | 200 | Попытка работы со скрытым лифтом (`vis=0`) |
@@ -644,10 +304,10 @@ X-Tenant: l3
 | `invalid_key` | 200 | Неверный org_key |
 | `invalid_password` | 200 | Неверный старый пароль |
 
-**Поведение фронтенда при ошибках:**
+### Поведение фронтенда при ошибках
 
 | Ситуация | Поведение UI |
-|---|---|
+|----------|--------------|
 | Ошибка валидации / логическая | LED-индикатор красный, в блоке «История» текст `message` |
 | `token_revoked` | Модалка «Права изменены», logout через 10 сек |
 | `contract_terminated` | Плашка «Договор расторгнут», кнопка «Создать» скрыта |
@@ -656,13 +316,13 @@ X-Tenant: l3
 
 ---
 
-## 📎 Сводная таблица полей заявки (v4.1)
+## 📎 Сводная таблица полей заявки (v4.2)
 
-| Поле | Тип | open | close | Описание |
-|---|---|---|---|---|
-| `id` | integer | ✓ | ✓ | Уникальный ID заявки |
-| `call_number` | string | ✓ | ✓ | Номер заявки (для поиска) |
-| `type` | string | "open" | "close" | Режим отображения |
+| Поле | Тип | `open` | `close` | Описание |
+|------|-----|:------:|:-------:|----------|
+| `call_id` | integer | ✓ | ✓ | Уникальный ID заявки (он же номер для поиска) |
+| `call_number` | string | ✓ | ✓ | Строковое представление ID (для UI и полнотекстового поиска) |
+| `type` | string | ✓ | ✓ | `"open"` / `"close"` — режим отображения |
 | `fullAddress` | string | ✓ | ✓ | Полный собранный адрес |
 | `city_id` | integer \| null | ✓ | ✓ | ID города |
 | `street_id` | integer \| null | ✓ | ✓ | ID улицы |
@@ -689,8 +349,8 @@ X-Tenant: l3
 | `request_id` | string | ✓ | ✓ | ID типа неисправности |
 | `date` | integer | ✓ | ✓ | Unix timestamp регистрации |
 | `repair_time` | integer | ✓ | ✓ | Unix timestamp планируемого устранения |
-| `solution` | string | "—" | ✓ | Описание выполненных работ |
-| `close_name` | string | "—" | ✓ | ФИО закрывшего |
+| `solution` | string | `"—"` | ✓ | Описание выполненных работ |
+| `close_name` | string | `"—"` | ✓ | ФИО закрывшего |
 | `close_date` | integer \| null | null | ✓ | Unix timestamp закрытия |
 | `full_history` | string \| null | null | ✓ | Полная история |
 | `alert_level` | integer | ✓ | ✓ | Уровень тревоги (1, 2, 3) |
@@ -699,12 +359,104 @@ X-Tenant: l3
 | `note_num` | integer | ✓ | ✓ | Количество заметок |
 | `note` | object | ✓ | ✓ | Комментарии |
 | `closureallowed` | integer | ✓ | null | 1, если механик может закрыть |
-| **`can_close`** | **boolean** | **✓** | **✓** | **Может ли текущий пользователь закрыть** |
-| **`can_edit`** | **boolean** | **✓** | **✓** | **Может ли редактировать** |
-| **`can_comment`** | **boolean** | **✓** | **✓** | **Может ли комментировать** |
+| `can_close` | boolean | ✓ | ✓ | Может ли текущий пользователь закрыть |
+| `can_edit` | boolean | ✓ | ✓ | Может ли редактировать |
+| `can_comment` | boolean | ✓ | ✓ | Может ли комментировать |
 
 ---
 
-**Конец `API_PROTOCOL.md` (v4.1).**
+## 7. Профиль и настройки
+
+`get_user_settings` / `save_user_settings` — без изменений от v4.0.
+
+---
+
+## 8. Интеграция с ключом организации
+
+### 8.1. `check_org_key`
+
+**Request:**
+```json
+{ "data": "check_org_key", "org_key": "XXXX-XXXX-XXXX" }
+```
+
+### 8.2. `get_org_users`
+
+**Request:**
+```json
+{ "data": "get_org_users", "org_key": "XXXX-XXXX-XXXX" }
+```
+
+⚠️ **Критично:** сервер возвращает только пользователей с `user_position = 'dispatcher'`.
+
+---
+
+## 9. Отчёты и поиск
+
+### 9.1. Поиск заявок (`GET /reports/calls/search`)
+
+**Request:**
+```json
+{
+  "call_number": "357",
+  "object_id": 11,
+  "home_id": 3,
+  "mechanic_id": 3,
+  "date_from": 1761000000,
+  "date_to": 1761300000,
+  "status": "all",
+  "exclude_emergency": true,
+  "page": 1,
+  "per_page": 50
+}
+```
+
+**Правила фильтрации:**
+- `call_number` — частичное совпадение (`LIKE %...%`)
+- `exclude_emergency = true` — исключить заявки с `is_emergency = true`
+- Механик видит только свои заявки (где `call_staff = user_id`)
+- Диспетчер видит заявки своих групп
+- Админ — все
+
+**Ограничения:**
+- Максимум 10 000 строк за запрос
+- `per_page` — от 1 до 500
+
+### 9.2. Экспорт в PDF (`GET /reports/calls/export/pdf`)
+
+Rate-limit: 10 запросов в час на пользователя.  
+Аудит: `audit_log: report.export` с параметрами фильтров.
+
+### 9.3. Экспорт в Excel (`GET /reports/calls/export/excel`)
+
+Аналогично PDF. `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
+
+---
+
+## 10. Мультитенантность
+
+### 10.1. Определение тенанта
+
+| Способ | Описание |
+|--------|----------|
+| `X-Tenant` (заголовок) | Рекомендуется для legacy-совместимости |
+| JWT `tenant_id` | Основной способ после логина |
+| `org_key` (в теле) | Только для `login`, `check_org_key`, `get_org_users` |
+
+### 10.2. Приоритет
+
+1. JWT `tenant_id` (если токен есть)
+2. `X-Tenant` (если токена нет — для `login`)
+3. `org_key` (только для `check_org_key`, `get_org_users`, `login`)
+
+Если ни один не определён → 401 `tenant_not_resolved`.
+
+### 10.3. Коды ошибок мультитенантности
+
+| Код | HTTP | Когда |
+|-----|:----:|-------|
+| `tenant_not_resolved` | 401 | Тенант не определён |
+| `tenant_suspended` | 403 | Тенант в статусе `suspended` |
+| `tenant_not_found` | 404 | Тенант не найден в master-реестре |
 
 ---

@@ -29,7 +29,7 @@ import { logHistoryAction } from "./js/history-logger.js";
 import { offlineDB } from "./js/offline-db.js";
 import { flattenAddresses } from "./js/utils/address-flattener.js";
 import { syncTableSettingsFromStorage } from "./js/table/settings.js";
-import { registerSW } from 'virtual:pwa-register';
+import { registerSW } from "virtual:pwa-register";
 import { syncIndicator } from "./js/components/sync-indicator.js";
 import { offlineBanner } from "./js/components/offline-banner.js";
 import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js";
@@ -50,11 +50,66 @@ const loginCtrl = new LoginController(api, router);
 const settingsCtrl = new SettingsController(api, router);
 const profileCtrl = new ProfileController(api, router);
 const queueCtrl = new QueueController(api, router);
+
 let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
 let syncManager = null;
+/**
+ * Централизованная очистка перед каждым переходом.
+ * Регистрируется в router.onBeforeNavigate — вызывается ДО замены DOM
+ * (см. router._handleRoute). Это гарантирует, что unmount активных
+ * контроллеров увидит старую разметку и корректно снимет классы/слушатели.
+ *
+ * Каждый unmount идемпотентен — повторный вызов безвреден.
+ * try/catch на каждом — падение одного не блокирует остальные.
+ */
+function leaveAll() {
+  try {
+    openTicketsCtrl.unmount();
+  } catch (e) {
+    console.warn("[leaveAll] openTicketsCtrl:", e);
+  }
+  try {
+    closedTicketsCtrl.unmount();
+  } catch (e) {
+    console.warn("[leaveAll] closedTicketsCtrl:", e);
+  }
+  try {
+    detailsCtrl.unmount();
+  } catch (e) {
+    console.warn("[leaveAll] detailsCtrl:", e);
+  }
+  try {
+    createCtrl.unmount();
+  } catch (e) {
+    console.warn("[leaveAll] createCtrl:", e);
+  }
+  try {
+    queueCtrl.unmount?.();
+  } catch (e) {
+    console.warn("[leaveAll] queueCtrl:", e);
+  }
+  try {
+    settingsCtrl.unmount?.();
+  } catch (e) {
+    console.warn("[leaveAll] settingsCtrl:", e);
+  }
+  try {
+    profileCtrl.unmount?.();
+  } catch (e) {
+    console.warn("[leaveAll] profileCtrl:", e);
+  }
+  try {
+    loginCtrl.unmount?.();
+  } catch (e) {
+    console.warn("[leaveAll] loginCtrl:", e);
+  }
+}
 
+// Единая точка очистки при смене маршрута. Срабатывает до innerHTML,
+// поэтому unmount видит старый DOM.
+router.onBeforeNavigate(leaveAll);
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async function initAuthorizedApp() {
   if (!menuManager) {
@@ -137,12 +192,11 @@ async function initAppData() {
 
 // --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 document.addEventListener("DOMContentLoaded", async () => {
-
   // 1. Базовая инициализация
   new ThemeController("themeToggle");
   setNotifyRouter(router);
   syncTableSettingsFromStorage();
- syncIndicator.init();
+  syncIndicator.init();
   offlineBanner.init();
   // 2. Подписки на события
   // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
@@ -225,77 +279,51 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   const navLogo = document.getElementById("navLogo");
-    // Обёртка для mountFn, которая гарантирует unmount контроллера #/queue
-  // при переходе на любой другой роут. Идемпотентна: queueCtrl.unmount()
-  // безопасно вызывать даже когда экран очереди ни разу не монтировался.
-  const withQueueUnmount = (mountFn) => (...args) => {
-    try { queueCtrl.unmount(); } catch (e) { /* ignore */ }
-    return mountFn(...args);
-  };
+
   if (navLogo) navLogo.addEventListener("click", () => router.navigate("#/"));
 
   // 6. Роутинг
+  // leaveAll() больше не вызывается здесь — это делает router.onBeforeNavigate.
   router.addRoute(
     "#/login",
     () => loginPageTemplate(),
-    withQueueUnmount(() => loginCtrl.mount()),
+    () => loginCtrl.mount(),
   );
   router.addRoute(
     "#/",
     () => mainPageTemplate(),
-    withQueueUnmount(() => {
-      closedTicketsCtrl.unmount();
-      openTicketsCtrl.mount(openTicketsArray);
-    }),
+    () => openTicketsCtrl.mount(openTicketsArray),
   );
   router.addRoute(
     "#/closed",
     () => mainPageTemplate(),
-    withQueueUnmount(() => {
-      openTicketsCtrl.unmount();
-      closedTicketsCtrl.mount(closedTicketsArray);
-    }),
+    () => closedTicketsCtrl.mount(closedTicketsArray),
   );
   router.addRoute(
     "#/create",
     () => createPageTemplate(),
-    withQueueUnmount(() => {
-      openTicketsCtrl.unmount();
-      createCtrl.unmount();
-      createCtrl.mount(openTicketsArray);
-    }),
+    () => createCtrl.mount(openTicketsArray),
   );
   router.addRoute(
     "#/ticket",
     (id) => detailsPageTemplate(id),
-    withQueueUnmount((id) => {
-      openTicketsCtrl.unmount();
-      detailsCtrl.mount(id, [...openTicketsArray, ...closedTicketsArray]);
-    }),
+    (id) => detailsCtrl.mount(id, [...openTicketsArray, ...closedTicketsArray]),
   );
   router.addRoute(
     "#/settings",
     () => settingsPageTemplate(),
-    withQueueUnmount(() => settingsCtrl.mount()),
+    () => settingsCtrl.mount(),
   );
   router.addRoute(
     "#/profile",
     () => profilePageTemplate(),
-    withQueueUnmount(() => profileCtrl.mount()),
+    () => profileCtrl.mount(),
   );
-  // Экран «Очередь синхронизации» 
-   router.addRoute(
+  router.addRoute(
     "#/queue",
     () => queuePageTemplate(),
     () => queueCtrl.mount(),
   );
-
-  const createPlaceholderRoute = (title) => () =>
-    `<div class="container"><h1>${title}</h1><p style="color:var(--text-secondary); margin-top:10px;">Экран в разработке.</p></div>`;
-  router.addRoute("#/reports", createPlaceholderRoute("Аналитические Отчеты"));
-  router.addRoute("#/addresses", createPlaceholderRoute("Реестр лифтовых адресов"));
-  router.addRoute("#/more", createPlaceholderRoute("Прочие инструменты диспетчера"));
-
   // 7. Сворачивание истории
   const historyWrapper = document.getElementById("historyWrapper");
   const historyTitle = document.getElementById("historyTitle");
@@ -316,7 +344,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       }
     },
-       {
+    {
       onDuplicateDetected: (record, existingTickets) =>
         duplicateTicketModal.show(record, existingTickets),
     },

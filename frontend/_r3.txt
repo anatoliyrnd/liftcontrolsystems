@@ -1,0 +1,560 @@
+﻿95	            type: "open",
+96	            isOffline: true,
+97	            address: o.payload.fullAddress || o.payload.address,
+98	            date: dateInSeconds,
+99	          };
+100	        });
+101	      }
+102	
+103	      if (fresh) {
+104	        // 1. Р•СЃР»Рё СЃРµС‚СЊ РµСЃС‚СЊ вЂ” РїРѕРєР°Р·С‹РІР°РµРј СЃРІРµР¶РёРµ РґР°РЅРЅС‹Рµ
+105	        globalTicketsArrayRef.length = 0;
+106	        globalTicketsArrayRef.push(...offlineTickets, ...fresh);
+107	        // Р СЃРѕС…СЂР°РЅСЏРµРј РёС… РІ РєСЌС€ (РЅР° СЃР»СѓС‡Р°Р№, РµСЃР»Рё СЃР»РµРґСѓСЋС‰РёР№ СЂР°Р· РѕС‚РєСЂРѕРµРј Р±РµР· СЃРµС‚Рё)
+108	        await offlineDB.saveTickets(this.dataType, fresh);
+109	      } else {
+110	        // 2. Р•СЃР»Рё СЃРµС‚Рё РЅРµС‚ (fresh === null) вЂ” Р±РµСЂРµРј РґР°РЅРЅС‹Рµ РёР· РєСЌС€Р°!
+111	        logHistoryAction("РќРµС‚ СЃРѕРµРґРёРЅРµРЅРёСЏ. Р—Р°РіСЂСѓР·РєР° РёР· РѕС„Р»Р°Р№РЅ-РєСЌС€Р°...");
+112	        const cached = await offlineDB.getTickets(this.dataType);
+113	        if (cached.length > 0) {
+114	          globalTicketsArrayRef.length = 0;
+115	          globalTicketsArrayRef.push(...offlineTickets, ...cached);
+116	        } else {
+117	          logHistoryAction("РљСЌС€ РїСѓСЃС‚. РќРµС‚ РґР°РЅРЅС‹С… РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ.");
+118	        }
+119	      }
+120	
+121	      this._renderTableFull(dataTable, globalTicketsArrayRef);
+122	
+123	      if (this.currentSortColumnId !== -1) {
+124	        this._reApplyCurrentSort();
+125	      }
+126	    };
+127	
+128	    if (needBlockingLoad) {
+129	      await loadData(false);
+130	    } else {
+131	      loadData(true);
+132	    }
+133	
+134	    if (this.refreshIntervalId) {
+135	      clearInterval(this.refreshIntervalId);
+136	      this.refreshIntervalId = null;
+137	    }
+138	
+139	    if (this.dataType === "open") {
+140	      this.refreshIntervalId = setInterval(async () => {
+141	        const hash = window.location.hash || "#/";
+142	        if (hash !== "#/") {
+143	          this.unmount();
+144	          return;
+145	        }
+146	
+147	        if (this._isPolling) return;
+148	        this._isPolling = true;
+149	
+150	        try {
+151	          await loadData(true);
+152	        } catch (e) {
+153	          console.error("[TicketsController] Background refresh failed:", e);
+154	          logHistoryAction("Р¤РѕРЅРѕРІРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ: " + (e.message || "РѕС€РёР±РєР°"));
+155	        } finally {
+156	          this._isPolling = false;
+157	        }
+158	      }, API.TICKETS_REFRESH_MS);
+159	    }
+160	
+161	    // рџ”Ґ Р”РћР‘РђР’Р›Р•РќРћ: РџРѕРґРїРёСЃРєР° РЅР° СЃРѕР±С‹С‚РёРµ РѕР±РЅРѕРІР»РµРЅРёСЏ Р°РґСЂРµСЃРѕРІ (СЃ Р·Р°С‰РёС‚РѕР№ РѕС‚ РґСѓР±Р»РµР№)
+162	    if (!this._isSubscribedToAddresses) {
+163	      window.addEventListener("addresses:updated", this._onAddressesUpdated);
+164	      this._isSubscribedToAddresses = true;
+165	    }
+166	  }
+167	
+168	  unmount() {
+169	    if (this.refreshIntervalId) {
+170	      clearInterval(this.refreshIntervalId);
+171	      this.refreshIntervalId = null;
+172	    }
+173	    if (this._filtersAbort) {
+174	      this._filtersAbort.abort();
+175	      this._filtersAbort = null;
+176	    }
+177	    this.isPolling = false;
+178	    this.api.abortTag("tickets_" + this.dataType);
+179	
+180	    if (this._searchDebounceTimer) {
+181	      clearTimeout(this._searchDebounceTimer);
+182	      this._searchDebounceTimer = null;
+183	    }
+184	
+185	    // рџ”Ґ Р”РћР‘РђР’Р›Р•РќРћ: РћС‚РїРёСЃРєР° РѕС‚ СЃРѕР±С‹С‚РёСЏ РѕР±РЅРѕРІР»РµРЅРёСЏ Р°РґСЂРµСЃРѕРІ
+186	    if (this._isSubscribedToAddresses) {
+187	      window.removeEventListener("addresses:updated", this._onAddressesUpdated);
+188	      this._isSubscribedToAddresses = false;
+189	    }
+190	  }
+191	
+192	  // рџ”Ґ Р”РћР‘РђР’Р›Р•РќРћ: РћР±СЂР°Р±РѕС‚С‡РёРє С„РѕРЅРѕРІРѕРіРѕ РѕР±РЅРѕРІР»РµРЅРёСЏ СЃРїСЂР°РІРѕС‡РЅРёРєР° Р°РґСЂРµСЃРѕРІ
+193	  async _onAddressesUpdated() {
+194	    await this._loadPendingState();
+195	    console.log("[TicketsController] РђРґСЂРµСЃР° Р·Р°РіСЂСѓР¶РµРЅС‹ РІ С„РѕРЅРµ, РѕР±РЅРѕРІР»СЏРµРј С„РёР»СЊС‚СЂ РіРѕСЂРѕРґРѕРІ.");
+196	    this._allCities = await offlineDB.getCities();
+197	
+198	    if (this._allCities.length > 0) {
+199	      // Р•СЃР»Рё С„РёР»СЊС‚СЂ Р±С‹Р» РїСѓСЃС‚ (С‚Р°Рє РєР°Рє РєСЌС€ Р±С‹Р» РїСѓСЃС‚ РїСЂРё СЃС‚Р°СЂС‚Рµ), РІС‹Р±РёСЂР°РµРј РІСЃРµ РіРѕСЂРѕРґР°
+200	      if (this._filters.cities.length === 0) {
+201	        this._filters.cities = this._allCities.map((c) => c.id);
+202	      }
+203	      this._renderCityDropdown();
+204	      this._applyLocalFilters(); // РџРµСЂРµСЂРёСЃРѕРІС‹РІР°РµРј С‚Р°Р±Р»РёС†Сѓ СЃ РЅРѕРІС‹РјРё РіРѕСЂРѕРґР°РјРё
+205	    }
+206	  }
+207	/**
+208	 * РљСЌС€РёСЂСѓРµС‚ pending-РєРѕРјР°РЅРґС‹ РІ РїР°РјСЏС‚Рё РєРѕРЅС‚СЂРѕР»Р»РµСЂР°:
+209	 *   _pendingCommandMap: Map<ticket_id, cmd[]>  (Edit/Close/Comment РґР»СЏ СЃРµСЂРІРµСЂРЅС‹С… Р·Р°СЏРІРѕРє)
+210	 *   _pendingCloseMap:   Map<ticket_id, cmd>    (С‚РѕР»СЊРєРѕ CloseTicket)
+211	 *   _openCache:         Array (РґР»СЏ СЃРёРЅС‚РµС‚РёС‡РµСЃРєРёС… Р·Р°РєСЂС‹С‚С‹С… РёР· pending)
+212	 */
+213	async _loadPendingState() {
+214	    const all = await offlineDB.getAllPending();
+215	    this._pendingCommandMap = new Map();
+216	    this._pendingCloseMap = new Map();
+217	
+218	    for (const cmd of all) {
+219	        if (cmd.status !== 'pending') continue;
+220	        if (cmd.ticket_id == null) continue; // РѕС„Р»Р°Р№РЅ-СЃРѕР·РґР°РЅРЅС‹Рµ РѕР±СЂР°Р±Р°С‚С‹РІР°СЋС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕ
+221	        const key = String(cmd.ticket_id);
+222	        if (!this._pendingCommandMap.has(key)) this._pendingCommandMap.set(key, []);
+223	        this._pendingCommandMap.get(key).push(cmd);
+224	
+225	        if (cmd.command_type === 'CloseTicket') {
+226	            this._pendingCloseMap.set(key, cmd);
+227	        }
+228	    }
+229	
+230	    if (this.dataType === 'close' && this._pendingCloseMap.size > 0) {
+231	        this._openCache = await offlineDB.getTickets('open');
+232	    }
+233	}
+234	  async _loadDataFromServer(isSilent = false) {
+235	    try {
+236	      const postPayload = { data: this.dataType };
+237	      const statusMessage = isSilent ? null : "РЎРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РёРЅС†РёРґРµРЅС‚РѕРІ...";
+238	
+239	      if (this.dataType === "close") {
+240	        postPayload.period = this.selectedDays;
+241	      }
+242	
+243	      const data = await this.api.post(
+244	        postPayload,
+245	        statusMessage,
+246	        "tickets_" + this.dataType,
+247	      );
+248	
+249	      if (data && data.code === "aborted") return null;
+250	      if (!data || data.status === "error") {
+251	        throw new Error((data && data.message) || "РЎР±РѕР№ СЃС‚СЂСѓРєС‚СѓСЂС‹ Р‘Р”");
+252	      }
+253	      if (!Array.isArray(data)) {
+254	        throw new Error("РћР¶РёРґР°Р»СЃСЏ РјР°СЃСЃРёРІ Р·Р°СЏРІРѕРє, РїРѕР»СѓС‡РµРЅРѕ: " + typeof data);
+255	      }
+256	
+257	      data.forEach((item) => {
+258	        item.type = this.dataType; // РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ
+259	        if (!item.address && item.fullAddress) {
+260	          item.address = item.fullAddress;
+261	        }
+262	      });
+263	
+264	      this.isLoaded = true;
+265	      if (!isSilent) logHistoryAction("Р–СѓСЂРЅР°Р» СѓСЃРїРµС€РЅРѕ РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅ.");
+266	      return data;
+267	    } catch (error) {
+268	      console.error("[TicketsController] Load error:", error);
+269	      logHistoryAction("РЎР±РѕР№ СЃРµС‚Рё: " + (error.message || "РЅРµС‚ СЃРѕРµРґРёРЅРµРЅРёСЏ"));
+270	      return null;
+271	    }
+272	  }
+273	
+274	  _renderTableFull(dataTable, globalTicketsArrayRef) {
+275	    this._currentTicketsRef = globalTicketsArrayRef;
+276	    let filteredData = [...globalTicketsArrayRef];
+277	
+278	    if (this.dataType === "open") {
+279	      // Р¤РёР»СЊС‚СЂР°С†РёСЏ РїРѕ timestamp (РІ СЃРµРєСѓРЅРґР°С…)
+280	      // РЇРІРЅРѕ РїРµСЂРµРІРѕРґРёРј Date.now() РІ СЃРµРєСѓРЅРґС‹
+281	      const nowSeconds = Math.floor(Date.now() / 1000);
+282	      const maxDateTs = nowSeconds + UI.FILTER_REPAIR_DAYS * 24 * 60 * 60;
+283	
+284	      const cityFilterActive =
+285	        this._allCities.length > 0 && this._filters.cities.length > 0;
+286	
+287	   filteredData = filteredData.filter((t) => {
+288	    if (
+289	        cityFilterActive &&
+290	        t.city_id &&
+291	        !this._filters.cities.includes(Number(t.city_id))
+292	    ) {
+293	        return false;
+294	    }
+295	
+296	    if (this._filters.hideLongRepair) {
+297	        const rTs = Number(t.repair_time);
+298	        if (rTs && rTs > maxDateTs) {
+299	            return false;
+300	        }
+301	    }
+302	
+303	    // Pending offline close вЂ” РЅРµ РїРѕРєР°Р·С‹РІР°РµРј РІ В«РћС‚РєСЂС‹С‚С‹С…В»
+304	    if (this._pendingCloseMap && this._pendingCloseMap.has(String(t.id))) {
+305	        return false;
+306	    }
+307	
+308	    return true;
+309	});
+310	    }
+311	    if (
+312	        this.dataType === "close" &&
+313	        this._pendingCloseMap &&
+314	        this._pendingCloseMap.size > 0
+315	    ) {
+316	        const synthetic = [];
+317	        for (const [ticketId, cmd] of this._pendingCloseMap) {
+318	            const original = (this._openCache || []).find(
+319	                (t) => String(t.id) === ticketId
+320	            );
+321	            if (!original) continue;
+322	            synthetic.push({
+323	                ...original,
+324	                type: "close",
+325	                _isOfflineClose: true,
+326	                solution: cmd.payload.solution || "",
+327	                close_date: cmd.created_at,
+328	                close_name: cmd.offline_author_name || "вЂ”",
+329	            });
+330	        }
+331	        if (synthetic.length > 0) {
+332	            filteredData = [...synthetic, ...filteredData];
+333	        }
+334	    }
+335	    // РџРµСЂРµСЃРѕР·РґР°РµРј С€Р°РїРєСѓ, РµСЃР»Рё РµРµ РЅРµС‚
+336	    const thead = dataTable.querySelector("thead");
+337	    if (!thead || !thead.firstElementChild) {
+338	      rebuildTableHeaders(
+339	        dataTable,
+340	        (th, colId, type) => this._handleSort(th, colId, type),
+341	        () => this._refreshRowsCache(),
+342	      );
+343	    }
+344	
+345	    // Р РµРЅРґРµСЂРёРј С‚РµР»Рѕ С‚Р°Р±Р»РёС†С‹
+346	    renderTableBody(dataTable, filteredData);
+347	this._applyPendingRowDecorations(dataTable)
+348	    // Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј РёРЅРґРёРєР°С‚РѕСЂ СЃРѕСЂС‚РёСЂРѕРІРєРё
+349	    if (this.currentSortColumnId !== -1) {
+350	      const sortedTh = dataTable.querySelector(
+351	        `th[data-id="${this.currentSortColumnId}"]`,
+352	      );
+353	      if (sortedTh) {
+354	        dataTable
+355	          .querySelectorAll("th.sortable")
+356	          .forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+357	        sortedTh.classList.add(this.isAscending ? "sort-asc" : "sort-desc");
+358	      }
+359	    }
+360	
+361	    this._refreshRowsCache();
+362	    this._initSearch();
+363	
+364	    // РќР°РІРµС€РёРІР°РµРј РєР»РёРєРё РЅР° СЃС‚СЂРѕРєРё
+365	    dataTable.querySelectorAll("tbody tr").forEach((row) => {
+366	      row.style.cursor = "pointer";
+367	      row.addEventListener("click", (e) => {
+368	        if (e.target.classList.contains("resizer")) return;
+369	        this.unmount();
+370	        const idCell = row.querySelector('td[data-col-id="id"]');
+371	        if (!idCell) return;
+372	        this.router.navigate("#/ticket/" + idCell.textContent);
+373	      });
+374	    });
+375	
+376	    const searchInput = document.getElementById("searchInput");
+377	    if (searchInput && searchInput.value.trim() !== "") {
+378	      applyFilter(this.rowsCache, searchInput.value.trim().toLowerCase());
+379	    }
+380	  }
+381	_applyPendingRowDecorations(dataTable) {
+382	    if (!this._pendingCommandMap || this._pendingCommandMap.size === 0) return;
+383	
+384	    dataTable.querySelectorAll('tbody tr').forEach(row => {
+385	        const idCell = row.querySelector('td[data-col-id="id"]');
+386	        if (!idCell) return;
+387	        const ticketId = idCell.textContent.trim();
+388	        const cmds = this._pendingCommandMap.get(ticketId);
+389	        if (!cmds || cmds.length === 0) return;
+390	
+391	        const types = cmds.map(c => c.command_type);
+392	
+393	        if (types.includes('CloseTicket')) {
+394	            row.classList.add('row-offline-close');
+395	            row.title = 'вЏі Р—Р°РєСЂС‹С‚Р° Р»РѕРєР°Р»СЊРЅРѕ. РћР¶РёРґР°РµС‚ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё.';
+396	        } else if (types.includes('EditTicket')) {
+397	            row.classList.add('row-offline-edit');
+398	            row.title = 'вЏі РР·РјРµРЅРµРЅР° Р»РѕРєР°Р»СЊРЅРѕ. РћР¶РёРґР°РµС‚ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё.';
+399	        } else if (types.includes('AddComment')) {
+400	            row.classList.add('row-offline-comment');
+401	            row.title = 'вЏі Р•СЃС‚СЊ РЅРµРѕС‚РїСЂР°РІР»РµРЅРЅС‹Р№ РєРѕРјРјРµРЅС‚Р°СЂРёР№.';
+402	        }
+403	    });
+404	}
+405	  _initPeriodSelector(globalTicketsArrayRef) {
+406	    if (this.dataType !== "close") return;
+407	
+408	    const container = document.getElementById("periodSelectorContainer");
+409	    renderPeriodSelector(container, this.selectedDays, (value) => {
+410	      this.unmount();
+411	      this.selectedDays = value;
+412	      localStorage.setItem("tablePeriod_" + this.dataType, value);
+413	      this.isLoaded = false;
+414	      this.mount(globalTicketsArrayRef);
+415	    });
+416	  }
+417	
+418	  _initSearch() {
+419	    const searchInput = document.getElementById("searchInput");
+420	    if (!searchInput) return;
+421	
+422	    if (this._searchDebounceTimer) {
+423	      clearTimeout(this._searchDebounceTimer);
+424	      this._searchDebounceTimer = null;
+425	    }
+426	
+427	    searchInput.oninput = (e) => {
+428	      const value = e.target.value;
+429	      if (this._searchDebounceTimer) clearTimeout(this._searchDebounceTimer);
+430	      this._searchDebounceTimer = setTimeout(() => {
+431	        applyFilter(this.rowsCache, value.trim().toLowerCase());
+432	        this._searchDebounceTimer = null;
+433	      }, 200);
+434	    };
+435	  }
+436	
+437	  _refreshRowsCache() {
+438	    const dataTable = document.getElementById("dataTable");
+439	    this.rowsCache = buildRowsCache(dataTable);
+440	  }
+441	
+442	  _handleSort(headerElement, columnId, dataType) {
+443	    if (this.currentSortColumnId === columnId) {
+444	      this.isAscending = !this.isAscending;
+445	    } else {
+446	      this.isAscending = true;
+447	      this.currentSortColumnId = columnId;
+448	    }
+449	
+450	    // РЎРћРҐР РђРќРЇР•Рњ Р’ LOCALSTORAGE
+451	    localStorage.setItem(
+452	      "tableSortColumn_" + this.dataType,
+453	      this.currentSortColumnId,
+454	    );
+455	    localStorage.setItem(
+456	      "tableSortDir_" + this.dataType,
+457	      this.isAscending ? "asc" : "desc",
+458	    );
+459	
+460	    const dataTable = document.getElementById("dataTable");
+461	    dataTable
+462	      .querySelectorAll("th.sortable")
+463	      .forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+464	    headerElement.classList.add(this.isAscending ? "sort-asc" : "sort-desc");
+465	
+466	    this._applySort(columnId, this.isAscending);
+467	  }
+468	
+469	  _reApplyCurrentSort() {
+470	    if (this.currentSortColumnId === -1) return;
+471	
+472	    this._applySort(this.currentSortColumnId, this.isAscending);
+473	
+474	    const dataTable = document.getElementById("dataTable");
+475	    if (!dataTable) return;
+476	
+477	    const sortedTh = dataTable.querySelector(
+478	      `th[data-id="${this.currentSortColumnId}"]`,
+479	    );
+480	    if (sortedTh) {
+481	      dataTable
+482	        .querySelectorAll("th.sortable")
+483	        .forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+484	      sortedTh.classList.add(this.isAscending ? "sort-asc" : "sort-desc");
+485	    }
+486	  }
+487	
+488	  refreshFromMemory(ticketsArrayRef) {
+489	    const dataTable = document.getElementById("dataTable");
+490	    if (!dataTable) return;
+491	
+492	    this._renderTableFull(dataTable, ticketsArrayRef);
+493	    if (this.currentSortColumnId !== -1) {
+494	      this._reApplyCurrentSort();
+495	    }
+496	  }
+497	
+498	  _applySort(columnId, isAscending) {
+499	    const dataTable = document.getElementById("dataTable");
+500	    if (!dataTable) return;
+501	
+502	    const tbody = dataTable.querySelector("tbody");
+503	    const rows = Array.from(tbody.querySelectorAll("tr"));
+504	    sortRows(rows, columnId, isAscending);
+505	    rows.forEach((row) => tbody.appendChild(row));
+506	
+507	    this._refreshRowsCache();
+508	  }
+509	
+510	  async _initFilters() {
+511	    const filtersBlock = document.getElementById("openOnlyFilters");
+512	    if (filtersBlock) filtersBlock.style.display = "flex";
+513	
+514	    const label = document.getElementById("hideLongRepairLabel");
+515	    if (label) label.textContent = UI.FILTER_REPAIR_LABEL;
+516	
+517	    const savedCities = localStorage.getItem("filter_cities");
+518	    const savedHideLong = localStorage.getItem("filter_hide_long");
+519	    this._filters.hideLongRepair = savedHideLong === "true";
+520	
+521	    const hideCheck = document.getElementById("hideLongRepair");
+522	    if (hideCheck) hideCheck.checked = this._filters.hideLongRepair;
+523	
+524	    this._allCities = await offlineDB.getCities();
+525	
+526	    if (savedCities) {
+527	      this._filters.cities = JSON.parse(savedCities);
+528	    } else {
+529	      this._filters.cities = this._allCities.map((c) => c.id);
+530	    }
+531	
+532	    this._renderCityDropdown();
+533	
+534	    const cityBtn = document.getElementById("cityFilterBtn");
+535	    const cityDropdown = document.getElementById("cityFilterDropdown");
+536	
+537	    if (!cityBtn || !cityDropdown) return;
+538	
+539	    let backdrop = document.getElementById("cityFilterBackdrop");
+540	    if (!backdrop) {
+541	      backdrop = document.createElement("div");
+542	      backdrop.id = "cityFilterBackdrop";
+543	      backdrop.className = "filter-backdrop";
+544	      document.body.appendChild(backdrop);
+545	      backdrop.onclick = () => {
+546	        cityDropdown.style.display = "none";
+547	        backdrop.style.display = "none";
+548	      };
+549	    }
+550	
+551	    cityBtn.onclick = (e) => {
+552	      e.stopPropagation();
+553	      const isHidden =
+554	        cityDropdown.style.display === "none" || !cityDropdown.style.display;
+555	      if (isHidden) {
+556	        cityDropdown.style.display = "block";
+557	        backdrop.style.display = "block";
+558	      } else {
+559	        cityDropdown.style.display = "none";
+560	        backdrop.style.display = "none";
+561	      }
+562	    };
+563	
+564	    if (this._filtersAbort) this._filtersAbort.abort();
+565	    this._filtersAbort = new AbortController();
+566	
+567	    document.addEventListener(
+568	      "click",
+569	      (e) => {
+570	        if (!cityBtn.contains(e.target) && !cityDropdown.contains(e.target)) {
+571	          cityDropdown.style.display = "none";
+572	          backdrop.style.display = "none";
+573	        }
+574	      },
+575	      { signal: this._filtersAbort.signal },
+576	    );
+577	
+578	    const selectAllCb = document.getElementById("citySelectAll");
+579	    if (selectAllCb) {
+580	      selectAllCb.onchange = (e) => {
+581	        if (this._allCities.length === 0) return;
+582	        if (e.target.checked) {
+583	          this._filters.cities = this._allCities.map((c) => c.id);
+584	        } else {
+585	          this._filters.cities = [this._allCities[0].id];
+586	        }
+587	        this._saveFilters();
+588	        this._renderCityDropdown();
+589	        this._applyLocalFilters();
+590	      };
+591	    }
+592	
+593	    const hideCb = document.getElementById("hideLongRepair");
+594	    if (hideCb) {
+595	      hideCb.onchange = (e) => {
+596	        this._filters.hideLongRepair = e.target.checked;
+597	        this._saveFilters();
+598	        this._applyLocalFilters();
+599	      };
+600	    }
+601	  }
+602	
+603	  _renderCityDropdown() {
+604	    const list = document.getElementById("cityCheckboxList");
+605	    const btn = document.getElementById("cityFilterBtn");
+606	    const btnText = document.getElementById("cityFilterText");
+607	    const selectAllCb = document.getElementById("citySelectAll");
+608	
+609	    if (!list || !btn) return;
+610	    list.innerHTML = "";
+611	
+612	    if (this._allCities.length === 0) {
+613	      if (btnText) btnText.textContent = "Р“РѕСЂРѕРґР°: РЅРµС‚ РґР°РЅРЅС‹С…";
+614	      btn.classList.add("filter-active");
+615	      if (selectAllCb) {
+616	        selectAllCb.checked = false;
+617	        selectAllCb.indeterminate = false;
+618	        selectAllCb.disabled = true;
+619	      }
+620	      return;
+621	    }
+622	
+623	    if (selectAllCb) selectAllCb.disabled = false;
+624	
+625	    this._allCities.forEach((city) => {
+626	      const isChecked = this._filters.cities.includes(city.id);
+627	
+628	      // Р‘РµР·РѕРїР°СЃРЅРѕРµ СЃРѕР·РґР°РЅРёРµ СЌР»РµРјРµРЅС‚РѕРІ РІРјРµСЃС‚Рѕ innerHTML (Р·Р°С‰РёС‚Р° РѕС‚ XSS)
+629	      const item = document.createElement("label");
+630	      item.className = "city-checkbox-item";
+631	
+632	      const cb = document.createElement("input");
+633	      cb.type = "checkbox";
+634	      cb.value = city.id;
+635	      cb.checked = isChecked;
+636	
+637	      const span = document.createElement("span");
+638	      span.textContent = city.name; // РСЃРїРѕР»СЊР·СѓРµРј textContent
+639	
+640	      item.appendChild(cb);
+641	      item.appendChild(span);
+642	
+643	      cb.onchange = (e) => {
+644	        if (e.target.checked) {
+645	          if (!this._filters.cities.includes(city.id))
+646	            this._filters.cities.push(city.id);
+647	        } else {
+648	          if (this._filters.cities.length === 1) {
+649	            e.preventDefault();
+650	            e.target.checked = true;
+651	            return;
+652	          }
+653	          this._filters.cities = this._filters.cities.filter(
+654	            (id) => id !== city.id,

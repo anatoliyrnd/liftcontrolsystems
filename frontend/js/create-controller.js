@@ -439,54 +439,66 @@ export class CreateController {
     btn.style.cursor = allFilled ? "pointer" : "not-allowed";
   }
 
-async _saveOffline(ticketPayload, globalTicketsArrayRef) {
+  async _saveOffline(ticketPayload, globalTicketsArrayRef) {
     try {
-        const count = await offlineDB.getOutboxCount();
-        if (count >= OFFLINE.MAX_OFFLINE_TICKETS) {
-            this._setSaveBtnState("error");
-            const msg = `Достигнут лимит офлайн-заявок (${OFFLINE.MAX_OFFLINE_TICKETS}). Дождитесь синхронизации.`;
-            notify.error(msg);
-            logHistoryAction(msg);
-            setTimeout(() => {
-                this._unlockForm();
-                this._setSaveBtnState("idle");
-            }, UI.ERROR_UNLOCK_MS);
-            return;
-        }
-
-        const cmd = await outboxQueue.enqueueCreate(ticketPayload);
-        const offlineUuid = cmd.offline_uuid;
-
-                this._setSaveBtnState("success");
-        notify.offline('Заявка сохранена. Будет синхронизирована при восстановлении сети.');
-        logHistoryAction('Заявка сохранена локально (нет сети).');
-
-        globalTicketsArrayRef.unshift({
-            ...ticketPayload,
-            id: offlineUuid,
-            offline_uuid: offlineUuid,
-            type: "open",
-            address: ticketPayload.fullAddress,
-            date: nowTs(),
-            isOffline: true,
-        });
-
-        if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
-        this.autoReturnTimer = setTimeout(() => {
-            this.router.navigate("#/");
-        }, UI.AUTO_RETURN_MS);
-    } catch (e) {
-        console.error("[CreateController] Offline save error:", e);
+      const count = await offlineDB.getOutboxCount();
+      if (count >= OFFLINE.MAX_OFFLINE_TICKETS) {
         this._setSaveBtnState("error");
-        notify.error("Сбой локальной базы данных.");
+        const msg = `Достигнут лимит офлайн-заявок (${OFFLINE.MAX_OFFLINE_TICKETS}). Дождитесь синхронизации.`;
+        notify.error(msg);
+        logHistoryAction(msg);
         setTimeout(() => {
-            this._unlockForm();
-            this._setSaveBtnState("idle");
+          this._unlockForm();
+          this._setSaveBtnState("idle");
         }, UI.ERROR_UNLOCK_MS);
+        return;
+      }
+
+      const cmd = await outboxQueue.enqueueCreate(ticketPayload);
+      const offlineUuid = cmd.offline_uuid;
+
+      this._setSaveBtnState("success");
+      notify.offline(
+        "Заявка сохранена. Будет синхронизирована при восстановлении сети.",
+      );
+      logHistoryAction("Заявка сохранена локально (нет сети).");
+
+      globalTicketsArrayRef.unshift({
+        ...ticketPayload,
+        id: offlineUuid,
+        offline_uuid: offlineUuid,
+        type: "open",
+        address: ticketPayload.fullAddress,
+        date: nowTs(),
+        isOffline: true,
+      });
+
+      if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
+      this.autoReturnTimer = setTimeout(() => {
+        this.router.navigate("#/");
+      }, UI.AUTO_RETURN_MS);
+    } catch (e) {
+      console.error("[CreateController] Offline save error:", e);
+      this._setSaveBtnState("error");
+      notify.error("Сбой локальной базы данных.");
+      setTimeout(() => {
+        this._unlockForm();
+        this._setSaveBtnState("idle");
+      }, UI.ERROR_UNLOCK_MS);
     }
-}
+  }
 
   unmount() {
+    // КРИТИЧНО: _draftTimer мог быть запущен oninput'ом формы и продолжает
+    // тикать после ухода со страницы. При срабатывании вызывает _saveDraft(),
+    // который лезет в sessionStorage с уже неактуальными данными и
+    // перезаписывает черновик следующей сессии.
+    // Очищаем ДО destroy компонентов: _saveDraft читает их getValue().
+    if (this._draftTimer) {
+      clearTimeout(this._draftTimer);
+      this._draftTimer = null;
+    }
+
     destroyVoiceInput();
     this._unlockForm();
     this.prefilledAddress = null;

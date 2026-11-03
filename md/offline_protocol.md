@@ -1,603 +1,635 @@
-# OFFLINE_PROTOCOL.md — обновлённая версия
+# Сообщение 3 из 3: `OFFLINE_PROTOCOL.md` v3.0 FINAL
 
-**Версия:** 2.0  
-**Дата:** 01.11.2026  
-**Статус:** Утверждено  
-**Связанные документы:** API_PROTOCOL.md v4.1, AUTH_PROTOCOL.md v2.0, MASTER_PLAN.md v3.0, sqlstrukture.md v3.0
+```markdown
+# 📄 OFFLINE_PROTOCOL.md — v3.0 (FINAL)
+
+**Версия:** 3.0  
+**Статус:** Утверждено (Готово к реализации)  
+**Дата:** 03.11.2026  
+**База данных:** MariaDB 10.11+  
+**Изменения от v2.0:**
+- ❌ Отказ от ограничения "только создание заявок".
+- ✅ Добавлены команды: `EditTicket`, `CloseTicket`, `AddComment`, `AcceptTicket`.
+- ✅ Переход на архитектуру **Command-Based Outbox + Snapshot Store**.
+- ✅ Новый универсальный эндпоинт `POST /calls/syncCommands`.
+- ✅ Таблица `offline_actions_archive` для отброшенных действий (30 дней).
+- ✅ Логика **Soft Merge** при редактировании.
+- ✅ Частичный успех (Partial Success) вместо атомарности.
+- ✅ `ticket_not_found` → `archived` (не `failed`), чтобы избежать бесконечных retry.
+- ✅ Использование `match` для чистой маршрутизации команд.
+- ❌ Отказ от обратной совместимости с `callNewOffline` (не был в продакшене).
+
+**Связанные документы:** `API_PROTOCOL.md` v4.2, `API_syncCommands.md` v4.2, `AUTH_PROTOCOL.md` v2.0, `TECHNICAL_DEBT.md`.
 
 ---
 
 ## 📑 Содержание
 
 1. [Общие принципы](#1-общие-принципы)
-2. [Офлайн-очередь (IndexedDB)](#2-офлайн-очередь-indexeddb)
-3. [Формат тикета](#3-формат-тикета)
-4. [Синхронизация пачкой](#4-синхронизация-пачкой)
-5. [Идемпотентность](#5-идемпотентность)
-6. [offline_sync_log](#6-offline_sync_log)
-7. [Адреса и address_not_verified](#7-адреса-и-address_not_verified)
-8. [Обработка ошибок](#8-обработка-ошибок)
-9. [Retry-стратегия](#9-retry-стратегия)
-10. [UI-индикаторы](#10-ui-индикаторы)
-11. [Миграция тенанта](#11-миграция-тенанта)
-12. [Что НЕ синхронизируется](#12-что-не-синхронизируется)
-13. [Схема БД](#13-схема-бд)
+2. [Матрица прав](#2-матрица-прав)
+3. [Архитектура: Snapshot Store + Command Outbox](#3-архитектура-snapshot-store--command-outbox)
+4. [Типы команд и их payload](#4-типы-команд-и-их-payload)
+5. [Синхронизация: POST /calls/syncCommands](#5-синхронизация-post-callssynccommands)
+6. [Серверная логика: Soft Merge и Обработка](#6-серверная-логика-soft-merge-и-обработка)
+7. [Таблица offline_actions_archive](#7-таблица-offline_actions_archive)
+8. [Идемпотентность](#8-идемпотентность)
+9. [Обработка ошибок](#9-обработка-ошибок)
+10. [Retry-стратегия](#10-retry-стратегия)
+11. [UI-индикаторы и UX](#11-ui-индикаторы-и-ux)
+12. [История изменений](#12-история-изменений)
+13. [Схема БД (MariaDB)](#13-схема-бд-mariadb)
+14. [Migration тенанта](#14-migration-тенанта)
+15. [Что НЕ синхронизируется](#15-что-не-синхронизируется)
 
 ---
 
 ## 1. Общие принципы
 
 ### 1.1. Назначение
+Офлайн-синхронизация позволяет пользователям (диспетчерам и механикам) выполнять ключевые действия с заявками без доступа к сети. Все изменения накапливаются в локальной очереди (IndexedDB) и автоматически синхронизируются при восстановлении соединения.
 
-Офлайн-синхронизация позволяет диспетчерам и механикам **создавать заявки без доступа к сети**, а затем автоматически отправлять их на сервер при восстановлении соединения.
+### 1.2. Поддерживаемые действия
 
-### 1.2. Ограничения
+| Действие | Диспетчер/Админ | Механик |
+|----------|:---:|:---:|
+| Создание заявки (`CreateTicket`) | ✅ | ❌ |
+| Редактирование заявки (`EditTicket`) | ✅ | ❌ |
+| Закрытие заявки (`CloseTicket`) | ✅ | ✅ |
+| Добавление комментария (`AddComment`) | ✅ | ✅ |
+| Принятие в работу (`AcceptTicket`) | ✅ | ✅ |
 
-- Синхронизируются **только создание заявок** (`callnew`). Редактирование, закрытие, комментарии — требуют онлайн.
-- **Максимум 10 заявок** в одной пачке.
-- **Атомарность:** либо вся пачка, либо ничего.
-- **Идемпотентность:** повторная отправка не создаёт дубликатов.
-- **Закрытые заявки не мигрируют** (при переезде тенанта на новый API).
+### 1.3. Ключевые правила
 
-### 1.3. Компоненты
-
-| Компонент             | Где             | Роль                      |
-| --------------------- | --------------- | ------------------------- |
-| `offline-db.js`       | SPA (IndexedDB) | Очередь outbox            |
-| `sync-manager.js`     | SPA (JS)        | Отправка пачек при онлайн |
-| `POST /calls/offline` | API             | Приём пачки               |
-| `offline_sync_log`    | схема тенанта   | Лог синхронизации         |
+- **Максимум 20 команд** в одной пачке синхронизации.
+- **Частичный успех (Partial Success):** Каждая команда обрабатывается независимо. Отброшенные действия сохраняются в `offline_actions_archive`.
+- **Идемпотентность:** Повторная отправка команды с тем же `command_uuid` не вызывает побочных эффектов.
+- **Soft Merge:** При редактировании никогда не затираем данные, уже установленные другими пользователями.
+- **Оффлайн-маркер:** Все изменения логируются с пометкой `source = 'offline'` в `lift_history` и `audit_log`.
 
 ---
 
-## 2. Офлайн-очередь (IndexedDB)
+## 2. Матрица прав
 
-### 2.1. Структура
+| Команда | Условие успеха | Условие архивации (`offline_actions_archive`) |
+|---------|----------------|-----------------------------------------------|
+| `CreateTicket` | Пользователь — диспетчер/админ. Лифт не скрыт (`vis=1`). | Нет прав. Лифт скрыт (`contract_terminated`). Дубликат объекта. |
+| `EditTicket` | Пользователь — диспетчер/админ. Заявка открыта. | Нет прав. Заявка закрыта. Заявка не найдена. |
+| `CloseTicket` | Заявка открыта. | Заявка уже закрыта. Заявка не найдена. |
+| `AddComment` | Заявка открыта. Лимит фото не превышен. | Заявка уже закрыта. Заявка не найдена. |
+| `AcceptTicket` | Заявка открыта. `call_staff_status = 0`. | Заявка закрыта. Заявка не найдена. |
 
-**База:** `liftcalls-offline` (IndexedDB).
+---
 
-**Object store:** `outbox`.
+## 3. Архитектура: Snapshot Store + Command Outbox
 
-**Ключ:** `offline_uuid` (генерируется на клиенте при создании заявки).
+### 3.1. Компоненты
 
-### 2.2. Схема записи
+| Компонент | Где | Роль |
+|-----------|-----|------|
+| `tickets_cache` | IndexedDB | Read Model. Полные данные заявок с сервера. |
+| `local_changes` | IndexedDB | Write Model. Локальные изменения для мгновенного UI. |
+| `outbox` | IndexedDB | Command Queue. Неизменяемые команды для синхронизации. |
+| `sync-manager.js` | SPA (JS) | Отправка пачек при `online`. |
+| `POST /calls/syncCommands` | API | Приём и обработка команд. |
+| `offline_actions_archive` | MariaDB | Архив отброшенных действий (30 дней). |
+| `offline_sync_log` | MariaDB | Лог всех синхронизаций (пачек). |
+| `offline_command_log` | MariaDB | Лог отдельных команд (идемпотентность). |
+
+### 3.2. Схема записи в Outbox (IndexedDB)
 
 ```json
 {
-  "offline_uuid": "offline_1714567890123_x7k2p",
-  "created_at": 1761214500,
-  "offline_author_id": 3,
-  "offline_author_name": "Сергеенко Сергей",
-  "city_id": "1",
-  "street_id": "2",
-  "home_id": "3",
-  "object_id": "11",
-  "fullAddress": "г. Ростов-на-Дону - Красноармейская ул. дом № 2 корп.2 - п. 1 прав.",
-  "group_id": "8",
-  "request_id": "2",
-  "department_id": "22",
-  "repair_time": 1761220800,
-  "details": "Описание проблемы...",
-  "staff_id": 3,
+  "command_uuid": "cmd_1761234567_abc123",
+  "command_type": "CloseTicket",
+  "ticket_id": 35732,
+  "offline_uuid": "offline_...",
+  "payload": { "solution": "..." },
+  "created_at": 1761234567,
   "retry_count": 0,
-  "last_error": null
+  "last_error": null,
+  "status": "pending"
 }
 ```
 
-**Важно:** каждое поле — как в `callnew` (см. `API_PROTOCOL.md`). `offline_uuid` и `offline_author_*` — дополнительные.
+### 3.3. Поток данных (Write)
 
-### 2.3. Генерация `offline_uuid`
-
-```js
-function generateOfflineUuid() {
-  return `offline_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
-```
-
-**Формат:** `offline_<timestamp>_<random>`.
-
-**Гарантии:** уникальность в пределах устройства и достаточная энтропия для сервера.
+1. Пользователь выполняет действие → UI обновляется мгновенно из `local_changes` (Optimistic UI).
+2. Команда пушится в `outbox` со статусом `pending`.
+3. `SyncManager` при `online` событии отправляет пачку на `/calls/syncCommands`.
+4. Обработка ответа сервера:
+   - `success` → команда удаляется из `outbox`, `tickets_cache` обновляется.
+   - `archived` → команда удаляется из `outbox`, UI показывает уведомление.
+   - `ignored` → команда удаляется из `outbox` (не ошибка).
+   - `failed` → команда остаётся в `outbox`, retry через backoff.
 
 ---
 
-## 3. Формат тикета
+## 4. Типы команд и их payload
 
-### 3.1. Обязательные поля
-
-| Поле                  | Тип        | Описание                                       |
-| --------------------- | ---------- | ---------------------------------------------- |
-| `offline_uuid`        | string     | Уникальный ID тикета (генерируется на клиенте) |
-| `offline_author_id`   | int        | ID автора                                      |
-| `offline_author_name` | string     | ФИО автора                                     |
-| `city_id`             | string/int | ID города                                      |
-| `street_id`           | string/int | ID улицы                                       |
-| `home_id`             | string/int | ID дома                                        |
-| `object_id`           | string/int | ID лифта                                       |
-| `fullAddress`         | string     | Полный адрес (текст)                           |
-| `group_id`            | string     | ID группы лифтов                               |
-| `request_id`          | string     | ID типа неисправности                          |
-| `department_id`       | string     | ID отдела                                      |
-| `repair_time`         | int        | Unix timestamp                                 |
-| `details`             | string     | Описание (≥ 6 символов)                        |
-| `staff_id`            | int        | ID ответственного                              |
-
-### 3.2. Опциональные поля
-
-- `call_phone`, `call_first_name`, `call_last_name` — данные заявителя (если были заполнены офлайн).
-
-### 3.3. Что НЕ передаётся
-
-- `call_status`, `call_date`, `call_user` — заполняются сервером.
-- `alert_level`, `notify_status` — вычисляются сервером.
-- `elevator_group_id` — определяется по лифту.
-
----
-
-## 4. Синхронизация пачкой
-
-### 4.1. `POST /calls/offline`
-
-**Request:**
+### 4.1. `CreateTicket` (Создание)
 
 ```json
 {
-  "batch_id": "batch_1761214500_abc123",
-  "tickets": [
-    {
-      "offline_uuid": "offline_1714567890123_x7k2p",
-      "offline_author_id": 3,
-      "offline_author_name": "Сергеенко Сергей",
-      "city_id": "1",
-      "street_id": "2",
-      "home_id": "3",
-      "object_id": "11",
-      "fullAddress": "...",
-      "group_id": "8",
-      "request_id": "2",
-      "department_id": "22",
-      "repair_time": 1761220800,
-      "details": "...",
-      "staff_id": 3
-    }
-  ]
+  "command_type": "CreateTicket",
+  "offline_uuid": "offline_1761234567_x7k2p",
+  "command_uuid": "cmd_...",
+  "payload": {
+    "offline_author_id": 3, "offline_author_name": "Сергеенко Сергей",
+    "city_id": 1, "street_id": 2, "home_id": 3, "object_id": 11,
+    "fullAddress": "...", "group_id": "8", "request_id": "2", 
+    "department_id": "22", "repair_time": 1761220800, 
+    "details": "Описание проблемы...", "staff_id": 3
+  }
 }
 ```
 
-| Поле       | Обязательно | Описание              |
-| ---------- | ----------- | --------------------- |
-| `batch_id` | Да          | Уникальный ID пачки   |
-| `tickets`  | Да          | Массив тикетов (1–10) |
-
-### 4.2. Response 200
+### 4.2. `EditTicket` (Редактирование — только диспетчер)
 
 ```json
 {
-  "ok": true,
+  "command_type": "EditTicket", "ticket_id": 35732, "command_uuid": "cmd_...",
+  "payload": {
+    "description_delta": "Текст дополнения",
+    "staff_id": 5, "repair_time": 1761230000, "notify_status": 2
+  }
+}
+```
+*Важно:* Фронтенд отправляет **только дельту** описания (`description_delta`).
+
+### 4.3. `CloseTicket` (Закрытие)
+
+```json
+{
+  "command_type": "CloseTicket", "ticket_id": 35732, "command_uuid": "cmd_...",
+  "payload": { "solution": "Произведена замена реле", "closed_at": 1761234567 }
+}
+```
+
+### 4.4. `AddComment` (Комментарий)
+
+```json
+{
+  "command_type": "AddComment", "ticket_id": 35732, "command_uuid": "cmd_...",
+  "payload": { "text": "Текст комментария", "photo_base64": "...", "created_at": 1761234500 }
+}
+```
+
+### 4.5. `AcceptTicket` (Принять в работу)
+
+```json
+{
+  "command_type": "AcceptTicket", "ticket_id": 35732, "command_uuid": "cmd_...",
+  "payload": { "accepted_at": 1761234567 }
+}
+```
+
+---
+
+## 5. Синхронизация: POST /calls/syncCommands
+
+### 5.1. Request
+
+```json
+{
+  "action": "syncCommands",
+  "batch_id": "batch_1761234567_xyz789",
+  "commands": [ ... ]
+}
+```
+
+### 5.2. Response 200 (Partial Success)
+
+```json
+{
+  "status": "ok",
   "data": {
-    "batch_id": "batch_1761214500_abc123",
-    "created": [35740, 35741],
-    "skipped": ["offline_1714567890123_x7k2p"],
-    "errors": []
+    "batch_id": "batch_1761234567_xyz789",
+    "results": [
+      { "command_uuid": "cmd_001", "status": "success", "ticket_id": 35732 },
+      { "command_uuid": "cmd_002", "status": "archived", "reason": "ticket_already_closed", "archive_id": 1042 }
+    ],
+    "summary": { "success": 1, "archived": 1, "ignored": 0, "failed": 0 },
+    "created_tickets": { "offline_123": 35740 }
   }
 }
 ```
 
-| Поле      | Описание                                    |
-| --------- | ------------------------------------------- |
-| `created` | ID созданных заявок                         |
-| `skipped` | `offline_uuid` дубликатов (идемпотентность) |
-| `errors`  | Ошибки (если `ok = false`)                  |
+### 5.3. Статусы результатов
 
-### 4.3. Алгоритм
-
-```
-1. Аутентификация (JWT).
-2. Определить тенант (из JWT).
-3. SET LOCAL search_path.
-4. Валидация:
-   - batch_id не пустой;
-   - tickets.length между 1 и 10;
-   - у каждого тикета есть offline_uuid.
-5. INSERT INTO offline_sync_log (batch_id, user_id, tickets_count, status='started', started_at=now()).
-6. BEGIN;
-7. Для каждого тикета:
-   a. SELECT call_id FROM lift_calls WHERE offline_uuid = ?.
-   b. Если найден → пропустить (добавить в skipped).
-   c. Иначе:
-      - Валидация (details ≥ 6, staff_id существует, object_id существует).
-      - Проверка vis лифта (если vis=0 и не админ/прораб с правом → ошибка contract_terminated).
-      - AddressProvider.resolveAddress() → если не валидируется → address_not_verified = true.
-      - INSERT INTO lift_calls (с offline_uuid, offline_author_*).
-      - INSERT INTO lift_history ('Создана офлайн-заявка').
-      - INSERT INTO audit_log ('call.create_offline').
-      - Добавить call_id в created.
-8. Если любая ошибка → ROLLBACK; UPDATE offline_sync_log SET status='failed', finished_at=now(), error_message=?; вернуть 400 с деталями.
-9. Иначе → COMMIT; UPDATE offline_sync_log SET status='success', finished_at=now(), tickets_created=N, tickets_skipped=M; вернуть 200.
-```
-
-### 4.4. Атомарность
-
-**Правило:** любая ошибка в любом тикете → **rollback всей пачки**.
-
-**Почему:** офлайн-пачка — это «снимок» работы диспетчера. Если один тикет не прошёл (например, лифт скрыт), лучше вернуть всю пачку с ошибкой, чем создать часть. Фронт покажет ошибку и предложит разобраться.
-
-**Альтернатива (не рекомендуется):** создавать валидные, пропускать невалидные, возвращать частичный успех. Это создаёт рассинхрон: диспетчер думает, что всё создано, а часть — нет.
+| Статус | Описание | Действие клиента |
+|--------|----------|------------------|
+| `success` | Команда выполнена. | Удалить из `outbox`. Обновить `tickets_cache`. |
+| `archived` | Отброшено (нет прав, закрыта, **не найдена**). | Удалить из `outbox`. Показать уведомление. |
+| `ignored` | Идемпотентность / уже уведомлён. | Удалить из `outbox`. Без уведомления. |
+| `failed` | Временная ошибка (сеть, БД). | Оставить в `outbox`, retry. |
+| `duplicate_detected` | Есть активная заявка на объект. | Модалка подтверждения + `force_create`. |
 
 ---
 
-## 5. Идемпотентность
+## 6. Серверная логика: Soft Merge и Обработка
 
-### 5.1. Два уровня
+### 6.1. Общий алгоритм обработки пачки (Intra-batch mapping)
 
-**Уровень 1 — `batch_id`:**
+Сервер ведет локальный словарь `$uuidToIdMap` для связывания команд внутри одной пачки (например, `AddComment` ссылается на `CreateTicket` по `offline_uuid`).
 
-- `offline_sync_log.batch_id` — UNIQUE.
-- Если повторный `POST` с тем же `batch_id` → вернуть результат первого (из `offline_sync_log`), не выполняя заново.
-
-**Уровень 2 — `offline_uuid`:**
-
-- `lift_calls.offline_uuid` — UNIQUE (partial index: `WHERE offline_uuid IS NOT NULL`).
-- Если `offline_uuid` уже есть → пропустить тикет (добавить в `skipped`).
-
-### 5.2. Зачем два уровня
-
-| Ситуация                                        | Что сработает                                                          |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| Фронт отправил пачку, сеть оборвалась до ответа | Повтор с тем же `batch_id` → возврат из лога                           |
-| Фронт пересоздал `batch_id` (баг)               | `offline_uuid` спасёт от дубликатов                                    |
-| Один тикет уже создан, второй — нет             | При повторе всей пачки `offline_uuid` пропустит первый, создаст второй |
-
-### 5.3. Очистка `offline_sync_log`
-
-Записи старше 30 дней удаляются по cron:
-
-```sql
-DELETE FROM offline_sync_log WHERE started_at < now() - interval '30 days';
-```
-
----
-
-## 6. offline_sync_log
-
-### 6.1. Структура
-
-| Поле              | Тип                | Назначение                                   |
-| ----------------- | ------------------ | -------------------------------------------- |
-| `id`              | SERIAL             | PK                                           |
-| `batch_id`        | VARCHAR(64) UNIQUE | ID пачки                                     |
-| `user_id`         | INT FK             | Кто синхронизировал                          |
-| `tickets_count`   | INT                | Сколько тикетов в пачке                      |
-| `status`          | VARCHAR(20)        | `started` / `success` / `failed` / `partial` |
-| `started_at`      | TIMESTAMPTZ        | Начало                                       |
-| `finished_at`     | TIMESTAMPTZ        | Окончание                                    |
-| `error_message`   | TEXT               | Текст ошибки (если `failed`)                 |
-| `tickets_created` | INT                | Создано                                      |
-| `tickets_skipped` | INT                | Пропущено (дубликаты)                        |
-| `tickets_failed`  | INT                | Ошибки                                       |
-
-### 6.2. Статусы
-
-| Статус    | Когда                                            |
-| --------- | ------------------------------------------------ |
-| `started` | Пачка принята, обработка началась                |
-| `success` | Все тикеты созданы (или пропущены как дубликаты) |
-| `failed`  | Ошибка в одном тикете → rollback всей пачки      |
-| `partial` | Не используется (атомарность)                    |
-
-### 6.3. Использование
-
-- **Мониторинг:** сколько пачек в день, средний размер, ошибки.
-- **Отладка:** если диспетчер жалуется на «заявка не создалась», можно найти по `batch_id` или `user_id`.
-- **Идемпотентность:** повторный `batch_id` → SELECT из лога.
-
----
-
-## 7. Адреса и address_not_verified
-
-### 7.1. Проблема
-
-Офлайн-заявка могла быть создана на устройстве, где адресный справочник устарел (например, лифт снесли, а в кэше он есть). При синхронизации `AddressProvider.resolveAddress()` может не найти лифт.
-
-### 7.2. Решение
-
-**Не блокировать создание.** Сохранить заявку «как есть», но пометить `address_not_verified = true`.
-
-**Алгоритм:**
-
-```
-1. AddressProvider.resolveAddress({ city, street, home, lift }).
-2. Если валидно → address_not_verified = false.
-3. Если НЕ валидно:
-   - Сохранить заявку (с address_text из fullAddress).
-   - address_not_verified = true.
-   - audit_log: call.create_offline_unverified.
-4. Диспетчер увидит плашку «Адрес не проверен» в карточке заявки.
-```
-
-### 7.3. UI-индикатор
-
-В карточке заявки, если `address_not_verified = true`:
-
-- Плашка: **«Адрес не проверен. Возможно, лифт удалён или адрес устарел.»**
-- Кнопка «Проверить адрес» (запускает `AddressProvider.resolveAddress` повторно).
-
-### 7.4. Что делать потом
-
-- Диспетчер вручную проверяет адрес.
-- Если лифт существует — редактирует заявку (нормальный `calledit`).
-- Если лифт удалён — закрывает заявку с пояснением.
-
-**Автоматическая проверка:** cron раз в сутки ищет заявки с `address_not_verified = true` и пробует resolve повторно. Если валидно — снимает флаг.
-
----
-
-## 8. Обработка ошибок
-
-### 8.1. Ошибки валидации (400)
-
-**Пример:**
-
-```json
+```php
+public function syncBatch(array $user, string $batchId, array $commands): array
 {
-  "ok": false,
-  "error": {
-    "code": "validation_error",
-    "message": "Ошибка в тикете offline_1714567890123_x7k2p: details короче 6 символов",
-    "details": {
-      "batch_id": "batch_1761214500_abc123",
-      "failed_uuid": "offline_1714567890123_x7k2p",
-      "reason": "details_too_short"
+    // 1. Идемпотентность пачки
+    if ($cached = $this->syncLogRepo->findSuccessByBatchId($batchId)) return $cached;
+    
+    $uuidToIdMap = [];
+    $results = [];
+    
+    foreach ($commands as $command) {
+        // Резолвим ticket_id (из БД или из $uuidToIdMap)
+        $resolvedTicketId = $this->resolveTicketId($command, $uuidToIdMap);
+        
+        try {
+            $result = $this->processCommand($command, $user, $resolvedTicketId);
+            $results[] = $result;
+            
+            if ($command['command_type'] === 'CreateTicket' && $result['status'] === 'success') {
+                $uuidToIdMap[$command['offline_uuid']] = $result['ticket_id'];
+            }
+        } catch (\Throwable $e) {
+            $this->archiveCommand($command, $user, 'server_error');
+            $results[] = ['status' => 'failed', 'reason' => 'server_error'];
+        }
     }
-  }
+    return $this->formatResponse($batchId, $results);
 }
 ```
 
-**Поведение фронта:**
+### 6.2. Маршрутизация команды (`match` + Идемпотентность)
 
-- Вся пачка не создана (rollback).
-- Показать ошибку диспетчеру: «Заявка X не создана: описание короче 6 символов. Исправьте и повторите.»
-- Диспетчер исправляет тикет в outbox и запускает синхронизацию заново (с **новым** `batch_id`, но тем же `offline_uuid`).
-
-### 8.2. Ошибки прав (403)
-
-**Пример:**
-
-```json
+```php
+private function processCommand(array $command, array $user, ?int $resolvedTicketId): array
 {
-  "ok": false,
-  "error": {
-    "code": "forbidden",
-    "message": "Нет прав на создание заявки в группе 8",
-    "details": { "failed_uuid": "offline_..." }
-  }
+    // 1. Проверка идемпотентности ПРЯМО ПЕРЕД MATCH
+    if ($this->db->fetchOne("SELECT id FROM offline_command_log WHERE command_uuid = ?", [$command['command_uuid']])) {
+        return ['status' => 'ignored', 'reason' => 'already_processed'];
+    }
+    if ($archived = $this->db->fetchOne("SELECT id, reason FROM offline_actions_archive WHERE command_uuid = ?", [$command['command_uuid']])) {
+        return ['status' => 'archived', 'reason' => $archived['reason'], 'archive_id' => $archived['id']];
+    }
+
+    // 2. Проверка прав
+    if (!$this->checkPermission($user, $command)) {
+        $this->archiveCommand($command, $user, 'no_rights');
+        return ['status' => 'archived', 'reason' => 'no_rights'];
+    }
+
+    // 3. Маршрутизация через match
+    return match ($command['command_type']) {
+        'CreateTicket' => $this->handleCreate($command, $user),
+        'EditTicket'   => $this->handleEdit($command, $user, $resolvedTicketId),
+        'CloseTicket'  => $this->handleClose($command, $user, $resolvedTicketId),
+        'AddComment'   => $this->handleComment($command, $user, $resolvedTicketId),
+        'AcceptTicket' => $this->handleAccept($command, $user, $resolvedTicketId),
+        default        => ['status' => 'failed', 'reason' => 'unknown_command_type'],
+    };
 }
 ```
 
-**Поведение фронта:**
+### 6.3. Обработка `ticket_not_found` (Критическое исправление)
 
-- Показать ошибку.
-- Диспетчер может обратиться к админу.
+Во всех обработчиках (`handleEdit`, `handleClose`, `handleComment`, `handleAccept`), если заявка не найдена (удалена, ушла в архив), команда **архивируется**, а не падает в `failed`. Это предотвращает бесконечные retry.
 
-### 8.3. Контракт расторгнут (409)
-
-**Пример:**
-
-```json
+```php
+private function handleClose(array $command, array $user, ?int $ticketId): array
 {
-  "ok": false,
-  "error": {
-    "code": "contract_terminated",
-    "message": "Договор по лифту 11 расторгнут. Создание заявок запрещено.",
-    "details": { "failed_uuid": "offline_..." }
-  }
+    $call = $this->callRepo->findById($ticketId);
+    
+    if (!$call) {
+        $this->archiveCommand($command, $user, 'ticket_not_found');
+        return [
+            'status'  => 'archived', 
+            'reason'  => 'ticket_not_found',
+            'message' => 'Заявка не найдена (возможно, удалена). Действие отменено.'
+        ];
+    }
+    // ... далее проверка call_status === 1 и логика закрытия ...
 }
 ```
 
-### 8.4. Дубликат (skipped)
+### 6.4. Логика `CloseTicket` (Слияние комментариев)
 
-**Не ошибка.** Тикет с `offline_uuid`, который уже есть в БД, пропускается:
+При успешном закрытии:
+1. Считываем все записи из `lift_notes` для данной заявки.
+2. Формируем JSON-массив и сохраняем в `lift_calls.call_full_note_history`.
+3. В `lift_calls.call_solution` пишем **только** текст решения.
+4. Удаляем записи из `lift_notes` (`DELETE FROM lift_notes WHERE note_relation = ?`).
 
-```json
-{
-  "ok": true,
-  "data": {
-    "created": [],
-    "skipped": ["offline_1714567890123_x7k2p"],
-    "errors": []
-  }
-}
-```
+### 6.5. Логика `EditTicket` (Soft Merge)
 
-### 8.5. Сетевая ошибка
-
-Если `POST /calls/offline` не дошёл (timeout, 5xx, offline):
-
-- Фронт **оставляет пачку в outbox**.
-- Пробует снова через 30 секунд (retry).
-- `retry_count` инкрементируется.
-
-### 8.6. Серверная ошибка (500)
-
-**Не ошибка валидации.** Сервер упал. Фронт:
-
-- Оставляет пачку в outbox.
-- Пробует снова через 30 секунд (retry).
-- Логирует `last_error` для отладки.
+- `call_details`: Конкатенация `CONCAT(old, '\n\n[Оффлайн <user>]\n', delta)`.
+- `call_staff`, `expected_repair_time`, `call_staff_status`: Обновляются **только** если текущее значение равно `0` (не назначено / не установлено).
 
 ---
 
-## 9. Retry-стратегия
+## 7. Таблица `offline_actions_archive`
 
-### 9.1. Условия retry
+Хранит отброшенные действия 30 дней.
 
-| Условие                           | Retry?                     |
-| --------------------------------- | -------------------------- |
-| Сетевая ошибка (timeout, offline) | Да                         |
-| 5xx (серверная ошибка)            | Да                         |
-| 429 rate_limited                  | Да (с увеличенным backoff) |
-| 400 validation_error              | **Нет** — ошибка в данных  |
-| 403 forbidden                     | **Нет** — нужны права      |
-| 409 contract_terminated           | **Нет** — лифт скрыт       |
-| 401 unauthorized                  | **Нет** — нужен re-login   |
+**Причины архивации (`reason`):**
+`ticket_already_closed`, `no_rights`, `ticket_not_found`, `contract_terminated`, `photo_limit_exceeded`, `validation_error`, `duplicate_detected`.
 
-### 9.2. Backoff
+---
 
-| Попытка | Задержка             |
-| ------- | -------------------- |
-| 1       | 30 сек               |
-| 2       | 60 сек               |
-| 3       | 120 сек              |
-| 4       | 240 сек              |
-| 5       | 480 сек              |
-| > 5     | ручное вмешательство |
+## 8. Идемпотентность
 
-**После 5 попыток** — фронт показывает диспетчеру уведомление: **«Синхронизация не удалась 5 раз. Обратитесь к администратору. Пачка сохранена в локальной очереди.»**
+1. **`batch_id`:** UNIQUE в `offline_sync_log`. Повторный запрос возвращает кэшированный ответ.
+2. **`command_uuid`:** UNIQUE в `offline_command_log` и `offline_actions_archive`. Проверяется до `match`.
+3. **`offline_uuid`:** UNIQUE в `lift_calls`. Защищает от дублей при создании.
 
-### 9.3. Триггеры синхронизации
+---
+
+## 9. Обработка ошибок (Итоговая матрица)
+
+| Код `reason` | Статус | Описание | Действие клиента |
+|--------------|:------:|----------|------------------|
+| `no_rights` | `archived` | Нет прав на действие | Удалить из outbox, показать ⚠️ |
+| `ticket_already_closed` | `archived` | Заявка уже закрыта | Удалить из outbox, показать ⚠️ |
+| `ticket_not_found` | `archived` | Заявка удалена/не найдена | Удалить из outbox, показать ⚠️ |
+| `contract_terminated` | `archived` | Лифт скрыт (`vis=0`) | Удалить из outbox, показать ⚠️ |
+| `photo_limit_exceeded` | `archived` | Лимит фото (2 шт.) | Удалить из outbox, показать ⚠️ |
+| `validation_error` | `archived` | Ошибка валидации | Удалить из outbox, показать ⚠️ |
+| `duplicate_uuid` | `ignored` | `offline_uuid` уже есть | Удалить из outbox (без тоста) |
+| `already_processed` | `ignored` | Идемпотентность | Удалить из outbox (без тоста) |
+| `already_notified` | `ignored` | Уже уведомлён | Удалить из outbox (без тоста) |
+| `missing_ticket_id` | `failed` | Intra-batch mapping не сработал | Оставить, retry |
+| `server_error` | `failed` | Внутренняя ошибка / Таймаут | Оставить, retry |
+| `duplicate_detected` | `duplicate` | Есть активная заявка на объект | Модалка подтверждения |
+
+---
+
+## 10. Retry-стратегия
+
+### 10.1. Backoff (экспоненциальный)
+
+| Попытка | Задержка |
+|---------|----------|
+| 1 | 30 сек |
+| 2 | 60 сек |
+| 3 | 120 сек |
+| 4 | 240 сек |
+| 5 | 480 сек |
+| > 5 | Ручное вмешательство |
+
+### 10.2. Триггеры синхронизации
 
 - Восстановление сети (`online` event).
-- Открытие SPA.
-- Ручной запуск («Обновить»).
-- Каждые 60 секунд, если в outbox есть тикеты.
-
-### 9.4. Одновременные пачки
-
-**Правило:** одновременно отправляется **одна** пачка (первая в очереди). Остальные ждут.
-
-**Почему:** избежать race condition с `offline_uuid` (если два тикета с одним UUID в разных пачках — второй будет skipped, но `batch_id` может запутаться).
+- Открытие SPA (первичная проверка).
+- Ручной запуск (кнопка «Обновить»).
+- Периодический поллинг каждые 60 секунд, если в outbox есть команды.
+- После успешной синхронизации предыдущей пачки (если в outbox ещё есть).
 
 ---
 
-## 10. UI-индикаторы
+## 11. UI-индикаторы и UX
 
-### 10.1. Индикатор очереди
+### 11.1. Индикатор очереди
 
-**В SPA, в шапке:**
-
+В SPA, в шапке:
 - 🟢 `Синхронизировано` — outbox пуст.
-- 🟡 `Ожидает синхронизации: N` — в outbox N тикетов.
-- 🔴 `Ошибка синхронизации: N` — N тикетов с ошибкой (> 0 retry).
+- 🟡 `Ожидает синхронизации: N` — в outbox N команд.
+- 🔴 `Ошибка синхронизации: N` — N команд с ошибкой (> 0 retry).
 
-### 10.2. Экран «Очередь»
+### 11.2. Экран «Очередь»
 
-- Список тикетов с датой создания, адресом, описанием.
-- Статус: `pending` / `sending` / `failed`.
-- Кнопки: «Синхронизировать сейчас», «Удалить» (только для `failed`).
+Список команд с датой создания, типом действия, ID заявки / UUID.
 
-### 10.3. Уведомления
+**Кнопки:**
+- «Синхронизировать сейчас» (для `pending`)
+- «Удалить» (только для `failed`)
+- «Редактировать» (только для `pending` — пока не улетело на сервер)
 
-- **При создании офлайн-заявки:** «Заявка сохранена. Будет синхронизирована при восстановлении сети.»
-- **При успешной синхронизации:** «Синхронизировано N заявок.»
-- **При ошибке:** «Синхронизация не удалась: <причина>.»
-- **При 5+ неудачах:** «Требуется ручное вмешательство.»
+### 11.3. Уведомления
 
----
-
-## 11. Миграция тенанта
-
-### 11.1. Контекст
-
-При переезде тенанта с урезанного PHP (Трек А) на новый API (Трек Б) — миграция данных из MariaDB в PostgreSQL.
-
-### 11.2. Что мигрирует
-
-| Данные                   | Мигрирует?                    |
-| ------------------------ | ----------------------------- |
-| Пользователи             | ✅ Да (хэши как есть)         |
-| Группы                   | ✅ Да (создать «Без группы»)  |
-| Лифты                    | ✅ Да (+ core/extra/dispatch) |
-| Адреса                   | ✅ Да (в `public`)            |
-| **Открытые заявки**      | ✅ Да                         |
-| **Комментарии открытых** | ✅ Да                         |
-| **История открытых**     | ✅ Да                         |
-| Справочники              | ✅ Да                         |
-| **Закрытые заявки**      | ❌ Нет (архив в MariaDB)      |
-| **Фото**                 | ❌ Нет (их не было)           |
-| **Офлайн-очередь**       | ❌ Нет (см. раздел 12)        |
-
-### 11.3. Офлайн-очередь при миграции
-
-**Проблема:** у диспетчеров могут быть тикеты в outbox на момент миграции. Их `offline_uuid` уже не будут существовать в новой БД.
-
-**Решение:**
-
-1. За **24 часа до миграции** — уведомить диспетчеров: «Синхронизируйте офлайн-заявки до <дата>.»
-2. В день миграции — **проверить `offline_sync_log`**: если есть `started` за последние 24 часа — отложить миграцию.
-3. Фронт на новом API: `offline_uuid` UNIQUE, старые UUID не конфликтуют (новая БД, новая схема).
-
-**Если офлайн-тикет создан на старом бэкенде после миграции:**
-
-- Он уйдёт в старый API (прокси-роутер ещё не переключен).
-- После переключения — синхронизируется в MariaDB.
-- Reconciliation: перенести созданные заявки из MariaDB в PostgreSQL (скрипт за период).
-
-### 11.4. Reconciliation
-
-**Скрипт** `scripts/reconcile-offline.js`:
-
-- Читает заявки из MariaDB за период `[T-0, T+7 дней]`.
-- Проверяет, есть ли `offline_uuid` в PostgreSQL.
-- Если нет — создаёт (или пропускает, если закрыта).
-
-**Запуск:** вручную, через 7 дней после миграции.
+| Событие | Сообщение |
+|---------|-----------|
+| Создание офлайн-действия | «✅ Сохранено. Будет синхронизировано при восстановлении сети.» |
+| Успешная синхронизация | «✅ Синхронизировано: N действий.» |
+| Архивация | «⚠️ Действие сохранено в архив: <reason>.» |
+| 5+ неудач | «🔴 Требуется ручное вмешательство. Обратитесь к администратору.» |
 
 ---
 
-## 12. Что НЕ синхронизируется
+## 12. История изменений
 
-### 12.1. Не поддерживается офлайн
+### v3.0 (текущая, production-ready)
 
-| Действие                           | Почему                                       |
-| ---------------------------------- | -------------------------------------------- |
-| Редактирование заявки (`calledit`) | Требует актуального состояния заявки         |
-| Закрытие заявки (`callClose`)      | Требует `solution`, оптимистичной блокировки |
-| Комментарии (`callnote`)           | Требует `call_id`, лимита фото               |
-| Назначение ответственного          | Требует актуального списка `staff_list`      |
-| Смена группы / типа                | Требует актуальных справочников              |
-| Фото                               | Требует сжатия, лимита, storage              |
+- Универсальная система офлайн-команд.
+- Поддержка 5 типов: `CreateTicket`, `EditTicket`, `CloseTicket`, `AddComment`, `AcceptTicket`.
+- Архитектура Command-Based Outbox + Snapshot Store.
+- Частичный успех (Partial Success) вместо атомарности.
+- Soft Merge для редактирования.
+- Таблица `offline_actions_archive` для отброшенных действий.
+- Эндпоинт `POST /calls/syncCommands`.
 
-**Правило:** офлайн — только **создание заявки**. Всё остальное — онлайн.
+### v2.0 (экспериментальная, не была в продакшене)
 
-### 12.2. Ограничения UI
+- Только создание заявок.
+- Эндпоинт `callNewOffline` (удалён в v3.0, не был в продакшене).
 
-- В офлайне кнопки «Редактировать», «Закрыть», «Комментировать» **скрыты** или **disabled** с подсказкой «Требуется подключение к сети».
-- Кнопка «Создать заявку» — работает (уходит в outbox).
+### v1.0 (экспериментальная)
+
+- Базовая офлайн-синхронизация.
 
 ---
 
-## 13. Схема БД
+## 13. Схема БД (MariaDB 10.11+)
 
-### 13.1. Таблицы
+### 13.1. Новые таблицы
 
-| Таблица            | Схема         | Назначение                                               |
-| ------------------ | ------------- | -------------------------------------------------------- |
-| `lift_calls`       | схема тенанта | Заявки + `offline_uuid` (UNIQUE), `address_not_verified` |
-| `offline_sync_log` | схема тенанта | Лог пачек                                                |
-
-### 13.2. Ключевые индексы
-
-- `UNIQUE (offline_uuid) WHERE offline_uuid IS NOT NULL` — идемпотентность.
-- `UNIQUE (batch_id)` на `offline_sync_log` — идемпотентность пачки.
-- `INDEX idx_calls_unverified (address_not_verified) WHERE address_not_verified = true` — для cron проверки.
-
-### 13.3. Пример записи в `offline_sync_log`
+#### `offline_actions_archive`
 
 ```sql
-INSERT INTO offline_sync_log (batch_id, user_id, tickets_count, status, started_at)
-VALUES ('batch_1761214500_abc123', 3, 10, 'started', now());
+CREATE TABLE offline_actions_archive (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  command_uuid VARCHAR(64) NOT NULL,
+  command_type VARCHAR(50) NOT NULL,
+  ticket_id INT DEFAULT NULL,
+  offline_uuid VARCHAR(64) DEFAULT NULL,
+  user_id INT NOT NULL,
+  user_name VARCHAR(255) NOT NULL,
+  payload JSON NOT NULL,
+  reason VARCHAR(100) NOT NULL,
+  message TEXT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  expires_at TIMESTAMP NOT NULL,
+  UNIQUE KEY uk_command_uuid (command_uuid),
+  KEY idx_expires (expires_at),
+  KEY idx_user_created (user_id, created_at),
+  KEY idx_ticket (ticket_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+```
 
--- после успеха
-UPDATE offline_sync_log
-SET status = 'success',
-    finished_at = now(),
-    tickets_created = 9,
-    tickets_skipped = 1,
-    tickets_failed = 0
-WHERE batch_id = 'batch_1761214500_abc123';
+#### `offline_command_log`
+
+```sql
+CREATE TABLE offline_command_log (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  command_uuid VARCHAR(64) NOT NULL,
+  batch_id VARCHAR(64) NOT NULL,
+  user_id INT NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  result JSON DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_command_uuid (command_uuid),
+  KEY idx_batch (batch_id),
+  KEY idx_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+```
+
+#### `offline_sync_log`
+
+```sql
+CREATE TABLE offline_sync_log (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  batch_id VARCHAR(64) NOT NULL,
+  user_id INT NOT NULL,
+  commands_count INT NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'started',
+  started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  finished_at TIMESTAMP NULL DEFAULT NULL,
+  cached_response LONGTEXT DEFAULT NULL COMMENT 'JSON-ответ при status=success для идемпотентности',
+  error_message TEXT DEFAULT NULL,
+  commands_success INT NOT NULL DEFAULT 0,
+  commands_archived INT NOT NULL DEFAULT 0,
+  commands_ignored INT NOT NULL DEFAULT 0,
+  commands_failed INT NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_batch_id (batch_id),
+  KEY idx_user_started (user_id, started_at),
+  KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
+```
+
+### 13.2. Изменения в существующих таблицах
+
+```sql
+-- audit_log: маркировка источника действия
+ALTER TABLE audit_log 
+  ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'online' 
+  COMMENT 'online / offline / legacy / system / api';
+CREATE INDEX idx_audit_source ON audit_log(source, timestamp);
+
+-- lift_calls: начинаем использовать существующую колонку
+ALTER TABLE lift_calls 
+  MODIFY COLUMN call_full_note_history LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin 
+  NOT NULL DEFAULT '{}' COMMENT 'JSON-история всех комментариев';
+
+-- lift_notes: маркировка офлайн-комментариев
+ALTER TABLE lift_notes 
+  ADD COLUMN is_offline TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = создан в офлайне';
+
+-- lift_history: источник изменения
+ALTER TABLE lift_history 
+  ADD COLUMN source VARCHAR(20) DEFAULT 'online' COMMENT 'online / offline / legacy';
+```
+
+### 13.3. Ключевые индексы для бизнес-логики
+
+```sql
+-- Для быстрой проверки дублей при создании (объект + статус + тип + дата)
+CREATE INDEX idx_calls_active_object 
+ON lift_calls(address_lift, call_status, call_request, call_date);
+
+-- Для поиска неотверифицированных адресов (cron)
+CREATE INDEX idx_calls_unverified 
+ON lift_calls(address_not_verified) WHERE address_not_verified = 1;
+```
+
+### 13.4. Cron-задачи (Ежедневно)
+
+```sql
+-- Очистка архива
+DELETE FROM offline_actions_archive WHERE expires_at < NOW() LIMIT 1000;
+
+-- Очистка логов
+DELETE FROM offline_command_log WHERE created_at < NOW() - INTERVAL 30 DAY LIMIT 1000;
+DELETE FROM offline_sync_log WHERE started_at < NOW() - INTERVAL 30 DAY LIMIT 1000;
 ```
 
 ---
 
-**Конец `OFFLINE_PROTOCOL.md` v2.0.**
+## 14. Migration тенанта
+
+### 14.1. Контекст
+
+При переезде тенанта с MariaDB на PostgreSQL (в будущем) — миграция данных.
+
+### 14.2. Что мигрирует
+
+| Данные | Мигрирует? |
+|--------|:----------:|
+| Пользователи | ✅ |
+| Группы и справочники | ✅ |
+| Лифты | ✅ |
+| Открытые заявки | ✅ |
+| Комментарии открытых | ✅ |
+| История открытых | ✅ |
+| Закрытые заявки | ❌ (архив) |
+| `offline_actions_archive` | ❌ (30-дневные данные, не критично) |
+| `offline_sync_log`, `offline_command_log` | ❌ (логи, не критично) |
+
+### 14.3. Офлайн-очередь при миграции
+
+**Проблема:** У пользователей могут быть команды в outbox на момент миграции.
+
+**Решение:**
+1. За 24 часа до миграции — уведомить пользователей: «Синхронизируйте офлайн-действия до <дата>.»
+2. В день миграции — проверить `offline_sync_log`: если есть `started` за последние 24 часа — отложить миграцию.
+3. Фронт на новом API: `offline_uuid` UNIQUE, старые UUID не конфликтуют (новая БД, новая схема).
 
 ---
+
+## 15. Что НЕ синхронизируется
+
+### 15.1. Ограничения офлайн-режима
+
+| Действие | Почему не поддерживается офлайн |
+|----------|----------------------------------|
+| Изменение адреса заявки | Требует актуального справочника |
+| Смена группы / типа неисправности | Требует актуальных справочников |
+| Загрузка фото (свыше 2 шт.) | Требует storage и сжатия |
+| Массовые действия | Требует онлайн-валидации прав |
+| Работа с отчетами | Только чтение, онлайн |
+| Управление пользователями | Только онлайн |
+
+### 15.2. UI-ограничения в офлайне
+
+- Кнопки «Редактировать адрес», «Сменить группу» — **disabled** с подсказкой «Требуется подключение к сети».
+- Кнопки «Создать», «Закрыть», «Комментировать», «Принять в работу» — **enabled** (уходят в outbox).
+- Кнопка «Редактировать» (для диспетчера) — **enabled** (Soft Merge).
+
+---
+
+**Конец `OFFLINE_PROTOCOL.md` (v3.0 FINAL).**
+```
+
+---
+
+## ✅ Все три документа готовы
+
+**Документы отправлены:**
+1. ✅ `API_PROTOCOL.md` v4.2 — базовый протокол API
+2. ✅ `API_syncCommands.md` v4.2 — детальная спецификация syncCommands
+3. ✅ `OFFLINE_PROTOCOL.md` v3.0 FINAL — архитектура офлайн-синхронизации
+
+**Ключевые согласованные решения:**
+- ❌ `callNewOffline` удалён (не был в продакшене)
+- ✅ `ticket_not_found` → `archived` (не `failed`)
+- ✅ Использование `match` для маршрутизации
+- ✅ Проверка идемпотентности до `match`
+- ✅ Все 5 типов команд + Soft Merge
+- ✅ Частичный успех (Partial Success)
+- ✅ Таблица `offline_actions_archive` с `audit_log.source`
+
+**Документы готовы к реализации!** 🎯
+
+Что делаем дальше? Могу подготовить:
+- SQL-миграции (готовый `.sql` файл)
+- Nginx-конфиг (`client_max_body_size 10M`)
+- Архитектуру клиентского `SyncManager` (JavaScript)

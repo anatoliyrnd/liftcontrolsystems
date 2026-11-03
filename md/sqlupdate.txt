@@ -62,38 +62,6 @@ UPDATE `lift_users` SET `user_position` = 'mechanic'
 
 UPDATE `lift_users` SET `user_position` = 'guest'
   WHERE `user_role` = 'guest';
--- уведомления
--- Таблица для хранения уведомлений
-CREATE TABLE IF NOT EXISTS `lift_notifications` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `event_type` varchar(50) NOT NULL COMMENT 'Тип события: ticket_created, ticket_closed, ticket_edited',
-  `ticket_id` int(11) DEFAULT NULL COMMENT 'ID заявки',
-  `user_id` int(11) DEFAULT NULL COMMENT 'ID пользователя-инициатора',
-  `text` varchar(500) NOT NULL COMMENT 'Текст уведомления',
-  `sound` tinyint(1) NOT NULL DEFAULT 0 COMMENT 'Воспроизводить звук',
-  `timeout` int(11) DEFAULT NULL COMMENT 'Время показа тоста в мс',
-  `created_at` int(11) NOT NULL COMMENT 'Unix timestamp',
-  PRIMARY KEY (`id`),
-  KEY `idx_created_at` (`created_at`),
-  KEY `idx_ticket_id` (`ticket_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Таблица для версий справочников
-CREATE TABLE IF NOT EXISTS `lift_dict_versions` (
-  `dict_name` varchar(50) NOT NULL,
-  `version` int(11) NOT NULL DEFAULT 1,
-  `updated_at` int(11) NOT NULL,
-  PRIMARY KEY (`dict_name`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`) VALUES
-('staff', 1, UNIX_TIMESTAMP()),
-('dicts', 1, UNIX_TIMESTAMP()),
-('addresses', 1, UNIX_TIMESTAMP())
-ON DUPLICATE KEY UPDATE `version` = `version`;
-
-
-
   --admin	admin	administrator	Администратор Системы	Полный доступ ко всему
 dispatcher	123456	dispatcher	Иванов Иван Иванович	Обычный диспетчер
 foreman	123456	dispatcher	Петров Пётр Петрович	Прораб

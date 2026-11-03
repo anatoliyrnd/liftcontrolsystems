@@ -112,11 +112,15 @@ export class ApiService {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      API.REQUEST_TIMEOUT_MS,
-    );
-
+    // Q8: флаг «наш abort был из-за таймаута».
+    // Нужен, чтобы в catch отличить таймаут (offline: true → SyncManager
+    // ставит cooldown) от ручного abort'а через abortTag (AUTH_LOST,
+    // отмена по кнопке — offline: false, без cooldown).
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, API.REQUEST_TIMEOUT_MS);
     if (tag) {
       if (!this._activeByTag.has(tag)) this._activeByTag.set(tag, new Set());
       this._activeByTag.get(tag).add(controller);
@@ -151,71 +155,109 @@ export class ApiService {
           message: response.status + this._translateHttpCode(response.status),
         };
       }
+      // Q9: проверка Content-Type перед .json().
+      // Если сервер вернул HTML (PHP-ошибка, error_handler вывел
+      // warning в обход JSON), .json() бросит SyntaxError → catch
+      // посчитал бы это network_error + offline: true → SyncManager
+      // ушёл бы в cooldown, хотя сервер жив. Ошибка invalid_response
+      // с offline: true — семантически «сервер недоступен, попробуем
+      // позже», но без путаницы с «сеть упала».
+      const contentType = (
+        response.headers.get("Content-Type") || ""
+      ).toLowerCase();
+      if (!contentType.includes("application/json")) {
+        networkLed.reportFailure();
+        return {
+          status: "error",
+          code: "invalid_response",
+          offline: true,
+          message:
+            "Сервер вернул не-JSON: " +
+            response.status +
+            " " +
+            (response.statusText || "no status text"),
+        };
+      }
 
       const data = await response.json();
 
       // Ошибка внутри JSON
-     if (data && data.status === "error" && !skipAuthHandling) {
-    if (AUTH.BYPASS_AUTH) {
-        return data;
-    }
+      if (data && data.status === "error" && !skipAuthHandling) {
+        if (AUTH.BYPASS_AUTH) {
+          return data;
+        }
 
-    const code = data.code || data.error?.code || "";
+        const code = data.code || data.error?.code || "";
 
-    if (
-        code === "token_expired" ||
-        code === "missing_token" ||
-        code === "token_invalid"
-    ) {
-        const okRefresh = await this._refreshSession();
-        if (okRefresh) {
+        if (
+          code === "token_expired" ||
+          code === "missing_token" ||
+          code === "token_invalid"
+        ) {
+          const okRefresh = await this._refreshSession();
+          if (okRefresh) {
             networkLed.reportSuccess();
-            return this._sendPostRequest(url, payloadData, actionComment, tag, true);
-        } else {
+            return this._sendPostRequest(
+              url,
+              payloadData,
+              actionComment,
+              tag,
+              true,
+            );
+          } else {
             networkLed.reportFailure();
             this._emitAuthLost(code);
             return data;
+          }
         }
-    }
 
-    if (code === "device_mismatch" || code === "user_blocked") {
-        networkLed.reportFailure();
-        this._emitAuthLost(code);
-        return data;
-    }
+        if (code === "device_mismatch" || code === "user_blocked") {
+          networkLed.reportFailure();
+          this._emitAuthLost(code);
+          return data;
+        }
 
-    // Rate-limit: извлекаем retry_after, чтобы SyncManager мог
-    // поставить cooldown на нужное время (API_PROTOCOL.md v4.2, разд. 11.3).
-    if (code === "rate_limited") {
-        const rawRetry =
+        // Rate-limit: извлекаем retry_after, чтобы SyncManager мог
+        // поставить cooldown на нужное время (API_PROTOCOL.md v4.2, разд. 11.3).
+        if (code === "rate_limited") {
+          const rawRetry =
             data.retry_after ??
             data.error?.details?.retry_after ??
             data.details?.retry_after ??
             60;
-        const retryAfterSec = Math.max(1, parseInt(rawRetry, 10) || 60);
-        data.retryAfterSec = retryAfterSec;   // мутируем — вернётся вместе с data
-        networkLed.reportFailure();
-        return data;
-    }
-}
+          const retryAfterSec = Math.max(1, parseInt(rawRetry, 10) || 60);
+          data.retryAfterSec = retryAfterSec; // мутируем — вернётся вместе с data
+          networkLed.reportFailure();
+          return data;
+        }
+      }
       networkLed.reportSuccess();
       return data;
     } catch (err) {
-    clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
 
-    if (err.name === "AbortError") {
+      if (err.name === "AbortError") {
         networkLed.reportAborted();
+        if (timedOut) {
+          return {
+            status: "error",
+            code: "aborted",
+            reason: "timeout",
+            offline: true,
+            message: "Превышено время ожидания ответа сервера.",
+          };
+        }
         return { status: "error", code: "aborted", message: "Запрос отменён." };
-    }
+      }
 
-    networkLed.reportFailure();
-    return {
+      networkLed.reportFailure();
+      return {
         status: "error",
         code: "network_error",
-        offline: true,                 // ← ключевой флаг для SyncManager
+        offline: true, // ← ключевой флаг для SyncManager
         message: "Ошибка сети: " + (err.message || "неизвестная ошибка"),
-    };
-} finally {
+      };
+    } finally {
       if (showStatus) {
         apiStatus.hide();
       }

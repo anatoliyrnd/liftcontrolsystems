@@ -7,7 +7,6 @@ export class LoginController {
     this.api = apiInstance;
     this.router = routerInstance;
   }
-
   async mount() {
     const form = document.getElementById("loginForm");
     const nameInput = document.getElementById("loginName");
@@ -21,33 +20,12 @@ export class LoginController {
 
     setTimeout(() => nameInput && nameInput.focus(), 50);
 
-    // --- УМНЫЙ ЛОГИН: Загрузка списка пользователей организации ---
-    const orgKey = localStorage.getItem("org_key");
-    if (orgKey && datalist) {
-      try {
-        // Делаем запрос тихо (без спиннера)
-        const resp = await this.api.post(
-          { data: "get_org_users", org_key: orgKey },
-          null,
-          "silent",
-        );
-        if (resp && resp.status === "ok" && Array.isArray(resp.users)) {
-          datalist.innerHTML = "";
-          resp.users.forEach((u) => {
-            const option = document.createElement("option");
-            option.value = u.name; // То, что видит пользователь
-            option.dataset.id = u.user_id; // То, что отправим на сервер
-            datalist.appendChild(option);
-          });
-        }
-      } catch (e) {
-        console.warn(
-          "[LoginController] Не удалось загрузить список пользователей",
-          e,
-        );
-      }
-    }
-
+    // onsubmit привязывается СИНХРОННО, до любого await.
+    // Раньше: пользователь открывал #/login, сразу жал «Войти»
+    // (до загрузки datalist, до 15 сек) — браузер отправлял форму
+    // нативным submit'ом, страница перезагружалась, ввод терялся.
+    // Синхронная привязка закрывает эту дыру: логин по имени работает
+    // и без datalist (selectedUserId останется null).
     form.onsubmit = async (e) => {
       e.preventDefault();
       errorBox.style.display = "none";
@@ -58,7 +36,9 @@ export class LoginController {
       const pwd = pwdInput.value;
       const auto = autoInput.checked;
 
-      // Проверяем, выбран ли пользователь из datalist
+      // Проверяем, выбран ли пользователь из datalist.
+      // Если datalist ещё не заполнен (загрузка не завершилась) —
+      // matchedOption не найдётся, логин пойдёт по имени.
       let selectedUserId = null;
       if (datalist) {
         const matchedOption = Array.from(datalist.options).find(
@@ -72,7 +52,6 @@ export class LoginController {
       try {
         let resp;
         if (selectedUserId) {
-          // Логинимся по ID
           resp = await this.api.loginById(selectedUserId, pwd, auto);
         } else {
           // Обычный логин по имени
@@ -81,7 +60,6 @@ export class LoginController {
 
         if (resp && resp.status === "ok" && resp.access_token) {
           authStore.setSession(resp.access_token, resp.expires_at, resp.user);
-
           // Форматируем имя для красивого тоста
           const greetingName = this._formatName(resp.user);
 
@@ -125,6 +103,35 @@ export class LoginController {
         submitBtn.textContent = "Войти";
       }
     };
+
+    // --- УМНЫЙ ЛОГИН: Загрузка списка пользователей организации ---
+    // Выполняется ПОСЛЕ привязки onsubmit. Если пользователь уже
+    // нажал Enter — datalist не помешает: matchedOption не найдётся,
+    // логин пойдёт по имени.
+    const orgKey = localStorage.getItem("org_key");
+    if (orgKey && datalist) {
+      try {
+        const resp = await this.api.post(
+          { data: "get_org_users", org_key: orgKey },
+          null,
+          "silent",
+        );
+        if (resp && resp.status === "ok" && Array.isArray(resp.users)) {
+          datalist.innerHTML = "";
+          resp.users.forEach((u) => {
+            const option = document.createElement("option");
+            option.value = u.name;
+            option.dataset.id = u.user_id;
+            datalist.appendChild(option);
+          });
+        }
+      } catch (e) {
+        console.warn(
+          "[LoginController] Не удалось загрузить список пользователей",
+          e,
+        );
+      }
+    }
   }
   _formatName(user) {
     if (!user) return "Пользователь";

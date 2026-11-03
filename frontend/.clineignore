@@ -1,0 +1,9 @@
+js/vendor/
+.idea/
+icons/
+mainSRC/
+js/mobile/
+.gitignore
+package.json
+sw.jsold
+10_0_0_3.sql

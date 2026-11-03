@@ -48,103 +48,6 @@ class CallService
      * - repair_time (Unix timestamp)
      * - staff_id (вместо call_staff)
      */
-    public function callnew(array $user, array $data): array
-    {
-        // === Если тенант на legacy — проксируем ===
-        // LegacyProxyService сам конвертирует новый формат в legacy
-        if ($this->tenant && $this->tenant->legacyCompat) {
-            $result = $this->legacyProxy->send('callnew', $data, $user['id']);
-
-            if (($result['status'] ?? '') === 'error') {
-                throw new ApiException(
-                    ErrorCode::InternalError,
-                    $result['message'] ?? 'Ошибка legacy-системы'
-                );
-            }
-
-            return [
-                'message' => $result['message'] ?? 'Заявка создана в legacy',
-                'call_id' => (int) ($result['generated_id'] ?? $result['call_id'] ?? 0)
-            ];
-        }
-
-        // === Прямое создание заявки в БД (новый формат) ===
-        $this->validateCallData($data);
-
-        // Минимальная длина описания (ТЕХДОЛГ: читать из lift_options.min_length_text)
-        $minLength = 6;
-
-        $details = trim($data['details'] ?? '');
-        if (mb_strlen($details) < $minLength) {
-            throw new ApiException(
-                ErrorCode::InvalidInput,
-                "Описание должно содержать минимум {$minLength} символов"
-            );
-        }
-
-        // Валидация адреса одним JOIN-запросом
-        // Используем новые имена полей от фронтенда
-        $address = $this->validateAddress($data);
-
-        // Используем fullAddress из фронтенда
-        $fullAddress = $data['fullAddress'] ?? $address['full_address'];
-
-        // Определение alert_level
-        $alertLevel = $this->determineAlertLevel($data);
-
-        // Срок ремонта: repair_time приходит как Unix timestamp
-        $expectedRepairTime = $this->resolveRepairTime($data);
-
-        // Формирование данных для INSERT (маппинг в поля БД)
-        $callData = [
-            'call_status' => 0,
-            'call_date' => time(),
-            'call_first_name' => $data['call_first_name'] ?? '',
-            'call_last_name' => $data['call_last_name'] ?? '',
-            'call_phone' => $data['call_phone'] ?? '',
-            'call_email' => $data['call_email'] ?? '',
-            'call_department' => (int) ($data['department_id'] ?? 22),  // department_id → call_department
-            'call_request' => (int) ($data['request_id'] ?? 0),      // request_id → call_request
-            'call_group' => (int) ($data['group_id'] ?? 0),        // group_id → call_group
-            'call_adres' => $fullAddress,
-            'call_details' => $details,
-            'call_solution' => '',
-            'call_staff' => (int) ($data['staff_id'] ?? 0),        // staff_id → call_staff
-            'address_city' => (int) ($data['city_id'] ?? 0),         // city_id → address_city
-            'address_street' => (int) ($data['street_id'] ?? 0),       // street_id → address_street
-            'address_home' => (int) ($data['home_id'] ?? 0),         // home_id → address_home
-            'address_lift' => (int) ($data['object_id'] ?? 0),       // object_id → address_lift
-            'elevator_group_id' => (int) $address['group_id'],
-            'address_not_verified' => 0,
-            'expected_repair_time' => $expectedRepairTime,
-            'alert_level' => $alertLevel,
-            'call_user' => (int) $user['id'],
-        ];
-
-        // Создание заявки
-        $callId = $this->callRepo->create($callData);
-
-        // Запись в историю
-        $historyText = "Создана заявка пользователем {$user['name']}";
-        $this->historyRepo->add($callId, $historyText, (int) $user['id']);
-        // Отправка уведомления
-        $this->notificationsService->ticketCreated(
-            $callId,
-            $fullAddress,
-            $user['name'],
-            (int) $user['id']
-        );
-        return [
-            'message' => "Заявка №{$callId} успешно создана",
-            'call_id' => $callId,
-        ];
-    }
-
-    /**
-     * Редактирование заявки
-     * 
-     * Фронтенд отправляет: call_id, department_id, request_id, group_id, staff_id, notify_status, repair_time, details
-     */
     public function calledit(array $user, array $data): array
     {
         $callId = (int) ($data['call_id'] ?? 0);
@@ -152,7 +55,7 @@ class CallService
             throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен');
         }
 
-        // Legacy-режим
+        // Legacy-режим — БЕЗ уведомлений
         if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('calledit', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
@@ -169,26 +72,23 @@ class CallService
             throw new ApiException(ErrorCode::Closed, "Заявка уже закрыта");
         }
 
-        // Маппинг полей из нового формата в поля БД
-        $fields = [];
+       // Маппинг полей из нового формата в поля БД
+       $fields = [];
 
-        // === APPEND-ONLY для details ===
-// Защита от потери данных: если фронтенд прислал только дополнение,
-// добавим его к текущему тексту, а не заменим
-        if (array_key_exists('details', $data)) {
-            $newDetails = trim((string) $data['details']);
-            $currentDetails = (string) ($call['call_details'] ?? '');
+       // === APPEND-ONLY для details / description_delta ===
+       // Сервер принимает оба имени: description_delta (каноническое) и details (алиас)
+       $newDetails = trim((string) ($data['description_delta'] ?? $data['details'] ?? ''));
+       $currentDetails = (string) ($call['call_details'] ?? '');
 
-            if ($newDetails === '') {
-                // Пустое значение — игнорируем (не удаляем существующее)
-            } elseif ($currentDetails === '' || str_contains($newDetails, $currentDetails)) {
-                // Старое пусто ИЛИ новое содержит старое (фронтенд правильно сформировал)
-                $fields['call_details'] = $newDetails;
-            } else {
-                // Новое НЕ содержит старое — добавляем как дополнение
-                $fields['call_details'] = $currentDetails . "\n\n" . $newDetails;
-            }
-        }
+       if ($newDetails !== '') {
+           if ($currentDetails === '' || str_contains($newDetails, $currentDetails)) {
+               // Старое пусто ИЛИ новое содержит старое (фронтенд правильно сформировал)
+               $fields['call_details'] = $newDetails;
+           } else {
+               // Новое НЕ содержит старое — добавляем как дополнение
+               $fields['call_details'] = $currentDetails . "\n\n" . $newDetails;
+           }
+       }
         if (array_key_exists('department_id', $data)) {
             $fields['call_department'] = (int) $data['department_id'];
         }
@@ -213,15 +113,13 @@ class CallService
             $this->callRepo->updateFields($callId, $fields);
             $this->historyRepo->add($callId, "Отредактирована пользователем {$user['name']}", (int) $user['id']);
         }
+
+        // Уведомление ТОЛЬКО для нового API
         $this->notificationsService->ticketEdited($callId, $user['name'], (int) $user['id']);
+
         return ['message' => "Изменения по заявке №{$callId} сохранены."];
     }
 
-    /**
-     * Закрытие заявки
-     * 
-     * Фронтенд отправляет: call_id, solution, user_id
-     */
     public function callClose(array $user, array $data): array
     {
         $callId = (int) ($data['call_id'] ?? 0);
@@ -234,7 +132,7 @@ class CallService
             throw new ApiException(ErrorCode::InvalidInput, 'Решение минимум 6 символов');
         }
 
-        // Legacy-режим
+        // Legacy-режим — БЕЗ уведомлений
         if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('callClose', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
@@ -252,9 +150,9 @@ class CallService
         }
 
         $this->callRepo->updateFields($callId, [
-            'call_status' => 1,
-            'call_date2' => time(),
-            'call_solution' => $solution,
+            'call_status'    => 1,
+            'call_date2'     => time(),
+            'call_solution'  => $solution,
             'call_last_name' => $user['name'],
         ]);
 
@@ -263,15 +161,13 @@ class CallService
             "Закрыта пользователем {$user['name']}. Решение: {$solution}",
             (int) $user['id']
         );
+
+        // Уведомление ТОЛЬКО для нового API
         $this->notificationsService->ticketClosed($callId, $solution, $user['name'], (int) $user['id']);
+
         return ['message' => "Заявка №{$callId} успешно закрыта."];
     }
 
-    /**
-     * Добавление комментария
-     * 
-     * Фронтенд отправляет: call_id, note
-     */
     public function callnote(array $user, array $data): array
     {
         $callId = (int) ($data['call_id'] ?? 0);
@@ -284,8 +180,7 @@ class CallService
             throw new ApiException(ErrorCode::InvalidInput, 'Текст минимум 6 символов');
         }
 
-        // Legacy-режим — проксируем, БЕЗ локального уведомления
-        // (в legacy-БД нет таблицы lift_notifications)
+        // Legacy-режим — БЕЗ уведомлений
         if ($this->tenant && $this->tenant->legacyCompat) {
             $result = $this->legacyProxy->send('callnote', $data, $user['id']);
             if (($result['status'] ?? '') === 'error') {
@@ -294,14 +189,14 @@ class CallService
             return ['message' => "Комментарий добавлен (Legacy)."];
         }
 
-        // Новый режим — сохраняем локально + отправляем уведомление
         $this->noteRepo->add($callId, $user['id'], $note);
         $this->historyRepo->add($callId, "Добавлена заметка: {$note}", (int) $user['id']);
+
+        // Уведомление ТОЛЬКО для нового API
         $this->notificationsService->ticketNote($callId, $user['name'], (int) $user['id']);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
     }
-
     // ==========================================
     // Приватные методы
     // ==========================================
