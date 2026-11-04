@@ -1,101 +1,49 @@
 import { staffStore } from "./staff-store.js";
 import { userStore } from "./user-store.js";
-import { createDictSelect } from "./components/dict-select.js";
-import { createStaffSelect } from "./components/staff-select.js";
 import { logHistoryAction } from "./history-logger.js";
-import { createValidatedTextarea } from "./components/validated-textarea.js";
-import { createRepairTimePicker } from "./components/repair-time-picker.js";
-import {
-  initVoiceTextarea,
-  destroyVoiceInput,
-} from "./components/voiceInput.js";
+import { renderCardLayout } from "./details/views/card-layout.js";
+import { destroyVoiceInput } from "./components/voiceInput.js";
 import { notify } from "./components/notify.js";
-import { VALIDATION, UI, BUSINESS } from "./config.js";
+import { UI } from "./config.js";
 import { appState } from "./app-state.js";
-import { escapeHtml } from "./utils/escape-html.js";
+
 import { offlineDB } from "./offline-db.js";
-import { nowTs, formatTs } from "./utils/date-utils.js";
+
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
 import { normalizeTicketFields } from "./details/ticket-normalizer.js";
-import { formatFullHistory } from "./details/history-view.js";
-import { getStatusWord } from "./details/status-word.js";
+
 import { render404, renderNetworkError } from "./details/error-views.js";
 import { ticketRepository } from "./details/ticket-repository.js";
 import { DetailsState } from "./details/details-state.js";
+import { renderStaffSlots } from "./details/views/staff-slots-view.js";
+import {
+  renderNotesList,
+  createNotesComposer,
+} from "./details/views/notes-view.js";
+import { createEditForm } from "./details/views/edit-form.js";
+import { createCloseForm } from "./details/views/close-form.js";
 
-const CAPS_REGEX = VALIDATION.CAPS_REGEX;
-const MIN_SOLUTION_LEN = VALIDATION.MIN_SOLUTION_LEN;
 const AUTO_RETURN_MS = UI.AUTO_RETURN_MS;
 const ERROR_UNLOCK_MS = UI.ERROR_UNLOCK_MS;
-const NOTIFY_CHANNELS = BUSINESS.NOTIFY_CHANNELS;
-const ACCEPT_CHANNEL = BUSINESS.ACCEPT_CHANNEL;
 
-/**
- * Нормализация числовых полей тикета. Вызывается в mount и в
- * _refreshTicketAfterSave (без неё сервер возвращает "0" строками,
- * и проверки !staff_id / !notify_status дают ложные результаты).
- */
-/* function normalizeTicketFields(ticket) {
-  if (!ticket) return ticket;
-
-  if (ticket.staff_id != null && ticket.staff_id !== "")
-    ticket.staff_id = Number(ticket.staff_id) || null;
-  else ticket.staff_id = null;
-  if (ticket.staff_id2 != null && ticket.staff_id2 !== "")
-    ticket.staff_id2 = Number(ticket.staff_id2) || null;
-  else ticket.staff_id2 = null;
-  if (ticket.staff_id3 != null && ticket.staff_id3 !== "")
-    ticket.staff_id3 = Number(ticket.staff_id3) || null;
-  else ticket.staff_id3 = null;
-
-  ticket.notify_status = Number(ticket.notify_status) || 0;
-  ticket.notify_status2 = Number(ticket.notify_status2) || 0;
-  ticket.notify_status3 = Number(ticket.notify_status3) || 0;
-
-  ticket.repair_time =
-    ticket.repair_time != null && ticket.repair_time !== ""
-      ? Number(ticket.repair_time) || null
-      : null;
-
-  return ticket;
-} */
 export class DetailsController {
   constructor(apiInstance, routerInstance) {
+    this.notesComposer = null;
     this.api = apiInstance;
     this.router = routerInstance;
     this.currentTicketId = null;
-    // this.ticket = null;
-    this.deptSelect = null;
-    this.reqSelect = null;
-    this.groupSelect = null;
-    //this.state.clearDraft();
-    // this.mode = "view";
     this.autoReturnTimer = null;
     this.state = new DetailsState();
     this._staffChangedInSession = false;
     this._autoOpenPending = false;
-
-    // this._pendingCommands = [];
-    // Счётчик монтирований — см. комментарий в tickets-controller.
-    // Инкремент в unmount() инвалидирует активные mount-потоки.
+    this.closeForm = null;
     this._mountId = 0;
-    // Дедуп pending-команд в рамках одного mount. Ключ — command_uuid.
-    // Сбрасывается в mount(). Нужен, потому что _applyPendingToTicket
-    // может быть вызван несколько раз (mount + _saveEditOffline), и без
-    // дедупа details/note дублируются.
-    // this._appliedPendingUuids = new Set();
-    // Ссылка на массив, из которого взят этот тикет (combinedTicketsArray
-    // в main.js). После save/close синхронизируем элемент, чтобы журнал
-    // не показывал устаревшие данные до следующего polling.
     this._sourceArray = null;
     this._sourceIdx = -1;
-    // Компоненты — объявлены для читаемости и статического анализа.
-    this.currentStaffSelect = null;
-    this.repairPicker = null;
-    this.noteField = null;
-    this.noteSubmitBtn = null;
+    this.staffSlotsView = null;
+    this.editForm = null;
   }
 
   async mount(ticketId, combinedTicketsArray = []) {
@@ -166,7 +114,7 @@ export class DetailsController {
     // Shallow-копия + копия note-массива. Без этого _applyPendingToTicket
     // мутирует объект внутри combinedTicketsArray (общий), и при повторном
     // открытии карточки details/note дублируются.
-    this._serverTicket = normalizeTicketFields({
+    const normalizedTicket = normalizeTicketFields({
       ...ticket,
       note: Array.isArray(ticket.note)
         ? [...ticket.note]
@@ -188,7 +136,7 @@ export class DetailsController {
 
     const cmds = await outboxQueue.getPendingByTicket(ticketId);
     if (isStale()) return;
-    this.state.setServerTicket(this._serverTicket, cmds);
+    this.state.setServerTicket(normalizedTicket, cmds);
 
     this._renderCard(container);
   }
@@ -288,28 +236,24 @@ export class DetailsController {
    */
 
   _renderCard(container) {
+    if (this.staffSlotsView && this.staffSlotsView.destroy) {
+      this.staffSlotsView.destroy();
+      this.staffSlotsView = null;
+    }
+    if (this.closeForm) {
+      this.closeForm.destroy();
+      this.closeForm = null;
+    }
     destroyVoiceInput();
-    // Полная перерисовка: все DOM-узлы внутри container уничтожаются
-    // через innerHTML. Но созданные компоненты (noteField, select'ы,
-    // voiceInput на textarea, слушатели на document) продолжают жить
-    // на detached-узлах. Dispose до замены DOM.
-    [
-      this.noteField,
-      this.deptSelect,
-      this.reqSelect,
-      this.groupSelect,
-      this.repairPicker,
-      this.currentStaffSelect,
-    ].forEach((comp) => {
-      if (comp && typeof comp.destroy === "function") comp.destroy();
-    });
-    this.noteField = null;
-    this.noteSubmitBtn = null;
-    this.deptSelect = null;
-    this.reqSelect = null;
-    this.groupSelect = null;
-    this.repairPicker = null;
-    this.currentStaffSelect = null;
+
+    if (this.notesComposer) {
+      this.notesComposer.destroy();
+      this.notesComposer = null;
+    }
+    if (this.editForm) {
+      this.editForm.destroy();
+      this.editForm = null;
+    }
 
     const t = this.ticket;
     const isOffline = t.isOffline === true;
@@ -356,626 +300,106 @@ export class DetailsController {
       ? pendingClose.close_name
       : t.close_name || "—";
 
-    container.innerHTML = `
-            <div class="ticket-card-layout-grid">
-                <div class="ticket-info-panel" style="background: var(--bg-secondary); border: 2px solid var(--border-color); border-radius: 12px; padding: 1.25rem 1rem 0.75rem; display: flex; flex-direction: column; gap: 0.75rem; overflow: visible; height: 100%; min-height: 0; position: relative;">
-                    <div style="position: absolute; top: 0; left: 0; right: 0; transform: translateY(-50%); display: flex; justify-content: space-between; align-items: center; padding: 0 1.25rem; gap: 8px; z-index: 5;">
-                        <h2 style="font-size: 1.1rem; font-weight: 700; background: var(--bg-primary); padding: 0 0.5rem; line-height: 1; margin: 0;">Заявка №${escapeHtml(t.id)}</h2>
-                        <span style="font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 20px; background: ${statusBg}; color: ${statusColor}; border: 2px solid var(--bg-primary);">${statusLabel}</span>
-                    </div>
+    // Вызов нового View
+    container.innerHTML = renderCardLayout({
+      ticket: t,
+      isOffline,
+      pendingClose,
+      isClosed,
+      isOpen,
+      canEdit,
+      canClose,
+      hasPendingEdit,
+      hasPendingComment,
+      statusLabel,
+      statusBg,
+      statusColor,
+      solutionText,
+      closeDate,
+      closeName,
+      isAdmin: userStore.isAdmin(),
+    });
 
-                    <div class="info-group" style="flex-shrink: 0;">
-                        <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">📍 Адрес объекта</label>
-                        <div style="font-size: 15px; font-weight: 600; margin-top: 2px; white-space: normal;">${escapeHtml(t.fullAddress || t.address || "—")}</div>
-                    </div>
-
-                    ${
-                      isOffline
-                        ? `
-                    <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 8px; padding: 10px; color: #d97706; font-size: 13px; font-weight: 600; text-align: center; margin-top: 5px;">
-                        ⏳ Заявка ожидает синхронизации с сервером. Редактирование недоступно.
-                    </div>`
-                        : ""
-                    }
-                    ${
-                      pendingClose && !isOffline
-                        ? `
-                    <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 8px; padding: 10px; color: #d97706; font-size: 13px; font-weight: 600; text-align: center; margin-top: 5px;">
-                        ⏳ Закрыта локально. Ожидает синхронизации с сервером.
-                    </div>`
-                        : ""
-                    }
-                    ${
-                      hasPendingEdit && !pendingClose && !isOffline
-                        ? `
-                    <div style="background: rgba(99, 102, 241, 0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 10px; color: var(--accent); font-size: 12px; font-weight: 600; text-align: center; margin-top: 5px;">
-                        ⏳ Есть неотправленные изменения. Синхронизируются при восстановлении сети.
-                    </div>`
-                        : ""
-                    }
-                    ${
-                      hasPendingComment &&
-                      !hasPendingEdit &&
-                      !pendingClose &&
-                      !isOffline
-                        ? `
-                    <div style="background: rgba(99, 102, 241, 0.08); border-radius: 6px; padding: 6px 8px; color: var(--text-secondary); font-size: 11px; text-align: center; margin-top: 5px;">
-                        ⏳ Есть неотправленный комментарий.
-                    </div>`
-                        : ""
-                    }
-                        
-                    <div id="ticketScrollArea" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; padding-right: 6px;">
-                        <div id="ticketBodyBlock" style="display: flex; flex-direction: column; gap: 1rem;">
-                            <div class="info-group">
-                                <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">🚨 Описание проблемы</label>
-                                <div id="detailsDisplay" style="font-size: 14px; margin-top: 2px; background: var(--bg-primary); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); white-space: pre-wrap;">${escapeHtml(t.details || "Описание отсутствует.")}</div>
-                                <div id="detailsAddBlock" style="display: none; margin-top: 8px;">
-                                    <textarea id="newDetailsInput" class="search-input editable-field" rows="3" placeholder="Введите дополнение к описанию..." style="width: 100%; resize: vertical; font-family: inherit;"></textarea>
-                                    <div id="capsWarnDetails" style="display: none; color: #ef4444; font-size: 12px; margin-top: 4px;">⚠️ Слишком много заглавных букв подряд (максимум 4)</div>
-                                    <button id="addDetailsBtn" class="menu-item" style="margin-top: 6px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); cursor: pointer;">+ Добавить описание заявки</button>
-                                </div>
-                            </div>
-
-                            <div class="info-group" id="staffAssignmentsBlock">
-                                <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">👷 Ответственные</label>
-                                <div id="staffSlotsContainer" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;"></div>
-                            </div>
-
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                                <div class="info-group">
-                                    <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">📅 Дата регистрации</label>
-                                    <div style="font-size: 14px; margin-top: 2px;">${formatTs(t.date)}</div>
-                                </div>
-                                <div class="info-group">
-                                    <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">🛠 Дата ремонта</label>
-                                    <div id="repairTimeDisplay" style="font-size: 14px; margin-top: 2px;">${formatTs(t.repair_time)}</div>
-                                    <div id="repairTimeEditBlock" style="display: none; margin-top: 6px;"></div>
-                                </div>
-                            </div>
-
-                            <div style="display: flex; flex-direction: column; gap: 1rem;">
-                                <div class="info-group">
-                                    <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">🏢 Отдел</label>
-                                    <div id="deptDisplay" style="font-size: 14px; margin-top: 2px;">${escapeHtml(t.department || "—")}</div>
-                                    <div id="deptEditBlock" style="display: none; margin-top: 6px;"></div>
-                                </div>
-                                <div class="info-group">
-                                    <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">📋 Тип запроса</label>
-                                    <div id="reqDisplay" style="font-size: 14px; margin-top: 2px;">${escapeHtml(t.request || "—")}</div>
-                                    <div id="reqEditBlock" style="display: none; margin-top: 6px;"></div>
-                                </div>
-                                <div class="info-group">
-                                    <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">📦 Группа</label>
-                                    <div id="groupDisplay" style="font-size: 14px; margin-top: 2px;">${escapeHtml(t.group || "—")}</div>
-                                    <div id="groupEditBlock" style="display: none; margin-top: 6px;"></div>
-                                </div>
-                            </div>
-
-                            ${
-                              isClosed
-                                ? `
-                            <div class="info-group" style="border-top: 1px dashed var(--border-color); padding-top: 1rem;">
-                                <label style="font-size: 11px; font-weight: 700; color: #22c55e; text-transform: uppercase;">
-                                    ${pendingClose ? "⏳ Решение (ожидает синхронизации)" : "✅ Принятое решение"}
-                                </label>
-                                <div style="font-size: 14px; margin-top: 2px; font-weight: 500; white-space: pre-wrap;">${escapeHtml(solutionText || "—")}</div>
-                                
-                                <div style="font-size: 13px; color: var(--text-secondary); margin-top: 8px;">
-                                    Закрыл: <b>${escapeHtml(closeName)}</b> · ${formatTs(closeDate)}
-                                </div>
-
-                                ${
-                                  pendingClose
-                                    ? `
-                                <div style="margin-top: 8px; padding: 8px; border-radius: 6px; background: rgba(245,158,11,0.08); border: 1px solid #f59e0b; color: #d97706; font-size: 12px;">
-                                    Действие будет синхронизировано при восстановлении сети.
-                                </div>`
-                                    : ""
-                                }
-
-                                ${
-                                  !pendingClose &&
-                                  userStore.isAdmin() &&
-                                  t.full_history
-                                    ? `
-                                <details style="margin-top: 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary);">
-                                    <summary style="cursor: pointer; font-size: 12px; font-weight: 600; padding: 8px 12px; user-select: none; outline: none;">📜 Показать полную историю</summary>
-                                    <div style="font-size: 12px; padding: 0 12px 12px; white-space: pre-wrap; color: var(--text-secondary);">${formatFullHistory(t.full_history)}</div>
-                                </details>
-                                `
-                                    : ""
-                                }
-                            </div>`
-                                : ""
-                            }
-                        </div> <!-- ⬅️ КОНЕЦ ticketBodyBlock -->
-
-                        <div id="closeBlock" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 1rem;">
-                            <label style="font-size: 11px; font-weight: 700; color: #22c55e; text-transform: uppercase;">🔒 Решение по заявке</label>
-                            <textarea id="solutionInput" class="search-input" rows="3" placeholder="Опишите, что было сделано (минимум ${MIN_SOLUTION_LEN} символов)..." style="width: 100%; resize: vertical; margin-top: 4px; font-family: inherit;"></textarea>
-                            <div id="capsWarnSolution" style="display: none; color: #ef4444; font-size: 12px; margin-top: 4px;">⚠️ Слишком много заглавных букв подряд (максимум 4)</div>
-
-                            <label id="closeAndCreateWrap" class="editable-field editable-field--checkbox" style="display: inline-flex; align-items: center; gap: 8px; margin-top: 10px; cursor: pointer; font-size: 13px; width: fit-content;">
-                                <input type="checkbox" id="closeAndCreateCheck" style="cursor: pointer;">
-                                <span>Закрыть и создать новую для этого объекта</span>
-                            </label>
-                        </div>
-                        <div id="editErrorBanner" style="display: none; padding: 8px 12px; background: rgba(239,68,68,0.1); border: 1px solid #ef4444; border-radius: 8px; color: #ef4444; font-size: 13px;"></div>
-                    </div> <!-- ⬅️ КОНЕЦ ticketScrollArea -->
-
-                    <div class="ticket-actions-footer">
-                        <button class="menu-item" id="backBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">← Вернуться в журнал</button>
-                        ${!isOffline && isOpen && canEdit ? `<button class="menu-item" id="editBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">✏️ Редактировать</button>` : ""}
-                        ${!isOffline && canClose ? `<button class="menu-item" id="closeBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">🔒 Закрыть заявку</button>` : ""}
-
-                        <button class="menu-item " id="saveBtn" hidden disabled style="border: none; background: var(--accent); color: var(--mark-text); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 700;">Сохранить</button>
-                        <button class="menu-item hide-action-btn" id="cancelEditBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">Отмена</button>
-                    </div>
-                </div>
-
-                <div class="ticket-notes-panel" style="background: var(--bg-secondary); border: 2px solid var(--border-color); border-radius: 12px; padding: 1.5rem; display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: visible;">
-                    <h3 style="font-size: 1.25rem; border-bottom: 2px solid var(--border-color); padding-bottom: 0.75rem; margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;">
-                        <span>📝 Комментарии к заявке</span>
-                        <span id="notesCountBadge" style="font-size: 12px; background: var(--border-color); padding: 2px 8px; border-radius: 10px; font-weight: 600;">0</span>
-                    </h3>
-                    <div id="notesContainerDOM" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 5px; margin-bottom: 8px; min-height: 0;"></div>
-
-                                       <!-- Поле ввода показываем только для открытых заявок -->
-                    ${
-                      !isClosed
-                        ? `
-                    <div id="noteComposer" style="border-top: 1px dashed var(--border-color); padding-top: 10px; flex-shrink: 0; display: flex; flex-direction: column;"></div>
-                    `
-                        : ""
-                    }
-                </div>
-            </div>
-        `;
-
+    // Инициализация вложенных компонентов
     this._renderStaffSlots();
-    this._renderNotesList(t.note || []);
-    this._renderNoteComposer();
+    renderNotesList(
+      document.getElementById("notesContainerDOM"),
+      document.getElementById("notesCountBadge"),
+      t.note || [],
+    );
+    this.notesComposer = createNotesComposer(
+      document.getElementById("noteComposer"),
+      { onSubmit: () => this._onAddNote() },
+    );
     this._bindEvents();
   }
-
-  _getStaffSlots() {
-    const t = this.ticket;
-    return [
-      {
-        slot: 1,
-        id: t.staff_id,
-        name: t.staff_name,
-        notifyStatus: t.notify_status,
-        notifyDate: t.notify_date,
-      },
-      {
-        slot: 2,
-        id: t.staff_id2,
-        name: t.staff_name2,
-        notifyStatus: t.notify_status2,
-        notifyDate: t.notify_date2,
-      },
-      {
-        slot: 3,
-        id: t.staff_id3,
-        name: t.staff_name3,
-        notifyStatus: t.notify_status3,
-        notifyDate: t.notify_date3,
-      },
-    ];
-  }
-
-  _slotLabel(slotNumber) {
-    if (slotNumber === 1) return "Ответственный 1";
-    return "Доп. ответственный " + slotNumber;
-  }
-
   _renderStaffSlots() {
     const container = document.getElementById("staffSlotsContainer");
     if (!container) return;
 
-    if (this.ticket.type === "close") {
-      const slots = this._getStaffSlots().filter((s) => s.id);
-      if (slots.length === 0) {
-        container.innerHTML =
-          '<div style="font-size: 13px; color: var(--text-secondary); font-style: italic;">Нет данных об ответственных</div>';
-        return;
-      }
-      const list = document.createElement("div");
-      list.style.cssText =
-        "font-size: 14px; line-height: 1.6; font-weight: 500; color: var(--text-primary);";
-      slots.forEach((slot) => {
-        const status = getStatusWord(slot.notifyStatus);
-        const div = document.createElement("div");
-        div.textContent = `• ${slot.name} (${status})`;
-        list.appendChild(div);
-      });
-      container.innerHTML = "";
-      container.appendChild(list);
-      return;
+    if (this.staffSlotsView && this.staffSlotsView.destroy) {
+      this.staffSlotsView.destroy();
     }
 
-    if (
-      this.currentStaffSelect &&
-      typeof this.currentStaffSelect.destroy === "function"
-    ) {
-      this.currentStaffSelect.destroy();
-      this.currentStaffSelect = null;
-    }
-
-    container.innerHTML = "";
-
-    const slots = this._getStaffSlots();
     const isOpen = this.ticket.type !== "close";
-    const isEdit = this.state.mode === "edit";
-    const isAdmin = userStore.isAdmin();
-    const canAssign = isOpen && userStore.can("assign_staff");
-    const isSessionLocked = this._staffChangedInSession;
-    const isGridLocked = !!document.querySelector(
-      ".ticket-card-layout-grid.card-locked",
-    );
 
-    const filled = slots.map((slot, idx) => {
-      const keyId = "staff_id" + (idx === 0 ? "" : idx + 1);
-      if (keyId in this.state.draft) {
-        return !!this.state.draft[keyId];
-      }
-      return !!slot.id;
-    });
+    this.staffSlotsView = renderStaffSlots(container, {
+      ticket: this.ticket,
+      draft: this.state.draft,
+      mode: this.state.mode,
+      staffList: staffStore.list,
+      permissions: {
+        isAdmin: userStore.isAdmin(),
+        canAssign: isOpen && userStore.can("assign_staff"),
+      },
+      autoOpenPending: this._autoOpenPending,
+      handlers: {
+        onAssign: (slotNumber, staffId, staffName, notifyChecked) => {
+          const suffix = slotNumber === 1 ? "" : slotNumber;
+          const keyId = "staff_id" + suffix;
+          const keyName = "staff_name" + suffix;
 
-    const visible = slots.map((_, idx) => {
-      if (filled[idx]) return true;
-      for (let i = 0; i < idx; i++) {
-        if (!filled[i]) return false;
-      }
-      return true;
-    });
+          this.state.updateDraft(keyId, staffId);
+          this.state.updateDraft(keyName, staffName);
 
-    let firstEmptyIdx = -1;
-    for (let i = 0; i < slots.length; i++) {
-      if (visible[i] && !filled[i]) {
-        firstEmptyIdx = i;
-        break;
-      }
-    }
-
-    slots.forEach((slot, idx) => {
-      if (!visible[idx]) return;
-      const slotNumber = idx + 1;
-
-      if (filled[idx]) {
-        this._renderFilledSlot(container, slot, slotNumber, {
-          isOpen,
-          isEdit,
-          isAdmin,
-          canAssign,
-          isGridLocked,
-        });
-      } else {
-        this._renderEmptySlot(container, slotNumber, idx, {
-          isEdit,
-          canAssign,
-          isSessionLocked,
-          isGridLocked,
-          firstEmptyIdx,
-        });
-      }
-    });
-
-    if (
-      this._autoOpenPending &&
-      isEdit &&
-      firstEmptyIdx === 0 &&
-      canAssign &&
-      !isGridLocked
-    ) {
-      this._autoOpenPending = false;
-      setTimeout(() => this._openAssignForm(1), 0);
-    }
-  }
-
-  _renderFilledSlot(container, slot, slotNumber, ctx) {
-    const { isOpen, isEdit, isAdmin, canAssign, isGridLocked } = ctx;
-    const suffix = slotNumber === 1 ? "" : slotNumber;
-
-    const row = document.createElement("div");
-    row.style.cssText =
-      "display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-primary);";
-
-    const head = document.createElement("div");
-    head.style.cssText =
-      "display: flex; justify-content: space-between; align-items: center; gap: 8px;";
-
-    const phoneFromTicket = this.ticket["staff_phone" + suffix];
-    const phone = phoneFromTicket || staffStore.getPhone(slot.id);
-
-    const nameEl = document.createElement("span");
-    nameEl.style.cssText = "font-weight: 600; font-size: 14px;";
-    nameEl.textContent = (slotNumber === 1 ? "★ " : "· ") + (slot.name || "—");
-    if (phone) {
-      nameEl.title = "📞 " + phone;
-      nameEl.style.cursor = "help";
-    }
-    head.appendChild(nameEl);
-
-    const labelEl = document.createElement("span");
-    labelEl.style.cssText = "font-size: 11px; color: var(--text-secondary);";
-    labelEl.textContent = this._slotLabel(slotNumber);
-    head.appendChild(labelEl);
-
-    row.appendChild(head);
-
-    const status = document.createElement("div");
-    status.style.cssText = "font-size: 12px; color: var(--text-secondary);";
-    const channel = NOTIFY_CHANNELS[slot.notifyStatus] || "— Не уведомлён —";
-
-    if (!slot.notifyStatus) {
-      status.textContent = "— Не уведомлён —";
-    } else if (slot.notifyDate) {
-      status.textContent = `${channel} · ${formatTs(slot.notifyDate)}`;
-    } else {
-      status.textContent = `${channel} · будет зафиксировано при сохранении`;
-      status.style.fontStyle = "italic";
-      status.style.color = "var(--accent)";
-    }
-    row.appendChild(status);
-
-    const keyStaffId = "staff_id" + suffix;
-    const isNewlyAssigned = keyStaffId in this.state.draft;
-
-    // ИСПРАВЛЕНО: Синтаксическая ошибка (добавлено продолжение условия)
-    // Два состояния:
-    //   1. Уже уведомлён (notify_status = 1) — индикатор «✅ Уведомлён (дата)».
-    //      Снять нельзя: факт уведомления исторический.
-    //   2. Не уведомлён — чекбокс для установки. Снять (обратно в 0)
-    //      нельзя — сервер воспринимает 1 как факт, откат некорректен.
-    // notify_status === 1 уже показан выше блоком `status`
-    // («📞 По телефону · 02.11.2026 14:30»). Дополнительный индикатор
-    // «✅ Уведомлён» был бы дублированием. Показываем чекбокс только
-    // когда ответственный ещё не уведомлён.
-    if (!slot.notifyStatus) {
-      const notifyEditable =
-        isEdit && (isAdmin || (isNewlyAssigned && canAssign));
-
-      if (notifyEditable) {
-        const notifyWrap = document.createElement("label");
-        notifyWrap.className = "editable-field editable-field--checkbox";
-        notifyWrap.style.cssText =
-          "display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; font-size: 12px; width: fit-content;";
-
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.style.cursor = "pointer";
-        cb.checked = false;
-
-        const txt = document.createElement("span");
-        txt.textContent = "Уведомлён по телефону";
-
-        cb.onchange = () => {
-          // Только установка в 1. Снятие не предусмотрено —
-          // сервер воспринимает 1 как факт, откат некорректен.
-          if (!cb.checked) return;
-          const keyNotify = "notify_status" + suffix;
-          const keyNotifyDate = "notify_date" + suffix;
-          this.state.updateDraft(keyNotify, 1);
-          this.state.updateDraft(keyNotifyDate, nowTs());
+          if (notifyChecked) {
+            this.state.updateDraft("notify_status" + suffix, 1);
+            this.state.updateDraft("notify_date" + suffix, nowTs());
+          }
+          this._staffChangedInSession = true;
+          this._autoOpenPending = false;
           this._renderStaffSlots();
           this._updateSaveButtonState();
-        };
+        },
+        onUnassign: (slotNumber) => {
+          if (slotNumber === -1) {
+            // Хак для перерисовки (Отмена в селекте)
+            this._renderStaffSlots();
+            return;
+          }
+          const suffix = slotNumber === 1 ? "" : slotNumber;
+          this.state.updateDraft("staff_id" + suffix, null);
+          this.state.updateDraft("staff_name" + suffix, null);
+          this.state.updateDraft("staff_phone" + suffix, null);
+          this.state.updateDraft("notify_status" + suffix, 0);
+          this.state.updateDraft("notify_date" + suffix, null);
+          this._staffChangedInSession = true;
 
-        notifyWrap.appendChild(cb);
-        notifyWrap.appendChild(txt);
-        row.appendChild(notifyWrap);
-      }
-    }
-    const canReplace =
-      isEdit && !isGridLocked && (isAdmin || (isNewlyAssigned && canAssign));
-    const canUnassign = isEdit && !isGridLocked && isAdmin;
-
-    if (canReplace || canUnassign) {
-      const actionsRow = document.createElement("div");
-      actionsRow.style.cssText = "display: flex; gap: 6px; margin-top: 6px;";
-
-      if (canReplace) {
-        const replaceBtn = document.createElement("button");
-        replaceBtn.textContent = "✏️ Заменить";
-        replaceBtn.style.cssText =
-          "padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font-size: 11px;";
-        replaceBtn.onclick = () => this._openReplaceForm(slotNumber);
-        actionsRow.appendChild(replaceBtn);
-      }
-
-      if (canUnassign) {
-        const unassignBtn = document.createElement("button");
-        unassignBtn.textContent = "× Снять";
-        unassignBtn.style.cssText =
-          "padding: 4px 10px; border-radius: 6px; border: 1px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer; font-size: 11px;";
-        unassignBtn.onclick = () => this._onUnassignStaff(slotNumber);
-        actionsRow.appendChild(unassignBtn);
-      }
-
-      row.appendChild(actionsRow);
-    }
-
-    container.appendChild(row);
-  }
-
-  _renderEmptySlot(container, slotNumber, idx, ctx) {
-    const { isEdit, canAssign, isSessionLocked, isGridLocked, firstEmptyIdx } =
-      ctx;
-
-    const row = document.createElement("div");
-    row.classList.add("staff-slot-empty");
-    row.style.cssText =
-      "display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-primary);";
-
-    const head = document.createElement("div");
-    head.style.cssText =
-      "display: flex; justify-content: space-between; align-items: center; gap: 8px;";
-    head.innerHTML = `
-            <span style="font-size: 13px; font-weight: 600; color: var(--text-secondary);">${this._slotLabel(slotNumber)}</span>
-            <span class="staff-slot-empty-label" style="font-size: 11px; font-style: italic;">не назначен</span>
-        `;
-    row.appendChild(head);
-
-    const canAddHere =
-      isEdit &&
-      canAssign &&
-      !isSessionLocked &&
-      !isGridLocked &&
-      idx === firstEmptyIdx;
-
-    if (canAddHere) {
-      const addBtn = document.createElement("button");
-      addBtn.textContent = "+ Добавить";
-      addBtn.style.cssText =
-        "margin-top: 4px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font-size: 12px;";
-      addBtn.onclick = () => this._openAssignForm(slotNumber);
-      row.appendChild(addBtn);
-    }
-
-    container.appendChild(row);
-  }
-
-  _onUnassignStaff(slotNumber) {
-    const suffix = slotNumber === 1 ? "" : slotNumber;
-    const keyId = "staff_id" + suffix;
-    const keyName = "staff_name" + suffix;
-    const keyPhone = "staff_phone" + suffix;
-    const keyNotify = "notify_status" + suffix;
-    const keyNotifyDate = "notify_date" + suffix;
-
-    this.state.updateDraft(keyId, null);
-    this.state.updateDraft(keyName, null);
-    this.state.updateDraft(keyPhone, null);
-    this.state.updateDraft(keyNotify, 0);
-    this.state.updateDraft(keyNotifyDate, null);
-    this._staffChangedInSession = true;
-
-    this._renderStaffSlots();
-    this._updateSaveButtonState();
-  }
-
-  _openReplaceForm(slotNumber) {
-    this._openAssignForm(slotNumber);
-  }
-
-  _openAssignForm(slotNumber) {
-    const container = document.getElementById("staffSlotsContainer");
-    // Guard: setTimeout(() => this._openAssignForm(1), 0) может
-    // сработать после unmount (контейнера нет).
-    if (!container) return;
-
-    const slots = this._getStaffSlots();
-    const busyIds = slots
-      .filter((s) => s.slot !== slotNumber && s.id)
-      .map((s) => s.id);
-
-    const rowIdx = slotNumber - 1;
-    const row = container.children[rowIdx];
-    if (!row) return;
-
-    if (
-      this.currentStaffSelect &&
-      typeof this.currentStaffSelect.destroy === "function"
-    ) {
-      this.currentStaffSelect.destroy();
-    }
-
-    row.innerHTML = "";
-
-    const notifyWrap = document.createElement("label");
-    notifyWrap.className = "editable-field editable-field--checkbox";
-    notifyWrap.style.cssText =
-      "display: none; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; font-size: 13px;";
-
-    const notifyCheck = document.createElement("input");
-    notifyCheck.type = "checkbox";
-    notifyCheck.style.cursor = "pointer";
-
-    const notifyText = document.createElement("span");
-    notifyText.textContent = "Уведомлён по телефону";
-
-    notifyWrap.appendChild(notifyCheck);
-    notifyWrap.appendChild(notifyText);
-
-    const staffSelect = createStaffSelect({
-      list: staffStore.list,
-      excludeIds: busyIds,
-      placeholder: "Начните вводить имя...",
-      onSelect: (staff) => {
-        const suffix = slotNumber === 1 ? "" : slotNumber;
-        const keyId = "staff_id" + suffix;
-        const isNewOrReassign =
-          !this.ticket[keyId] || keyId in this.state.draft;
-        if (staff && isNewOrReassign) {
-          notifyWrap.style.display = "inline-flex";
-        } else {
-          notifyWrap.style.display = "none";
-          notifyCheck.checked = false;
-        }
+          this._renderStaffSlots();
+          this._updateSaveButtonState();
+        },
+        onNotify: (slotNumber) => {
+          const suffix = slotNumber === 1 ? "" : slotNumber;
+          this.state.updateDraft("notify_status" + suffix, 1);
+          this.state.updateDraft("notify_date" + suffix, nowTs());
+          this._renderStaffSlots();
+          this._updateSaveButtonState();
+        },
+        onAutoOpenConsumed: () => {
+          this._autoOpenPending = false;
+        },
       },
     });
-    this.currentStaffSelect = staffSelect;
-
-    const confirmBtn = document.createElement("button");
-    confirmBtn.textContent = "Подтвердить";
-    confirmBtn.style.cssText =
-      "margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: pointer; font-size: 12px; font-weight: 600;";
-
-    confirmBtn.onclick = () => {
-      const selectedId = staffSelect.getValue();
-      if (!selectedId) return;
-
-      const suffix = slotNumber === 1 ? "" : slotNumber;
-      const keyId = "staff_id" + suffix;
-      const keyNotify = "notify_status" + suffix;
-      const keyNotifyDate = "notify_date" + suffix;
-      const keyName = "staff_name" + suffix;
-
-      const finalId = isNaN(selectedId) ? selectedId : Number(selectedId);
-      this.state.updateDraft(keyId, finalId);
-      this.state.updateDraft(
-        keyName,
-        staffStore.getById(selectedId)?.name || null,
-      );
-
-      if (notifyCheck.checked) {
-        this.state.updateDraft(keyNotify, 1);
-        this.state.updateDraft(keyNotifyDate, nowTs());
-      }
-      this._staffChangedInSession = true;
-      this._autoOpenPending = false;
-
-      staffSelect.destroy();
-      this.currentStaffSelect = null;
-
-      this._renderStaffSlots();
-      this._updateSaveButtonState();
-    };
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.textContent = "Отмена";
-    cancelBtn.style.cssText =
-      "margin-top: 6px; margin-left: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font-size: 12px;";
-    cancelBtn.onclick = () => {
-      staffSelect.destroy();
-      this.currentStaffSelect = null;
-      this._renderStaffSlots();
-    };
-
-    row.appendChild(staffSelect.element);
-    row.appendChild(notifyWrap);
-    row.appendChild(confirmBtn);
-    row.appendChild(cancelBtn);
-
-    setTimeout(() => {
-      // Guard: после unmount this.currentStaffSelect уже не наш.
-      if (staffSelect && this.currentStaffSelect === staffSelect) {
-        staffSelect.focus();
-      }
-    }, 30);
   }
 
   _bindEvents() {
@@ -992,160 +416,55 @@ export class DetailsController {
 
     $("cancelEditBtn").onclick = () => this._exitEditMode();
 
-    const addDetailsBtn = $("addDetailsBtn");
-    if (addDetailsBtn) addDetailsBtn.onclick = () => this._onAddDescription();
-
-    const newDetailsInput = $("newDetailsInput");
-    if (newDetailsInput) {
-      newDetailsInput.oninput = () =>
-        this._checkCaps(newDetailsInput.value, $("capsWarnDetails"));
-    }
-
-    const solutionInput = $("solutionInput");
-    if (solutionInput) {
-      solutionInput.oninput = () => {
-        this._checkCaps(solutionInput.value, $("capsWarnSolution"));
-        this._updateSaveButtonState();
-      };
-    }
-
     $("saveBtn").onclick = () => this._onSave();
   }
-
   _enterEditMode() {
     this.state.setMode("edit");
-    this.state.clearDraft(); // Начинаем с чистого листа
+    this.state.clearDraft();
 
     this._staffChangedInSession = false;
     this._autoOpenPending = this.ticket.staff_id == null;
 
-    document.getElementById("detailsAddBlock").style.display = "block";
-    const editBtnRef = document.getElementById("editBtn");
-    if (editBtnRef) editBtnRef.style.display = "none";
-    const newDetailsInput = document.getElementById("newDetailsInput");
-    if (newDetailsInput) initVoiceTextarea(newDetailsInput);
+    const editBtn = document.getElementById("editBtn");
+    if (editBtn) editBtn.style.display = "none";
     const closeBtn = document.getElementById("closeBtn");
     if (closeBtn) closeBtn.style.display = "none";
     document.getElementById("saveBtn").hidden = false;
     document.getElementById("cancelEditBtn").style.display = "block";
+
     this._renderStaffSlots();
 
-    const dictRules = [
-      {
-        key: "department",
-        action: "change_department",
-        idField: "department_id",
-        ref: "deptSelect",
-        blockId: "deptEditBlock",
-        currentValue: this.ticket.department_id,
-      },
-      {
-        key: "request",
-        action: "change_request",
-        idField: "request_id",
-        ref: "reqSelect",
-        blockId: "reqEditBlock",
-        currentValue: this.ticket.request_id,
-      },
-      {
-        key: "group",
-        action: "change_group",
-        idField: "group_id",
-        ref: "groupSelect",
-        blockId: "groupEditBlock",
-        currentValue: this.ticket.group_id,
-      },
-    ];
-
-    if (!navigator.onLine) {
-      ["deptDisplay", "reqDisplay", "groupDisplay"].forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) el.title = "🔒 Редактирование доступно только онлайн";
-      });
-    } else {
-      dictRules.forEach((rule) => {
-        if (!userStore.can(rule.action, { currentValue: rule.currentValue }))
-          return;
-
-        const block = document.getElementById(rule.blockId);
-        if (!block) return;
-        block.style.display = "block";
-
-        if (!this[rule.ref]) {
-          const comp = createDictSelect({
-            key: rule.key,
-            initialValue: rule.currentValue || null,
-            placeholder: "— выберите —",
-            required: true,
-            onChange: (value) => {
-              if (value) {
-                this.state.updateDraft(rule.idField, String(value));
-              } else {
-                this.state.deleteDraft(rule.idField);
-              }
-              this._updateSaveButtonState();
-            },
-          });
-          block.innerHTML = "";
-          block.appendChild(comp.element);
-          this[rule.ref] = comp;
-        }
-      });
-    }
-
     const isAssigned = userStore.isAssignedTo(this.ticket, userStore.userId);
-    if (userStore.can("set_repair_time", { isAssigned })) {
-      const block = document.getElementById("repairTimeEditBlock");
-      if (block) {
-        block.style.display = "block";
-        if (!this.repairPicker) {
-          this.repairPicker = createRepairTimePicker({
-            initialValue: this.ticket.repair_time,
-            onChange: (value) => {
-              this.state.updateDraft("repair_time", value);
-              this._updateSaveButtonState();
-            },
-          });
-          block.innerHTML = "";
-          block.appendChild(this.repairPicker.element);
-        }
-      }
-    }
+
+    this.editForm = createEditForm({
+      ticket: this.ticket,
+      draft: this.state.draft,
+      permissions: {
+        canChangeDept: userStore.can("change_department", {
+          currentValue: this.ticket.department_id,
+        }),
+        canChangeReq: userStore.can("change_request", {
+          currentValue: this.ticket.request_id,
+        }),
+        canChangeGroup: userStore.can("change_group", {
+          currentValue: this.ticket.group_id,
+        }),
+        canSetRepair: userStore.can("set_repair_time", { isAssigned }),
+      },
+      onChange: () => this._updateSaveButtonState(),
+    });
 
     this._updateSaveButtonState();
   }
-
-  _enterCloseMode() {
-    this.state.setMode("close");
-
-    const bodyBlock = document.getElementById("ticketBodyBlock");
-    if (bodyBlock) bodyBlock.style.display = "none";
-
-    document.getElementById("closeBlock").style.display = "block";
-    const closeAndCreateCheck = document.getElementById("closeAndCreateCheck");
-    if (closeAndCreateCheck) closeAndCreateCheck.checked = false;
-
-    const solutionInput = document.getElementById("solutionInput");
-    if (solutionInput) initVoiceTextarea(solutionInput);
-
-    const editBtnRef = document.getElementById("editBtn");
-    if (editBtnRef) editBtnRef.style.display = "none";
-    const closeBtn = document.getElementById("closeBtn");
-    if (closeBtn) closeBtn.style.display = "none";
-    document.getElementById("saveBtn").hidden = false;
-    document.getElementById("cancelEditBtn").style.display = "block";
-
-    setTimeout(() => {
-      const ta = document.getElementById("solutionInput");
-      if (ta) ta.focus();
-    }, 50);
-
-    this._updateSaveButtonState();
-  }
-
   _exitEditMode() {
-    destroyVoiceInput();
-
+    if (this.editForm) {
+      this.editForm.destroy();
+      this.editForm = null;
+    }
+    if (this.closeForm) {
+      this.closeForm.destroy();
+      this.closeForm = null;
+    }
     this.state.clearDraft();
     this.state.setMode("view");
     this._staffChangedInSession = false;
@@ -1162,104 +481,33 @@ export class DetailsController {
     const closeBtn = document.getElementById("closeBtn");
     if (closeBtn) closeBtn.style.display = "block";
 
-    const newDetailsInput = document.getElementById("newDetailsInput");
-    if (newDetailsInput) newDetailsInput.value = "";
-    const solutionInput = document.getElementById("solutionInput");
-    if (solutionInput) solutionInput.value = "";
-    const capsWarnDetails = document.getElementById("capsWarnDetails");
-    if (capsWarnDetails) capsWarnDetails.style.display = "none";
-    const capsWarnSolution = document.getElementById("capsWarnSolution");
-    if (capsWarnSolution) capsWarnSolution.style.display = "none";
-
     const display = document.getElementById("detailsDisplay");
     if (display)
       display.textContent = this.ticket.details || "Описание отсутствует.";
 
-    const repairBlock = document.getElementById("repairTimeEditBlock");
-    if (repairBlock) {
-      repairBlock.style.display = "none";
-      repairBlock.innerHTML = "";
-    }
-    if (this.repairPicker) {
-      if (typeof this.repairPicker.destroy === "function")
-        this.repairPicker.destroy();
-      this.repairPicker = null;
-    }
-
-    [
-      {
-        blockId: "deptEditBlock",
-        ref: "deptSelect",
-        displayId: "deptDisplay",
-        field: "department",
-      },
-      {
-        blockId: "reqEditBlock",
-        ref: "reqSelect",
-        displayId: "reqDisplay",
-        field: "request",
-      },
-      {
-        blockId: "groupEditBlock",
-        ref: "groupSelect",
-        displayId: "groupDisplay",
-        field: "group",
-      },
-    ].forEach((item) => {
-      const block = document.getElementById(item.blockId);
-      if (block) {
-        block.style.display = "none";
-        block.innerHTML = "";
-      }
-      if (this[item.ref]) {
-        if (typeof this[item.ref].destroy === "function")
-          this[item.ref].destroy();
-        this[item.ref] = null;
-      }
-      const display = document.getElementById(item.displayId);
-      if (display) display.textContent = this.ticket[item.field] || "—";
+    ["deptDisplay", "reqDisplay", "groupDisplay"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.title = "";
     });
-
-    if (
-      this.currentStaffSelect &&
-      typeof this.currentStaffSelect.destroy === "function"
-    ) {
-      this.currentStaffSelect.destroy();
-      this.currentStaffSelect = null;
-    }
-
-    const repairDisplay = document.getElementById("repairTimeDisplay");
-    if (repairDisplay)
-      repairDisplay.textContent = formatTs(this.ticket.repair_time);
 
     this._renderStaffSlots();
   }
 
-  _onAddDescription() {
-    const input = document.getElementById("newDetailsInput");
-    const text = input.value.trim();
-    if (!text || CAPS_REGEX.test(text)) return;
+  _enterCloseMode() {
+    this.state.setMode("close");
 
-    // Сервер append-only: отправляем ТОЛЬКО новый текст, склеит сам
-    const existing = this.state.draft.details || "";
-    const separator = existing ? "\n\n" : "";
-    const newDraftDetails = existing + separator + "📝 Дополнение: " + text;
-    this.state.updateDraft("details", newDraftDetails);
+    const bodyBlock = document.getElementById("ticketBodyBlock");
+    if (bodyBlock) bodyBlock.style.display = "none";
 
-    const display = document.getElementById("detailsDisplay");
-    if (display) {
-      const base = this.ticket.details || "";
-      const sep = base ? "\n\n" : "";
-      display.textContent = base + sep + newDraftDetails;
-    }
+    document.getElementById("closeBlock").style.display = "block";
 
-    input.value = "";
-    this._updateSaveButtonState();
-  }
+    this.closeForm = createCloseForm({
+      onChange: () => this._updateSaveButtonState(),
+    });
 
-  _checkCaps(text, warnEl) {
-    const hasCaps = CAPS_REGEX.test(text);
-    if (warnEl) warnEl.style.display = hasCaps ? "block" : "none";
+    setTimeout(() => {
+      if (this.closeForm) this.closeForm.focus();
+    }, 50);
     this._updateSaveButtonState();
   }
 
@@ -1273,35 +521,24 @@ export class DetailsController {
     )
       return;
 
-    const $ = (id) => document.getElementById(id);
     let enabled = false;
 
     if (this.state.mode === "edit") {
-      const newDetails = $("newDetailsInput");
-      const typed = newDetails ? newDetails.value.trim() : "";
-      const hasUncommittedDetails = typed.length > 0 && !CAPS_REGEX.test(typed);
-
-      // Кнопка «Сохранить» разблокирована, если в pendingChanges есть
-      // изменения ИЛИ в newDetailsInput набран валидный текст без
-      // нажатия «+ Добавить описание». _onSave подхватит его сам.
+      const hasDraft = Object.keys(this.state.draft).length > 0;
+      const hasUncommitted = this.editForm
+        ? this.editForm.hasUncommittedDetails()
+        : false;
       enabled =
-        Object.keys(this.state.draft).length > 0 || hasUncommittedDetails;
-      if (newDetails && CAPS_REGEX.test(newDetails.value)) enabled = false;
-      if (this.repairPicker && !this.repairPicker.isValid()) enabled = false;
-      if (this.deptSelect && !this.deptSelect.isValid()) enabled = false;
-      if (this.reqSelect && !this.reqSelect.isValid()) enabled = false;
-      if (this.groupSelect && !this.groupSelect.isValid()) enabled = false;
+        (hasDraft || hasUncommitted) &&
+        (this.editForm ? this.editForm.isValid() : false);
     } else if (this.state.mode === "close") {
-      const sol = $("solutionInput");
-      const len = sol ? sol.value.trim().length : 0;
-      enabled = len >= MIN_SOLUTION_LEN && !CAPS_REGEX.test(sol.value);
+      enabled = this.closeForm ? this.closeForm.isValid() : false;
     }
 
     saveBtn.disabled = !enabled;
     saveBtn.style.opacity = enabled ? "1" : "0.5";
     saveBtn.style.cursor = enabled ? "pointer" : "not-allowed";
   }
-
   _setSaveBtnState(state) {
     const btn = document.getElementById("saveBtn");
     if (!btn) return;
@@ -1329,53 +566,23 @@ export class DetailsController {
   _lockCard() {
     const grid = document.querySelector(".ticket-card-layout-grid");
     if (grid) grid.classList.add("card-locked");
-
-    if (this.noteSubmitBtn) this.noteSubmitBtn.disabled = true;
-
-    if (this.noteField && this.noteField.element) {
-      const ta = this.noteField.element.querySelector("textarea");
-      if (ta) ta.disabled = true;
-    }
+    if (this.notesComposer) this.notesComposer.lock();
   }
 
   _unlockCard() {
     const grid = document.querySelector(".ticket-card-layout-grid");
     if (grid) grid.classList.remove("card-locked");
-
-    if (this.noteField && this.noteField.element) {
-      const ta = this.noteField.element.querySelector("textarea");
-      if (ta) ta.disabled = false;
-    }
-
-    if (this.noteField && this.noteSubmitBtn) {
-      const val = this.noteField.getValue();
-      const valid = this.noteField.isValid();
-      this.noteSubmitBtn.disabled = !valid || !val;
-    }
+    if (this.notesComposer) this.notesComposer.unlock();
   }
 
   async _onSave() {
     if (this.state.mode === "edit" && !this.state.hasDraftChanges()) {
-      // Не сохраняем пустые изменения, но проверяем несохранённый
-      // текст в newDetailsInput — если он валиден, добавим в pending
-      // и продолжим (иначе пользователь молча теряет ввод).
-      const newDetailsEl = document.getElementById("newDetailsInput");
-      const typed = newDetailsEl ? newDetailsEl.value.trim() : "";
-      if (typed && !CAPS_REGEX.test(typed)) {
-        this._onAddDescription();
+      if (this.editForm && this.editForm.hasUncommittedDetails()) {
+        // Нажимаем на кнопку "Добавить" программно
+        const addBtn = document.getElementById("addDetailsBtn");
+        if (addBtn) addBtn.click();
       }
       if (!this.state.hasDraftChanges()) return;
-    }
-
-    // Перед сохранением забираем необработанный текст из newDetailsInput.
-    // Раньше пользователь, набравший описание и не нажавший
-    // «+ Добавить описание», терял его при «Сохранить».
-    if (this.state.mode === "edit") {
-      const newDetailsEl = document.getElementById("newDetailsInput");
-      const typed = newDetailsEl ? newDetailsEl.value.trim() : "";
-      if (typed && !CAPS_REGEX.test(typed)) {
-        this._onAddDescription();
-      }
     }
 
     if (!navigator.onLine) {
@@ -1392,21 +599,18 @@ export class DetailsController {
     // Захватываем ticketId до await — unmount обнулит this.ticket.
     const ticketId = this.ticket ? this.ticket.id : null;
     if (ticketId == null) return;
-
-    let payload;
     let response;
     this._lockCard();
     this._setSaveBtnState("loading");
 
     try {
       if (this.state.mode === "close") {
-        const solutionText =
-          document.getElementById("solutionInput")?.value.trim() || "";
+        const { solution } = this.closeForm.getValue();
         const user = userStore.userId || authStore.getUser()?.id || 0;
         response = await ticketRepository.saveClose(
           this.api,
           ticketId,
-          solutionText,
+          solution,
           user,
         );
       } else {
@@ -1445,12 +649,7 @@ export class DetailsController {
         this._autoOpenPending = false;
 
         if (this.state.mode === "close") {
-          const closeAndCreateCheck = document.getElementById(
-            "closeAndCreateCheck",
-          );
-          const shouldCreateNew =
-            closeAndCreateCheck && closeAndCreateCheck.checked;
-
+          const { shouldCreateNew } = this.closeForm.getValue();
           this._syncSourceArray();
           if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
 
@@ -1528,212 +727,13 @@ export class DetailsController {
     }
   }
 
-  _renderNotesList(notesData) {
-    const containerDOM = document.getElementById("notesContainerDOM");
-    const countBadge = document.getElementById("notesCountBadge");
-    if (!containerDOM) return;
-
-    const notesList = Array.isArray(notesData)
-      ? notesData
-      : notesData && typeof notesData === "object"
-        ? Object.values(notesData)
-        : [];
-
-    if (countBadge) countBadge.textContent = notesList.length;
-
-    if (notesList.length === 0) {
-      containerDOM.innerHTML = `
-                <div style="text-align: center; color: var(--text-secondary); margin: auto 0; padding: 2rem;">
-                    <div style="font-size: 13px; font-weight: 500;">Комментарии к заявке отсутствуют</div>
-                </div>`;
-      return;
-    }
-
-    containerDOM.innerHTML = "";
-    notesList.forEach((note) => {
-      const noteItem = document.createElement("div");
-      const isAccent = String(note.type) === "1";
-      noteItem.style.cssText = `
-                background: ${isAccent ? "rgba(138, 43, 226, 0.05)" : "var(--bg-primary)"};
-                border: 1px solid ${isAccent ? "var(--accent)" : "var(--border-color)"};
-                border-radius: 8px;
-                padding: 10px 12px;
-                display: flex;
-                flex-direction: column;
-                gap: 4px;
-            `;
-
-      const header = document.createElement("div");
-      header.style.cssText =
-        "display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed var(--border-color); padding-bottom: 3px; margin-bottom: 2px;";
-
-      const userSpan = document.createElement("span");
-      userSpan.style.cssText = "font-size: 12px; font-weight: 700;";
-      userSpan.textContent = "👤 " + (note.user || "Сотрудник не указан");
-
-      const dateSpan = document.createElement("span");
-      dateSpan.style.cssText =
-        "font-size: 11px; color: var(--text-secondary); font-weight: 500;";
-      dateSpan.textContent = "🕒 " + formatTs(note.date);
-
-      header.appendChild(userSpan);
-      header.appendChild(dateSpan);
-
-      const body = document.createElement("div");
-      body.style.cssText =
-        "font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;";
-      body.textContent = note.body || "Пустая заметка.";
-
-      noteItem.appendChild(header);
-      noteItem.appendChild(body);
-      containerDOM.appendChild(noteItem);
-    });
-  }
-
-  _renderNoteComposer() {
-    const container = document.getElementById("noteComposer");
-    if (!container) return;
-
-    container.innerHTML = "";
-
-    // Сброс предыдущего blob URL при перерисовке композера
-    this._revokePreviewBlob();
-
-    this.noteField = createValidatedTextarea({
-      placeholder: "Введите комментарий к заявке...",
-      rows: 3,
-      minLength: 1,
-      voice: true,
-      onChange: (value, isValid) => {
-        if (this.noteSubmitBtn) {
-          const enabled = isValid && !!value;
-          this.noteSubmitBtn.disabled = !enabled;
-          this.noteSubmitBtn.style.opacity = enabled ? "1" : "0.5";
-          this.noteSubmitBtn.style.cursor = enabled ? "pointer" : "not-allowed";
-        }
-      },
-    });
-
-    const isOnline = navigator.onLine;
-
-    const photoInput = document.createElement("input");
-    photoInput.type = "file";
-    photoInput.accept = "image/jpeg,image/png";
-    photoInput.id = "notePhotoInput";
-    photoInput.style.display = "none";
-    if (!isOnline) photoInput.disabled = true;
-
-    const photoPreview = document.createElement("div");
-    photoPreview.id = "notePhotoPreview";
-    photoPreview.style.cssText =
-      "display: none; align-items: center; gap: 8px; margin-top: 8px; padding: 6px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px;";
-
-    const photoPreviewImg = document.createElement("img");
-    photoPreviewImg.alt = "Превью";
-    photoPreviewImg.style.cssText =
-      "max-height: 60px; max-width: 60px; object-fit: cover; border-radius: 4px;";
-
-    const photoPreviewName = document.createElement("span");
-    photoPreviewName.style.cssText =
-      "font-size: 12px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
-
-    const photoClearBtn = document.createElement("button");
-    photoClearBtn.type = "button";
-    photoClearBtn.textContent = "×";
-    photoClearBtn.title = "Убрать фото";
-    photoClearBtn.style.cssText =
-      "padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary); cursor: pointer; font-size: 16px; line-height: 1;";
-    photoClearBtn.onclick = () => {
-      this._revokePreviewBlob();
-      photoInput.value = "";
-      photoPreview.style.display = "none";
-    };
-
-    photoPreview.appendChild(photoPreviewImg);
-    photoPreview.appendChild(photoPreviewName);
-    photoPreview.appendChild(photoClearBtn);
-
-    photoInput.onchange = () => {
-      // Освобождаем предыдущий URL ДО создания нового
-      this._revokePreviewBlob();
-
-      const file = photoInput.files && photoInput.files[0];
-      if (!file) {
-        photoPreview.style.display = "none";
-        return;
-      }
-
-      photoPreviewName.textContent =
-        file.name + " (" + Math.round(file.size / 1024) + " КБ)";
-
-      const url = URL.createObjectURL(file);
-      this._previewBlobUrl = url;
-
-      photoPreviewImg.onload = () => {
-        // Превью загружено — URL больше не нужен для декодирования,
-        // но оставляем живым пока превью отображается.
-        // Очистка произойдёт при замене/unmount/ошибке.
-      };
-
-      photoPreviewImg.onerror = () => {
-        // Ошибка загрузки — освобождаем немедленно
-        this._revokePreviewBlob();
-        photoPreview.style.display = "none";
-      };
-
-      photoPreviewImg.src = url;
-      photoPreview.style.display = "flex";
-    };
-
-    const attachBtn = document.createElement("button");
-    attachBtn.type = "button";
-    attachBtn.textContent = "📎 Прикрепить фото";
-    attachBtn.style.cssText =
-      "margin-top: 8px; align-self: flex-start; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font-size: 12px;";
-    if (!isOnline) {
-      attachBtn.disabled = true;
-      attachBtn.style.opacity = "0.5";
-      attachBtn.style.cursor = "not-allowed";
-      attachBtn.title = "Фото доступно только онлайн";
-    } else {
-      attachBtn.onclick = () => photoInput.click();
-    }
-
-    const submitBtn = document.createElement("button");
-    submitBtn.textContent = "Добавить комментарий";
-    submitBtn.disabled = true;
-    submitBtn.style.cssText =
-      "align-self: flex-end; margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: not-allowed; font-size: 13px; font-weight: 600; opacity: 0.5; transition: all 0.2s ease;";
-    submitBtn.onclick = () => this._onAddNote();
-
-    this.noteSubmitBtn = submitBtn;
-
-    container.appendChild(this.noteField.element);
-    container.appendChild(photoInput);
-    container.appendChild(attachBtn);
-    container.appendChild(photoPreview);
-    container.appendChild(submitBtn);
-  }
-
-  /**
-   * Безопасное освобождение blob URL превью фото.
-   * Вызывается при: замене файла, ошибке загрузки, очистке, unmount.
-   */
-  _revokePreviewBlob() {
-    if (this._previewBlobUrl) {
-      URL.revokeObjectURL(this._previewBlobUrl);
-      this._previewBlobUrl = null;
-    }
-  }
   async _onAddNote() {
-    const text = this.noteField ? this.noteField.getValue() : "";
+    if (!this.notesComposer) return;
+    const { text, file } = this.notesComposer.getValue();
     if (!text) return;
-    if (this.noteField && !this.noteField.isValid()) return;
 
-    // Офлайн — сразу в outbox (как было).
+    // Офлайн — сразу в outbox
     if (!navigator.onLine) {
-      const fileInput = document.getElementById("notePhotoInput");
-      const file = fileInput && fileInput.files && fileInput.files[0];
       if (file) {
         notify.warning(
           "Фото не будет прикреплено: синхронизация фото доступна только онлайн.",
@@ -1746,34 +746,22 @@ export class DetailsController {
     const ticketId = this.ticket ? this.ticket.id : null;
     if (ticketId == null) return;
 
-    const btn = this.noteSubmitBtn;
-    const fileInput = document.getElementById("notePhotoInput");
-    const file = fileInput && fileInput.files && fileInput.files[0];
-
     let photoBase64 = null;
     if (file) {
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "Сжатие фото...";
-        btn.style.opacity = "0.7";
-      }
+      this.notesComposer.setLoadingText("Сжатие фото...");
       try {
         const compressed = await compressPhoto(file);
         photoBase64 = compressed.base64;
       } catch (err) {
         console.error("[DetailsController] Photo compress error:", err);
-        if (!this.ticket) return;
+        this.notesComposer.resetButton();
         notify.error("Фото не прикреплено: " + err.message);
-        if (btn) {
-          btn.disabled = false;
-          btn.textContent = "Добавить комментарий";
-          btn.style.opacity = "1";
-        }
         return;
       }
     }
 
-    // ...
+    this.notesComposer.setLoadingText("Отправка...");
+
     try {
       const response = await ticketRepository.addNote(
         this.api,
@@ -1781,27 +769,19 @@ export class DetailsController {
         text,
         photoBase64,
       );
-
       if (!this.ticket || this.ticket.id !== ticketId) return;
 
       if (
         response &&
         (response.code === "network_error" || response.offline === true)
       ) {
-        // Fallback в outbox мог бы продублировать комментарий, если
-        // онлайн-запрос уже прошёл, а ответ потерялся. Показываем
-        // ошибку — текст остаётся в композере (this.noteField не сброшен),
-        // пользователь может повторить вручную. См. TD-SYNC-01.
         notify.error(
           "Не удалось отправить: нет связи с сервером. Проверьте соединение и повторите.",
         );
-        if (btn) {
-          btn.textContent = "Добавить комментарий";
-          btn.disabled = false;
-          btn.style.opacity = "1";
-        }
+        this.notesComposer.resetButton();
         return;
       }
+
       if (response && response.status === "ok") {
         const msg = response.message || "Комментарий добавлен.";
         logHistoryAction(msg);
@@ -1815,45 +795,40 @@ export class DetailsController {
           type: 0,
         };
 
-        if (Array.isArray(this.ticket.note)) {
-          this.ticket.note.push(note);
-        } else if (this.ticket.note && typeof this.ticket.note === "object") {
-          this.ticket.note[Object.keys(this.ticket.note).length + 1] = note;
-        } else {
-          this.ticket.note = [note];
+        // Обновляем оригинальный тикет в стейте, а не временный геттер
+        const serverTicket = this.state.serverTicket;
+        if (serverTicket) {
+          if (Array.isArray(serverTicket.note)) {
+            serverTicket.note.push(note);
+          } else if (
+            serverTicket.note &&
+            typeof serverTicket.note === "object"
+          ) {
+            serverTicket.note[Object.keys(serverTicket.note).length + 1] = note;
+          } else {
+            serverTicket.note = [note];
+          }
         }
 
-        this._renderNotesList(this.ticket.note);
-        this.noteField.reset();
-        if (fileInput) fileInput.value = "";
-        const preview = document.getElementById("notePhotoPreview");
-        if (preview) preview.style.display = "none";
-        if (btn) {
-          btn.textContent = "Добавить комментарий";
-          btn.disabled = true;
-          btn.style.opacity = "0.5";
-        }
+        this.notesComposer.reset();
+        renderNotesList(
+          document.getElementById("notesContainerDOM"),
+          document.getElementById("notesCountBadge"),
+          this.ticket.note,
+        );
       } else {
         const msg =
           (response && response.message) || "Не удалось добавить комментарий.";
         logHistoryAction(msg);
         notify.error(msg);
-        if (btn) {
-          btn.textContent = "Добавить комментарий";
-          btn.disabled = false;
-          btn.style.opacity = "1";
-        }
+        this.notesComposer.resetButton();
       }
     } catch (err) {
       console.error("[DetailsController] AddNote error:", err);
       if (!this.ticket || this.ticket.id !== ticketId) return;
       logHistoryAction("Сбой сети при добавлении комментария.");
       notify.error("Не удалось добавить комментарий. Проверьте соединение.");
-      if (btn) {
-        btn.textContent = "Добавить комментарий";
-        btn.disabled = false;
-        btn.style.opacity = "1";
-      }
+      this.notesComposer.resetButton();
     }
   }
   async _saveNoteOffline(text) {
@@ -1875,12 +850,12 @@ export class DetailsController {
       // Не _renderCard: при mode='edit'/'close' полная перерисовка
       // сбросит открытую форму, оставив mode/pendingChanges.
       // Достаточно обновить список заметок.
-      this._renderNotesList(this.ticket.note || []);
-      if (this.noteSubmitBtn) {
-        this.noteSubmitBtn.textContent = "Добавить комментарий";
-        this.noteSubmitBtn.disabled = true;
-        this.noteSubmitBtn.style.opacity = "0.5";
-      }
+      this.notesComposer.reset();
+      renderNotesList(
+        document.getElementById("notesContainerDOM"),
+        document.getElementById("notesCountBadge"),
+        this.ticket.note || [],
+      );
     } catch (err) {
       console.error("[DetailsController] Offline note save error:", err);
       notify.error("Не удалось сохранить комментарий локально.");
@@ -1964,15 +939,10 @@ export class DetailsController {
     const ticketId = this.ticket ? this.ticket.id : null;
     if (ticketId == null) return false;
 
-    const sol = document.getElementById("solutionInput");
-    const solutionText = sol ? sol.value.trim() : "";
-
-    // Читаем галочку ДО мутации состояния
-    const closeAndCreateCheck = document.getElementById("closeAndCreateCheck");
-    const shouldCreateNew = closeAndCreateCheck && closeAndCreateCheck.checked;
+    const { solution, shouldCreateNew } = this.closeForm.getValue();
 
     try {
-      await outboxQueue.enqueueClose(ticketId, solutionText);
+      await outboxQueue.enqueueClose(ticketId, solution);
       logHistoryAction("Заявка закрыта локально.");
       notify.offline(
         "Заявка закрыта. Будет синхронизирована при восстановлении сети.",
@@ -2034,28 +1004,28 @@ export class DetailsController {
     // Отменяем только чтение. Записи (callClose/calledit/callnote)
     // не должны отменяться — сервер мог уже применить операцию.
     this.api.abortTag("details-read");
+    if (this.editForm) {
+      this.editForm.destroy();
+      this.editForm = null;
+    }
+    if (this.closeForm) {
+      this.closeForm.destroy();
+      this.closeForm = null;
+    }
 
-    [
-      "currentStaffSelect",
-      "repairPicker",
-      "deptSelect",
-      "reqSelect",
-      "groupSelect",
-    ].forEach((name) => {
-      const comp = this[name];
-      if (comp && typeof comp.destroy === "function") comp.destroy();
-      this[name] = null;
-    });
+    if (this.staffSlotsView && this.staffSlotsView.destroy) {
+      this.staffSlotsView.destroy();
+      this.staffSlotsView = null;
+    }
     if (this.autoReturnTimer) {
       clearTimeout(this.autoReturnTimer);
       this.autoReturnTimer = null;
     }
-    if (this.noteField && typeof this.noteField.destroy === "function") {
-      this.noteField.destroy();
+
+    if (this.notesComposer) {
+      this.notesComposer.destroy();
+      this.notesComposer = null;
     }
-    this._revokePreviewBlob();
-    this.noteField = null;
-    this.noteSubmitBtn = null;
 
     this.currentTicketId = null;
     this._sourceArray = null;
