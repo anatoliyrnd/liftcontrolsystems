@@ -441,7 +441,10 @@ export class CreateController {
 
   async _saveOffline(ticketPayload, globalTicketsArrayRef) {
     try {
-      const count = await offlineDB.getOutboxCount();
+      // Считаем ТОЛЬКО CreateTicket. Раньше getOutboxCount() считал
+      // все pending (включая Edit/Comment/Close) — 30 комментариев
+      // + 40 созданий давали 70 ≥ 50, хотя офлайн-заявок всего 40.
+      const count = await offlineDB.countByType("CreateTicket");
       if (count >= OFFLINE.MAX_OFFLINE_TICKETS) {
         this._setSaveBtnState("error");
         const msg = `Достигнут лимит офлайн-заявок (${OFFLINE.MAX_OFFLINE_TICKETS}). Дождитесь синхронизации.`;

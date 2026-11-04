@@ -97,21 +97,24 @@ export class TicketsController {
       let offlineTickets = [];
 
       if (this.dataType === "open") {
-        const outbox = await offlineDB.getAllFromOutbox();
-        if (isStale()) return;
-        offlineTickets = outbox.map((o) => {
-          const createdAt = Number(o.created_at);
-          const dateInSeconds =
-            createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
-          return {
-            ...o.payload,
-            id: o.offline_uuid || o.uuid,
-            type: "open",
-            isOffline: true,
-            address: o.payload.fullAddress || o.payload.address,
-            date: dateInSeconds,
-          };
-        });
+        const outbox = await offlineDB.getAllPending();
+        offlineTickets = outbox
+          .filter(
+            (o) => o.command_type === "CreateTicket" && o.status === "pending",
+          )
+          .map((o) => {
+            const createdAt = Number(o.created_at);
+            const dateInSeconds =
+              createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
+            return {
+              ...o.payload,
+              id: o.offline_uuid || o.command_uuid, // ← command_uuid вместо uuid
+              type: "open",
+              isOffline: true,
+              address: o.payload.fullAddress || o.payload.address,
+              date: dateInSeconds,
+            };
+          });
       }
 
       if (fresh) {

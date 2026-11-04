@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "vite build"
   },
+  "dependencies": {
+    "pica": "^9.0.1"
+  },
   "devDependencies": {
     "vite": "^5.2.0",
     "vite-plugin-pwa": "^2.0.0"

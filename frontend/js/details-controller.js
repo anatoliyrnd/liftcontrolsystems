@@ -17,7 +17,7 @@ import { offlineDB } from "./offline-db.js";
 import { nowTs, formatTs } from "./utils/date-utils.js";
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
-
+import { compressPhoto } from "./utils/photo-compressor.js";
 const CAPS_REGEX = VALIDATION.CAPS_REGEX;
 const MIN_SOLUTION_LEN = VALIDATION.MIN_SOLUTION_LEN;
 const AUTO_RETURN_MS = UI.AUTO_RETURN_MS;
@@ -35,26 +35,66 @@ function getStatusWord(status) {
     .trim()
     .toLowerCase();
 }
-
-// Безопасный рендер HTML для full_history (форматирует timestamp и чистит XSS)
+/**
+ * Рендер full_history как plain text (вариант C из Q13).
+ *
+ * Блочные теги → \n ДО парсинга, потом textContent → escapeHtml.
+ * DOMParser в detached document безопасен: скрипты не выполняются,
+ * onerror не срабатывает. escapeHtml обязателен, потому что
+ * textContent вернёт `&lt;script&gt;` как `<script>` — без escape
+ * это снова стало бы тегом при вставке через innerHTML.
+ */
 function formatFullHistory(rawHtml) {
   if (!rawHtml) return "";
-  let formatted = rawHtml.replace(/\b(\d{10})\b/g, (match) => formatTs(match));
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(formatted, "text/html");
-  doc
-    .querySelectorAll("script, iframe, object, embed")
-    .forEach((el) => el.remove());
-  doc.querySelectorAll("*").forEach((el) => {
-    Array.from(el.attributes).forEach((attr) => {
-      if (attr.name.startsWith("on") || attr.value.includes("javascript:")) {
-        el.removeAttribute(attr.name);
-      }
-    });
-  });
-  return doc.body.innerHTML;
-}
 
+  const withBreaks = String(rawHtml)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6]|blockquote|td|th)>/gi, "\n");
+
+  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
+  let text = doc.body.textContent || "";
+
+  // Заменяем только 10-значные числа в диапазоне реальных дат
+  // (2001-09-09 … 2033-05-18). Иначе телефоны/артикулы 10 цифр
+  // превращаются в «даты».
+  text = text.replace(/\b(\d{10})\b/g, (match) => {
+    const ts = Number(match);
+    if (ts < 1_000_000_000 || ts >= 2_000_000_000) return match;
+    return formatTs(match);
+  });
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+
+  return escapeHtml(text);
+}
+/**
+ * Нормализация числовых полей тикета. Вызывается в mount и в
+ * _refreshTicketAfterSave (без неё сервер возвращает "0" строками,
+ * и проверки !staff_id / !notify_status дают ложные результаты).
+ */
+function normalizeTicketFields(ticket) {
+  if (!ticket) return ticket;
+
+  if (ticket.staff_id != null && ticket.staff_id !== "")
+    ticket.staff_id = Number(ticket.staff_id) || null;
+  else ticket.staff_id = null;
+  if (ticket.staff_id2 != null && ticket.staff_id2 !== "")
+    ticket.staff_id2 = Number(ticket.staff_id2) || null;
+  else ticket.staff_id2 = null;
+  if (ticket.staff_id3 != null && ticket.staff_id3 !== "")
+    ticket.staff_id3 = Number(ticket.staff_id3) || null;
+  else ticket.staff_id3 = null;
+
+  ticket.notify_status = Number(ticket.notify_status) || 0;
+  ticket.notify_status2 = Number(ticket.notify_status2) || 0;
+  ticket.notify_status3 = Number(ticket.notify_status3) || 0;
+
+  ticket.repair_time =
+    ticket.repair_time != null && ticket.repair_time !== ""
+      ? Number(ticket.repair_time) || null
+      : null;
+
+  return ticket;
+}
 export class DetailsController {
   constructor(apiInstance, routerInstance) {
     this.api = apiInstance;
@@ -75,32 +115,62 @@ export class DetailsController {
     // Счётчик монтирований — см. комментарий в tickets-controller.
     // Инкремент в unmount() инвалидирует активные mount-потоки.
     this._mountId = 0;
+    // Причина последнего неуспешного _fetchTicketFromServer:
+    //   'not_found' — сервер вернул { status: 'ok', data: null }
+    //   'network'   — status: 'error', network_error, invalid_response
+    // Используется в mount для выбора между _render404 и _renderNetworkError.
+    this._lastFetchError = null;
+    // Дедуп pending-команд в рамках одного mount. Ключ — command_uuid.
+    // Сбрасывается в mount(). Нужен, потому что _applyPendingToTicket
+    // может быть вызван несколько раз (mount + _saveEditOffline), и без
+    // дедупа details/note дублируются.
+    this._appliedPendingUuids = new Set();
+    // Ссылка на массив, из которого взят этот тикет (combinedTicketsArray
+    // в main.js). После save/close синхронизируем элемент, чтобы журнал
+    // не показывал устаревшие данные до следующего polling.
+    this._sourceArray = null;
+    this._sourceIdx = -1;
+    // Компоненты — объявлены для читаемости и статического анализа.
+    this.currentStaffSelect = null;
+    this.repairPicker = null;
+    this.noteField = null;
+    this.noteSubmitBtn = null;
   }
 
   async mount(ticketId, combinedTicketsArray = []) {
-    // Захватываем поколение. См. tickets-controller.mount.
-    // Без этого после ухода со страницы mount мог дописать в this.ticket,
-    // который unmount уже обнулил, и упасть на этом.ticket.xxx = yyy.
     const myMountId = ++this._mountId;
     const isStale = () => this._mountId !== myMountId;
 
     this.currentTicketId = ticketId;
     this.pendingChanges = {};
     this.mode = "view";
+    // Сбрасываем состояние предыдущего тикета. Без этого при ошибке
+    // загрузки (404/network) this.ticket остаётся от прошлого mount,
+    // и фоновые вызовы (_refreshTicketAfterSave) работают не с тем.
+    this.ticket = null;
+    // Дедуп pending в рамках этого mount. См. правку 1.
+    this._appliedPendingUuids = new Set();
 
     const container = document.getElementById("ticketDetailsDynamicContainer");
     if (!container) return;
 
     if (String(ticketId).startsWith("offline_")) {
-      const outbox = await offlineDB.getAllFromOutbox();
+      const outbox = await offlineDB.getAllPending();
       if (isStale()) return;
+
+      // getAllPending возвращает все записи. Фильтруем только нужный
+      // CreateTicket со статусом 'pending'. Поле uuid теперь — command_uuid.
       const found = outbox.find(
-        (o) => o.offline_uuid === ticketId || o.uuid === ticketId,
+        (o) =>
+          o.command_type === "CreateTicket" &&
+          o.status === "pending" &&
+          (o.offline_uuid === ticketId || o.command_uuid === ticketId),
       );
+
       if (found) {
         this.ticket = {
           ...found.payload,
-          id: found.offline_uuid || found.uuid,
+          id: found.offline_uuid || found.command_uuid,
           isOffline: true,
           date: found.created_at,
         };
@@ -119,79 +189,181 @@ export class DetailsController {
     }
 
     if (!ticket) {
-      this._render404(container, ticketId);
+      if (this._lastFetchError === "network") {
+        this._renderNetworkError(container, ticketId);
+      } else if (this._lastFetchError === "not_found") {
+        this._render404(container, ticketId);
+      }
       return;
     }
 
-    this.ticket = ticket;
+    // Shallow-копия + копия note-массива. Без этого _applyPendingToTicket
+    // мутирует объект внутри combinedTicketsArray (общий), и при повторном
+    // открытии карточки details/note дублируются.
+    this.ticket = normalizeTicketFields({
+      ...ticket,
+      note: Array.isArray(ticket.note)
+        ? [...ticket.note]
+        : ticket.note && typeof ticket.note === "object"
+          ? { ...ticket.note }
+          : ticket.note,
+    });
+
+    // Ссылка на источник для синхронизации после save/close.
+    if (combinedTicketsArray && combinedTicketsArray.length > 0) {
+      this._sourceArray = combinedTicketsArray;
+      this._sourceIdx = combinedTicketsArray.findIndex(
+        (t) => String(t.id) === String(ticketId),
+      );
+    } else {
+      this._sourceArray = null;
+      this._sourceIdx = -1;
+    }
+
     await this._applyPendingToTicket();
     if (isStale()) return;
     this._renderCard(container);
   }
+  /**
+   * После успешного сохранения (calledit / callClose) — перезапрашиваем
+   * заявку через get_ticket и делаем полный merge.
+   *
+   * Раньше обновлялись только staff-поля (12 штук). Но сервер мог
+   * пересчитать и другие поля:
+   *   - alert_level (зависит от call_department, call_request, сроков);
+   *   - is_emergency (по call_department_id);
+   *   - expected_repair_time (если сервер нормализует);
+   *   - call_details (append-only — сервер вернёт «склеенное»);
+   *   - can_edit / can_close / can_comment (если сменились права).
+   *
+   * Защищённые ключи (не перезаписываем):
+   *   type, isOffline      — клиентская маркировка
+   *   note                 — комментарии рендерятся отдельно, могут
+   *                          содержать pending с optimistic UI
+   *   _pendingStaff, _pendingNotify, _pendingRepair,
+   *   _pendingDetails, _pendingClose — локальные оверлеи optimistic UI
+   *
+   * После merge — полная перерисовка карточки (не только staff),
+   * потому что измениться могло любое поле. Это проще и надёжнее
+   * точечного patch.
+   *
+   * Guard _mountId: если пользователь ушёл на другой роут, пока шёл
+   * fetch, — не трогаем DOM.
+   */
   async _refreshTicketAfterSave() {
+    if (!this.ticket) return;
+
+    const myMountId = this._mountId;
+    const isStale = () => this._mountId !== myMountId;
+
     try {
       const fresh = await this._fetchTicketFromServer(this.ticket.id);
+      if (isStale() || !this.ticket) return;
       if (!fresh) return;
 
-      const fields = [
-        "staff_id",
-        "staff_name",
-        "staff_phone",
-        "notify_status",
-        "notify_date",
-        "staff_id2",
-        "staff_name2",
-        "staff_phone2",
-        "notify_status2",
-        "notify_date2",
-        "staff_id3",
-        "staff_name3",
-        "staff_phone3",
-        "notify_status3",
-        "notify_date3",
-      ];
-      fields.forEach((key) => {
-        if (key in fresh) this.ticket[key] = fresh[key];
-      });
+      if (this.mode !== "view") return;
 
-      this._renderStaffSlots();
+      normalizeTicketFields(fresh);
+
+      const protectedKeys = new Set([
+        "type",
+        "isOffline",
+        "note",
+        "_pendingStaff",
+        "_pendingNotify",
+        "_pendingRepair",
+        "_pendingDetails",
+        "_pendingClose",
+      ]);
+      for (const [key, value] of Object.entries(fresh)) {
+        if (protectedKeys.has(key)) continue;
+        this.ticket[key] = value;
+      }
+
+      if (isStale() || !this.ticket || this.mode !== "view") return;
+      const container = document.getElementById(
+        "ticketDetailsDynamicContainer",
+      );
+      if (container) {
+        this._renderCard(container);
+      }
+      this._syncSourceArray();
     } catch (err) {
       console.error("[DetailsController] Refresh after save error:", err);
     }
   }
 
+  /**
+   * Точечная загрузка заявки по call_id через { data: 'ticket', call_id }.
+   *
+   * Контракт (API_PROTOCOL.md v4.3):
+   *   { status: 'ok', data: { ...полный объект заявки... } } — найдено
+   *   { status: 'ok', data: null }                             — not_found
+   *   { status: 'error', code, message }                       — сеть / сервер
+   *
+   * Заменяет двойной запрос (open + close period=7), который:
+   *   - не находил заявки старше 7 дней;
+   *   - не находил закрытые заявки в других периодах;
+   *   - каждый раз дёргал полный список (тяжело при 5000+ заявок).
+   *
+   * При ошибке (сеть/сервер) сохраняет this._lastFetchError = 'network'
+   * (не 'not_found'), чтобы mount мог отличить 404 от сбоя.
+   */
   async _fetchTicketFromServer(ticketId) {
+    this._lastFetchError = null;
     try {
-      const openData = await this.api.post(
-        { data: "open" },
+      const resp = await this.api.post(
+        { data: "ticket", call_id: ticketId },
         "Загрузка карточки №" + ticketId + "...",
-        "details",
+        // Тег только на чтение. Записи (callClose/calledit/callnote)
+        // идут под 'details-write' и НЕ отменяются при уходе со страницы —
+        // сервер мог уже применить мутацию, отмена оставит UI в неведении.
+        "details-read",
       );
-      if (openData && openData.code === "aborted") return null;
-      if (Array.isArray(openData)) {
-        const found = openData.find((t) => String(t.id) === String(ticketId));
-        if (found) {
-          found.type = "open";
-          return found;
-        }
+      if (!resp) {
+        this._lastFetchError = "network";
+        return null;
       }
-      const closeData = await this.api.post(
-        { data: "close", period: "7" },
-        "Поиск в архиве...",
-        "details",
-      );
-      if (closeData && closeData.code === "aborted") return null;
-      if (Array.isArray(closeData)) {
-        const found = closeData.find((t) => String(t.id) === String(ticketId));
-        if (found) {
-          found.type = "close";
-          return found;
-        }
+
+      // Отмена по abortTag('details') при уходе со страницы — тихо.
+      // isStale() в mount отсечёт результат.
+      if (resp.code === "aborted") return null;
+
+      if (resp.status === "error") {
+        console.warn(
+          "[DetailsController] Ошибка загрузки заявки:",
+          resp.code,
+          resp.message,
+        );
+        this._lastFetchError = "network";
+        return null;
       }
+
+      if (resp.status !== "ok") {
+        this._lastFetchError = "network";
+        return null;
+      }
+
+      // Согласовано: { status: 'ok', data: null } = not_found
+      const ticket = resp.data;
+      if (!ticket) {
+        this._lastFetchError = "not_found";
+        return null;
+      }
+
+      // Унифицируем type. Сервер может вернуть call_status (0/1)
+      // либо уже готовое type ('open'/'close').
+      if (!ticket.type) {
+        const isClosed = Number(ticket.call_status) === 1;
+        ticket.type = isClosed ? "close" : "open";
+      }
+
+      return ticket;
     } catch (err) {
       console.error("[DetailsController] Ошибка загрузки с сервера:", err);
+      this._lastFetchError = "network";
+      return null;
     }
-    return null;
   }
 
   async _applyPendingToTicket() {
@@ -200,36 +372,45 @@ export class DetailsController {
     if (String(this.ticket.id).startsWith("offline_")) return;
 
     const cmds = await outboxQueue.getPendingByTicket(this.ticket.id);
-    // За время await unmount мог обнулить this.ticket (смена роута).
-    // Без этой проверки цикл ниже упадёт на this.ticket._pendingStaff = true.
     if (!this.ticket) return;
     this._pendingCommands = cmds;
+
+    // Оборачиваем note в массив один раз, до цикла.
+    if (!Array.isArray(this.ticket.note)) {
+      this.ticket.note = this.ticket.note
+        ? Object.values(this.ticket.note)
+        : [];
+    }
+
     for (const cmd of cmds) {
+      // Дедуп: не применяем одну команду повторно (повторный mount
+      // или _saveEditOffline → _applyPendingToTicket).
+      if (this._appliedPendingUuids.has(cmd.command_uuid)) continue;
+
       const p = cmd.payload || {};
 
       if (cmd.command_type === "EditTicket") {
-        if (
-          p.staff_id != null &&
-          (!this.ticket.staff_id || this.ticket.staff_id === "0")
-        ) {
-          this.ticket.staff_id = p.staff_id;
+        // Применяем и помечаем — только если условие сработало.
+        // Если staff уже назначен другим — не помечаем, оставляем
+        // шанс другой команде (Soft Merge на сервере всё равно решит).
+        let applied = false;
+
+        if (p.staff_id != null && !this.ticket.staff_id) {
+          this.ticket.staff_id = Number(p.staff_id);
           this.ticket.staff_name = staffStore.getById(p.staff_id)?.name || null;
           this.ticket._pendingStaff = true;
+          applied = true;
         }
-        if (
-          p.notify_status != null &&
-          (!this.ticket.notify_status || this.ticket.notify_status === 0)
-        ) {
-          this.ticket.notify_status = p.notify_status;
+        if (p.notify_status != null && !this.ticket.notify_status) {
+          this.ticket.notify_status = Number(p.notify_status);
           this.ticket.notify_date = cmd.created_at;
           this.ticket._pendingNotify = true;
+          applied = true;
         }
-        if (
-          p.repair_time != null &&
-          (!this.ticket.repair_time || this.ticket.repair_time === "0")
-        ) {
-          this.ticket.repair_time = p.repair_time;
+        if (p.repair_time != null && !this.ticket.repair_time) {
+          this.ticket.repair_time = Number(p.repair_time);
           this.ticket._pendingRepair = true;
+          applied = true;
         }
         if (p.details) {
           this.ticket.details =
@@ -237,13 +418,10 @@ export class DetailsController {
             (this.ticket.details ? "\n\n" : "") +
             p.details;
           this.ticket._pendingDetails = true;
+          applied = true;
         }
+        if (applied) this._appliedPendingUuids.add(cmd.command_uuid);
       } else if (cmd.command_type === "AddComment") {
-        if (!Array.isArray(this.ticket.note)) {
-          this.ticket.note = this.ticket.note
-            ? Object.values(this.ticket.note)
-            : [];
-        }
         this.ticket.note.push({
           id: "pending_" + cmd.command_uuid,
           user: cmd.offline_author_name || "Вы",
@@ -253,6 +431,7 @@ export class DetailsController {
           _pending: true,
         });
         this.ticket.note_num = (this.ticket.note_num || 0) + 1;
+        this._appliedPendingUuids.add(cmd.command_uuid);
       } else if (cmd.command_type === "CloseTicket") {
         this.ticket._pendingClose = {
           solution: p.solution || "",
@@ -260,6 +439,7 @@ export class DetailsController {
           close_name: cmd.offline_author_name || "—",
           command_uuid: cmd.command_uuid,
         };
+        this._appliedPendingUuids.add(cmd.command_uuid);
       }
     }
   }
@@ -292,7 +472,15 @@ export class DetailsController {
       "notify_date3",
     ];
   }
-
+  /**
+   * Обновить элемент в combinedTicketsArray, чтобы журнал при возврате
+   * показал актуальные данные без ожидания polling.
+   */
+  _syncSourceArray() {
+    if (!this._sourceArray || this._sourceIdx < 0) return;
+    if (!this.ticket) return;
+    this._sourceArray[this._sourceIdx] = { ...this.ticket };
+  }
   _render404(container, ticketId) {
     container.innerHTML = `
             <div class="error-card" style="padding: 2rem; text-align: center; background: var(--bg-secondary); border: 2px solid var(--border-color); border-radius: 12px; max-width: 500px; margin: 2rem auto;">
@@ -303,8 +491,61 @@ export class DetailsController {
     const btn = document.getElementById("backToTableBtn");
     if (btn) btn.onclick = () => this.router.navigate("#/");
   }
+  /**
+   * Экран «сбой сети» — отличается от 404 (заявка не существует).
+   * Показывает кнопки «Повторить» и «Вернуться в журнал».
+   * Вызывается, когда _fetchTicketFromServer вернул null с
+   * _lastFetchError === 'network' (таймаут, сервер 5xx,
+   * invalid_response).
+   */
+  _renderNetworkError(container, ticketId) {
+    container.innerHTML = `
+            <div class="error-card" style="padding: 2rem; text-align: center; background: var(--bg-secondary); border: 2px solid #f59e0b; border-radius: 12px; max-width: 500px; margin: 2rem auto;">
+                <h2 style="color: #d97706;">Не удалось загрузить заявку №${escapeHtml(ticketId)}</h2>
+                <p style="color: var(--text-secondary); margin: 1rem 0;">Сбой сети или сервер недоступен. Проверьте соединение и попробуйте снова.</p>
+                <div style="display: flex; gap: 8px; justify-content: center;">
+                    <button class="menu-item active" id="retryTicketBtn" style="border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer;">Повторить</button>
+                    <button class="menu-item" id="backToTableBtnNetErr" style="border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; cursor: pointer;">Вернуться в журнал</button>
+                </div>
+            </div>`;
 
+    const retryBtn = document.getElementById("retryTicketBtn");
+    if (retryBtn) {
+      retryBtn.onclick = () => {
+        this._lastFetchError = null;
+        // mount сам вызовет _fetchTicketFromServer повторно
+        this.mount(ticketId);
+      };
+    }
+    const backBtn = document.getElementById("backToTableBtnNetErr");
+    if (backBtn) {
+      backBtn.onclick = () => this.router.navigate("#/");
+    }
+  }
   _renderCard(container) {
+    destroyVoiceInput();
+    // Полная перерисовка: все DOM-узлы внутри container уничтожаются
+    // через innerHTML. Но созданные компоненты (noteField, select'ы,
+    // voiceInput на textarea, слушатели на document) продолжают жить
+    // на detached-узлах. Dispose до замены DOM.
+    [
+      this.noteField,
+      this.deptSelect,
+      this.reqSelect,
+      this.groupSelect,
+      this.repairPicker,
+      this.currentStaffSelect,
+    ].forEach((comp) => {
+      if (comp && typeof comp.destroy === "function") comp.destroy();
+    });
+    this.noteField = null;
+    this.noteSubmitBtn = null;
+    this.deptSelect = null;
+    this.reqSelect = null;
+    this.groupSelect = null;
+    this.repairPicker = null;
+    this.currentStaffSelect = null;
+
     const t = this.ticket;
     const isOffline = t.isOffline === true;
     const pendingClose = t._pendingClose || null;
@@ -719,46 +960,51 @@ export class DetailsController {
     const isNewlyAssigned = keyStaffId in this.pendingChanges;
 
     // ИСПРАВЛЕНО: Синтаксическая ошибка (добавлено продолжение условия)
-    const notifyEditable =
-      isEdit &&
-      (isAdmin || (isNewlyAssigned && canAssign)) &&
-      (!slot.notifyStatus || slot.notifyStatus === 0);
+    // Два состояния:
+    //   1. Уже уведомлён (notify_status = 1) — индикатор «✅ Уведомлён (дата)».
+    //      Снять нельзя: факт уведомления исторический.
+    //   2. Не уведомлён — чекбокс для установки. Снять (обратно в 0)
+    //      нельзя — сервер воспринимает 1 как факт, откат некорректен.
+    // notify_status === 1 уже показан выше блоком `status`
+    // («📞 По телефону · 02.11.2026 14:30»). Дополнительный индикатор
+    // «✅ Уведомлён» был бы дублированием. Показываем чекбокс только
+    // когда ответственный ещё не уведомлён.
+    if (!slot.notifyStatus) {
+      const notifyEditable =
+        isEdit && (isAdmin || (isNewlyAssigned && canAssign));
 
-    if (notifyEditable) {
-      const notifyWrap = document.createElement("label");
-      notifyWrap.className = "editable-field editable-field--checkbox";
-      notifyWrap.style.cssText =
-        "display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; font-size: 12px; width: fit-content;";
+      if (notifyEditable) {
+        const notifyWrap = document.createElement("label");
+        notifyWrap.className = "editable-field editable-field--checkbox";
+        notifyWrap.style.cssText =
+          "display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; font-size: 12px; width: fit-content;";
 
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.style.cursor = "pointer";
-      cb.checked = slot.notifyStatus === 1;
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.style.cursor = "pointer";
+        cb.checked = false;
 
-      const txt = document.createElement("span");
-      txt.textContent = "Уведомлён по телефону";
+        const txt = document.createElement("span");
+        txt.textContent = "Уведомлён по телефону";
 
-      cb.onchange = () => {
-        const keyNotify = "notify_status" + suffix;
-        const keyNotifyDate = "notify_date" + suffix;
-        if (cb.checked) {
+        cb.onchange = () => {
+          // Только установка в 1. Снятие не предусмотрено —
+          // сервер воспринимает 1 как факт, откат некорректен.
+          if (!cb.checked) return;
+          const keyNotify = "notify_status" + suffix;
+          const keyNotifyDate = "notify_date" + suffix;
           this.pendingChanges[keyNotify] = 1;
           this.ticket[keyNotify] = 1;
           this.ticket[keyNotifyDate] = nowTs();
-        } else {
-          this.pendingChanges[keyNotify] = 0;
-          this.ticket[keyNotify] = 0;
-          this.ticket[keyNotifyDate] = null;
-        }
-        this._renderStaffSlots();
-        this._updateSaveButtonState();
-      };
+          this._renderStaffSlots();
+          this._updateSaveButtonState();
+        };
 
-      notifyWrap.appendChild(cb);
-      notifyWrap.appendChild(txt);
-      row.appendChild(notifyWrap);
+        notifyWrap.appendChild(cb);
+        notifyWrap.appendChild(txt);
+        row.appendChild(notifyWrap);
+      }
     }
-
     const canReplace =
       isEdit && !isGridLocked && (isAdmin || (isNewlyAssigned && canAssign));
     const canUnassign = isEdit && !isGridLocked && isAdmin;
@@ -855,13 +1101,17 @@ export class DetailsController {
   }
 
   _openAssignForm(slotNumber) {
+    const container = document.getElementById("staffSlotsContainer");
+    // Guard: setTimeout(() => this._openAssignForm(1), 0) может
+    // сработать после unmount (контейнера нет).
+    if (!container) return;
+
     const slots = this._getStaffSlots();
     const busyIds = slots
       .filter((s) => s.slot !== slotNumber && s.id)
       .map((s) => s.id);
 
     const rowIdx = slotNumber - 1;
-    const container = document.getElementById("staffSlotsContainer");
     const row = container.children[rowIdx];
     if (!row) return;
 
@@ -962,7 +1212,12 @@ export class DetailsController {
     row.appendChild(confirmBtn);
     row.appendChild(cancelBtn);
 
-    setTimeout(() => staffSelect.focus(), 30);
+    setTimeout(() => {
+      // Guard: после unmount this.currentStaffSelect уже не наш.
+      if (staffSelect && this.currentStaffSelect === staffSelect) {
+        staffSelect.focus();
+      }
+    }, 30);
   }
 
   _bindEvents() {
@@ -1011,7 +1266,8 @@ export class DetailsController {
     this._autoOpenPending = this.ticket.staff_id == null;
 
     document.getElementById("detailsAddBlock").style.display = "block";
-    document.getElementById("editBtn").style.display = "none";
+    const editBtnRef = document.getElementById("editBtn");
+    if (editBtnRef) editBtnRef.style.display = "none";
     const newDetailsInput = document.getElementById("newDetailsInput");
     if (newDetailsInput) initVoiceTextarea(newDetailsInput);
     const closeBtn = document.getElementById("closeBtn");
@@ -1118,7 +1374,8 @@ export class DetailsController {
     const solutionInput = document.getElementById("solutionInput");
     if (solutionInput) initVoiceTextarea(solutionInput);
 
-    document.getElementById("editBtn").style.display = "none";
+    const editBtnRef = document.getElementById("editBtn");
+    if (editBtnRef) editBtnRef.style.display = "none";
     const closeBtn = document.getElementById("closeBtn");
     if (closeBtn) closeBtn.style.display = "none";
     document.getElementById("saveBtn").hidden = false;
@@ -1273,8 +1530,16 @@ export class DetailsController {
     let enabled = false;
 
     if (this.mode === "edit") {
-      enabled = Object.keys(this.pendingChanges).length > 0;
       const newDetails = $("newDetailsInput");
+      const typed = newDetails ? newDetails.value.trim() : "";
+      const hasUncommittedDetails = typed.length > 0 && !CAPS_REGEX.test(typed);
+
+      // Кнопка «Сохранить» разблокирована, если в pendingChanges есть
+      // изменения ИЛИ в newDetailsInput набран валидный текст без
+      // нажатия «+ Добавить описание». _onSave подхватит его сам.
+      enabled =
+        Object.keys(this.pendingChanges).length > 0 || hasUncommittedDetails;
+
       if (newDetails && CAPS_REGEX.test(newDetails.value)) enabled = false;
       if (this.repairPicker && !this.repairPicker.isValid()) enabled = false;
       if (this.deptSelect && !this.deptSelect.isValid()) enabled = false;
@@ -1344,8 +1609,28 @@ export class DetailsController {
   }
 
   async _onSave() {
-    if (this.mode === "edit" && Object.keys(this.pendingChanges).length === 0)
-      return;
+    if (this.mode === "edit" && Object.keys(this.pendingChanges).length === 0) {
+      // Не сохраняем пустые изменения, но проверяем несохранённый
+      // текст в newDetailsInput — если он валиден, добавим в pending
+      // и продолжим (иначе пользователь молча теряет ввод).
+      const newDetailsEl = document.getElementById("newDetailsInput");
+      const typed = newDetailsEl ? newDetailsEl.value.trim() : "";
+      if (typed && !CAPS_REGEX.test(typed)) {
+        this._onAddDescription();
+      }
+      if (Object.keys(this.pendingChanges).length === 0) return;
+    }
+
+    // Перед сохранением забираем необработанный текст из newDetailsInput.
+    // Раньше пользователь, набравший описание и не нажавший
+    // «+ Добавить описание», терял его при «Сохранить».
+    if (this.mode === "edit") {
+      const newDetailsEl = document.getElementById("newDetailsInput");
+      const typed = newDetailsEl ? newDetailsEl.value.trim() : "";
+      if (typed && !CAPS_REGEX.test(typed)) {
+        this._onAddDescription();
+      }
+    }
 
     if (!navigator.onLine) {
       if (this.mode === "edit") {
@@ -1358,6 +1643,10 @@ export class DetailsController {
       }
     }
 
+    // Захватываем ticketId до await — unmount обнулит this.ticket.
+    const ticketId = this.ticket ? this.ticket.id : null;
+    if (ticketId == null) return;
+
     let payload;
 
     if (this.mode === "close") {
@@ -1367,14 +1656,14 @@ export class DetailsController {
 
       payload = {
         action: "callClose",
-        call_id: this.ticket.id,
+        call_id: ticketId,
         solution: solutionText,
         user_id: user,
       };
     } else {
       payload = {
         action: "calledit",
-        call_id: this.ticket.id,
+        call_id: ticketId,
         ...this.pendingChanges,
       };
     }
@@ -1383,8 +1672,26 @@ export class DetailsController {
     this._setSaveBtnState("loading");
 
     try {
-      const response = await this.api.post(payload, "", "details");
+      const response = await this.api.post(payload, "", "details-write");
 
+      // Если unmount уже отработал — this.ticket === null.
+      // Тихо выходим, ничего не уведомляем: сервер уже мог сохранить.
+      if (!this.ticket || this.ticket.id !== ticketId) return;
+
+      if (
+        response &&
+        (response.code === "network_error" || response.offline === true)
+      ) {
+        if (this.mode === "close") {
+          const ok = await this._saveCloseOffline();
+          if (!ok && this.ticket && this.ticket.id === ticketId) {
+            this._unlockCard();
+            this._setSaveBtnState("error");
+          }
+          return;
+        }
+        // edit — fallthrough → else-ветка ниже (notify.error).
+      }
       if (response && response.status === "ok") {
         this._setSaveBtnState("success");
         const msg = response.message || "Изменения сохранены.";
@@ -1402,14 +1709,17 @@ export class DetailsController {
           const shouldCreateNew =
             closeAndCreateCheck && closeAndCreateCheck.checked;
 
+          this._syncSourceArray();
           if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
 
           if (shouldCreateNew) {
             const backBtn = document.getElementById("backBtn");
             if (backBtn) backBtn.style.display = "none";
 
-            const fromTicketId = this.ticket.id;
+            const fromTicketId = ticketId;
             this.autoReturnTimer = setTimeout(() => {
+              if (!this.ticket) return;
+              if (this.mode !== "view") return;
               appState.pendingCreateAddress = {
                 from_ticket_id: fromTicketId,
                 address: this.ticket.fullAddress || this.ticket.address || "",
@@ -1422,16 +1732,32 @@ export class DetailsController {
             }, 3000);
           } else {
             this.autoReturnTimer = setTimeout(() => {
+              if (!this.ticket) return;
+              if (this.mode !== "view") return;
               if (window.location.hash.startsWith("#/ticket/")) {
                 this.router.navigate("#/closed");
               }
             }, AUTO_RETURN_MS);
           }
         } else {
+          // Оптимистично применяем дельту описания к this.ticket
+          // ДО _exitEditMode: он отрендерит это значение в #detailsDisplay,
+          // и даже если _refreshTicketAfterSave упадёт — пользователь
+          // увидит свой текст, а не откат snapshot.
+          if (this.pendingChanges.details) {
+            this.ticket.details =
+              (this.ticket.details || "") +
+              (this.ticket.details ? "\n\n" : "") +
+              this.pendingChanges.details;
+          }
+
+          this._syncSourceArray();
           this._refreshTicketAfterSave();
           this._exitEditMode();
 
           this.autoReturnTimer = setTimeout(() => {
+            if (!this.ticket) return;
+            if (this.mode !== "view") return;
             if (window.location.hash.startsWith("#/ticket/")) {
               this.router.navigate(
                 this.ticket.type === "close" ? "#/closed" : "#/",
@@ -1448,12 +1774,14 @@ export class DetailsController {
 
         if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
         this.autoReturnTimer = setTimeout(() => {
+          if (!this.ticket) return;
           this._unlockCard();
           this._setSaveBtnState("idle");
         }, ERROR_UNLOCK_MS);
       }
     } catch (err) {
       console.error("[DetailsController] Save error:", err);
+      if (!this.ticket) return;
       this._setSaveBtnState("error");
       const msg =
         "Сбой сети при сохранении: " + (err.message || "неизвестная ошибка");
@@ -1462,6 +1790,7 @@ export class DetailsController {
 
       if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
       this.autoReturnTimer = setTimeout(() => {
+        if (!this.ticket) return;
         this._unlockCard();
         this._setSaveBtnState("idle");
       }, ERROR_UNLOCK_MS);
@@ -1534,7 +1863,6 @@ export class DetailsController {
     const container = document.getElementById("noteComposer");
     if (!container) return;
 
-    // Очищаем контейнер, чтобы при перерисовке не дублировались поля
     container.innerHTML = "";
 
     this.noteField = createValidatedTextarea({
@@ -1544,19 +1872,87 @@ export class DetailsController {
       voice: true,
       onChange: (value, isValid) => {
         if (this.noteSubmitBtn) {
-          this.noteSubmitBtn.disabled = !isValid || !value;
-          this.noteSubmitBtn.style.opacity = !isValid || !value ? "0.5" : "1";
-          this.noteSubmitBtn.style.cursor =
-            !isValid || !value ? "not-allowed" : "pointer";
+          const enabled = isValid && !!value;
+          this.noteSubmitBtn.disabled = !enabled;
+          this.noteSubmitBtn.style.opacity = enabled ? "1" : "0.5";
+          this.noteSubmitBtn.style.cursor = enabled ? "pointer" : "not-allowed";
         }
       },
     });
 
+    // --- Фото: только онлайн, только с диска, без камеры ---
+    // Офлайн: input скрыт + кнопка disabled с tooltip.
+    // См. OFFLINE_PROTOCOL.md v3.0, разд. 15.1.
+    const isOnline = navigator.onLine;
+
+    const photoInput = document.createElement("input");
+    photoInput.type = "file";
+    photoInput.accept = "image/jpeg,image/png";
+    photoInput.id = "notePhotoInput";
+    photoInput.style.display = "none";
+    if (!isOnline) photoInput.disabled = true;
+
+    const photoPreview = document.createElement("div");
+    photoPreview.id = "notePhotoPreview";
+    photoPreview.style.cssText =
+      "display: none; align-items: center; gap: 8px; margin-top: 8px; padding: 6px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px;";
+
+    const photoPreviewImg = document.createElement("img");
+    photoPreviewImg.alt = "Превью";
+    photoPreviewImg.style.cssText =
+      "max-height: 60px; max-width: 60px; object-fit: cover; border-radius: 4px;";
+
+    const photoPreviewName = document.createElement("span");
+    photoPreviewName.style.cssText =
+      "font-size: 12px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
+
+    const photoClearBtn = document.createElement("button");
+    photoClearBtn.type = "button";
+    photoClearBtn.textContent = "×";
+    photoClearBtn.title = "Убрать фото";
+    photoClearBtn.style.cssText =
+      "padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary); cursor: pointer; font-size: 16px; line-height: 1;";
+    photoClearBtn.onclick = () => {
+      photoInput.value = "";
+      photoPreview.style.display = "none";
+      photoPreviewImg.src = "";
+    };
+
+    photoPreview.appendChild(photoPreviewImg);
+    photoPreview.appendChild(photoPreviewName);
+    photoPreview.appendChild(photoClearBtn);
+
+    photoInput.onchange = () => {
+      const file = photoInput.files && photoInput.files[0];
+      if (!file) {
+        photoPreview.style.display = "none";
+        return;
+      }
+      photoPreviewName.textContent =
+        file.name + " (" + Math.round(file.size / 1024) + " КБ)";
+      const url = URL.createObjectURL(file);
+      photoPreviewImg.src = url;
+      photoPreviewImg.onload = () => URL.revokeObjectURL(url);
+      photoPreview.style.display = "flex";
+    };
+
+    const attachBtn = document.createElement("button");
+    attachBtn.type = "button";
+    attachBtn.textContent = "📎 Прикрепить фото";
+    attachBtn.style.cssText =
+      "margin-top: 8px; align-self: flex-start; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font-size: 12px;";
+    if (!isOnline) {
+      attachBtn.disabled = true;
+      attachBtn.style.opacity = "0.5";
+      attachBtn.style.cursor = "not-allowed";
+      attachBtn.title = "Фото доступно только онлайн";
+    } else {
+      attachBtn.onclick = () => photoInput.click();
+    }
+
     const submitBtn = document.createElement("button");
     submitBtn.textContent = "Добавить комментарий";
     submitBtn.disabled = true;
-
-    // Жестко задаем стили для кнопки (прижимаем к правому краю)
     submitBtn.style.cssText =
       "align-self: flex-end; margin-top: 8px; padding: 8px 16px; border-radius: 6px; border: none; background: var(--accent); color: var(--mark-text); cursor: not-allowed; font-size: 13px; font-weight: 600; opacity: 0.5; transition: all 0.2s ease;";
     submitBtn.onclick = () => this._onAddNote();
@@ -1564,6 +1960,9 @@ export class DetailsController {
     this.noteSubmitBtn = submitBtn;
 
     container.appendChild(this.noteField.element);
+    container.appendChild(photoInput);
+    container.appendChild(attachBtn);
+    container.appendChild(photoPreview);
     container.appendChild(submitBtn);
   }
 
@@ -1572,18 +1971,56 @@ export class DetailsController {
     if (!text) return;
     if (this.noteField && !this.noteField.isValid()) return;
 
+    // Офлайн — сразу в outbox (как было).
     if (!navigator.onLine) {
+      const fileInput = document.getElementById("notePhotoInput");
+      const file = fileInput && fileInput.files && fileInput.files[0];
+      if (file) {
+        notify.warning(
+          "Фото не будет прикреплено: синхронизация фото доступна только онлайн.",
+        );
+      }
       await this._saveNoteOffline(text);
       return;
     }
 
-    const payload = {
-      action: "callnote",
-      call_id: this.ticket.id,
-      note: text,
-    };
+    const ticketId = this.ticket ? this.ticket.id : null;
+    if (ticketId == null) return;
 
     const btn = this.noteSubmitBtn;
+    const fileInput = document.getElementById("notePhotoInput");
+    const file = fileInput && fileInput.files && fileInput.files[0];
+
+    let photoBase64 = null;
+    if (file) {
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Сжатие фото...";
+        btn.style.opacity = "0.7";
+      }
+      try {
+        const compressed = await compressPhoto(file);
+        photoBase64 = compressed.base64;
+      } catch (err) {
+        console.error("[DetailsController] Photo compress error:", err);
+        if (!this.ticket) return;
+        notify.error("Фото не прикреплено: " + err.message);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Добавить комментарий";
+          btn.style.opacity = "1";
+        }
+        return;
+      }
+    }
+
+    const payload = {
+      action: "callnote",
+      call_id: ticketId,
+      note: text,
+    };
+    if (photoBase64) payload.photo_base64 = photoBase64;
+
     if (btn) {
       btn.disabled = true;
       btn.textContent = "Отправка...";
@@ -1591,8 +2028,28 @@ export class DetailsController {
     }
 
     try {
-      const response = await this.api.post(payload, "", "details");
+      const response = await this.api.post(payload, "", "details-write");
 
+      if (!this.ticket || this.ticket.id !== ticketId) return;
+
+      if (
+        response &&
+        (response.code === "network_error" || response.offline === true)
+      ) {
+        // Fallback в outbox мог бы продублировать комментарий, если
+        // онлайн-запрос уже прошёл, а ответ потерялся. Показываем
+        // ошибку — текст остаётся в композере (this.noteField не сброшен),
+        // пользователь может повторить вручную. См. TD-SYNC-01.
+        notify.error(
+          "Не удалось отправить: нет связи с сервером. Проверьте соединение и повторите.",
+        );
+        if (btn) {
+          btn.textContent = "Добавить комментарий";
+          btn.disabled = false;
+          btn.style.opacity = "1";
+        }
+        return;
+      }
       if (response && response.status === "ok") {
         const msg = response.message || "Комментарий добавлен.";
         logHistoryAction(msg);
@@ -1616,6 +2073,9 @@ export class DetailsController {
 
         this._renderNotesList(this.ticket.note);
         this.noteField.reset();
+        if (fileInput) fileInput.value = "";
+        const preview = document.getElementById("notePhotoPreview");
+        if (preview) preview.style.display = "none";
         if (btn) {
           btn.textContent = "Добавить комментарий";
           btn.disabled = true;
@@ -1634,6 +2094,7 @@ export class DetailsController {
       }
     } catch (err) {
       console.error("[DetailsController] AddNote error:", err);
+      if (!this.ticket || this.ticket.id !== ticketId) return;
       logHistoryAction("Сбой сети при добавлении комментария.");
       notify.error("Не удалось добавить комментарий. Проверьте соединение.");
       if (btn) {
@@ -1643,34 +2104,25 @@ export class DetailsController {
       }
     }
   }
-
   async _saveNoteOffline(text) {
+    const ticketId = this.ticket ? this.ticket.id : null;
+    if (ticketId == null) return;
+
     try {
-      await outboxQueue.enqueueComment(this.ticket.id, text);
+      await outboxQueue.enqueueComment(ticketId, text);
       logHistoryAction("Комментарий сохранён локально.");
       notify.offline(
         "Комментарий сохранён. Будет синхронизирован при восстановлении сети.",
       );
 
-      const note = {
-        id: "pending_" + Date.now(),
-        user: authStore.getUser()?.name || "Вы",
-        body: text,
-        date: nowTs(),
-        type: 0,
-        _pending: true,
-      };
+      if (!this.ticket || this.ticket.id !== ticketId) return;
+      await this._applyPendingToTicket();
+      if (!this.ticket || this.ticket.id !== ticketId) return;
 
-      if (Array.isArray(this.ticket.note)) {
-        this.ticket.note.push(note);
-      } else if (this.ticket.note && typeof this.ticket.note === "object") {
-        this.ticket.note[Object.keys(this.ticket.note).length + 1] = note;
-      } else {
-        this.ticket.note = [note];
-      }
-
-      this._renderNotesList(this.ticket.note);
-      this.noteField.reset();
+      // Не _renderCard: при mode='edit'/'close' полная перерисовка
+      // сбросит открытую форму, оставив mode/pendingChanges.
+      // Достаточно обновить список заметок.
+      this._renderNotesList(this.ticket.note || []);
       if (this.noteSubmitBtn) {
         this.noteSubmitBtn.textContent = "Добавить комментарий";
         this.noteSubmitBtn.disabled = true;
@@ -1681,16 +2133,17 @@ export class DetailsController {
       notify.error("Не удалось сохранить комментарий локально.");
     }
   }
-
   async _saveEditOffline() {
+    const ticketId = this.ticket ? this.ticket.id : null;
+    if (ticketId == null) return false;
+
     const patch = {};
 
     if (this.pendingChanges.details) {
       patch.details = this.pendingChanges.details;
     }
-
     if (this.pendingChanges.staff_id != null) {
-      if (!this.ticket.staff_id || this.ticket.staff_id === "0") {
+      if (!this.ticket.staff_id) {
         patch.staff_id = this.pendingChanges.staff_id;
       } else {
         notify.warning(
@@ -1698,10 +2151,9 @@ export class DetailsController {
         );
       }
     }
-
     if (this.pendingChanges.notify_status != null) {
       const currentStatus = this.ticket.notify_status;
-      if (!currentStatus || currentStatus === 0 || currentStatus === "0") {
+      if (!currentStatus) {
         patch.notify_status = this.pendingChanges.notify_status;
       } else {
         notify.warning(
@@ -1709,9 +2161,8 @@ export class DetailsController {
         );
       }
     }
-
     if (this.pendingChanges.repair_time != null) {
-      if (!this.ticket.repair_time || this.ticket.repair_time === "0") {
+      if (!this.ticket.repair_time) {
         patch.repair_time = this.pendingChanges.repair_time;
       } else {
         notify.warning(
@@ -1724,12 +2175,11 @@ export class DetailsController {
       notify.warning(
         "Нет изменений для офлайн-синхронизации. Возможные изменения доступны только онлайн.",
       );
-      return;
+      return false;
     }
 
     try {
-      await outboxQueue.enqueueEdit(this.ticket.id, patch);
-
+      await outboxQueue.enqueueEdit(ticketId, patch);
       logHistoryAction("Изменения сохранены локально.");
       notify.offline(
         "Изменения сохранены. Будут синхронизированы при восстановлении сети.",
@@ -1738,72 +2188,58 @@ export class DetailsController {
       this._ticketSnapshot = null;
       this._staffChangedInSession = false;
       this._autoOpenPending = false;
-
-      if (patch.details) {
-        this.ticket.details =
-          (this.ticket.details || "") +
-          (this.ticket.details ? "\n\n" : "") +
-          patch.details;
-      }
-      if (patch.staff_id != null) {
-        this.ticket.staff_id = patch.staff_id;
-        this.ticket.staff_name =
-          staffStore.getById(patch.staff_id)?.name || null;
-      }
-      if (patch.notify_status != null) {
-        this.ticket.notify_status = patch.notify_status;
-        this.ticket.notify_date = nowTs();
-      }
-      if (patch.repair_time != null) {
-        this.ticket.repair_time = patch.repair_time;
-      }
-
       this.pendingChanges = {};
       this.mode = "view";
 
+      if (!this.ticket || this.ticket.id !== ticketId) return true;
       await this._applyPendingToTicket();
+      if (!this.ticket || this.ticket.id !== ticketId) return true;
+
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
       if (container) this._renderCard(container);
+      this._syncSourceArray();
+      return true;
     } catch (err) {
       console.error("[DetailsController] Offline edit save error:", err);
       notify.error("Не удалось сохранить изменения локально.");
+      return false;
     }
   }
-
   async _saveCloseOffline() {
+    const ticketId = this.ticket ? this.ticket.id : null;
+    if (ticketId == null) return false;
+
     const sol = document.getElementById("solutionInput");
     const solutionText = sol ? sol.value.trim() : "";
 
     try {
-      await outboxQueue.enqueueClose(this.ticket.id, solutionText);
-
+      await outboxQueue.enqueueClose(ticketId, solutionText);
       logHistoryAction("Заявка закрыта локально.");
       notify.offline(
         "Заявка закрыта. Будет синхронизирована при восстановлении сети.",
       );
 
-      this.ticket._pendingClose = {
-        solution: solutionText,
-        close_date: nowTs(),
-        close_name: authStore.getUser()?.name || "—",
-      };
-
       this.pendingChanges = {};
       this.mode = "view";
 
+      if (!this.ticket || this.ticket.id !== ticketId) return true;
       await this._applyPendingToTicket();
+      if (!this.ticket || this.ticket.id !== ticketId) return true;
+
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
       if (container) this._renderCard(container);
+      this._syncSourceArray();
+      return true;
     } catch (err) {
       console.error("[DetailsController] Offline close save error:", err);
       notify.error("Не удалось закрыть заявку локально.");
+      return false;
     }
   }
-
   unmount() {
     // Инвалидирует любой активный mount (guard isStale()).
     this._mountId++;
@@ -1819,7 +2255,9 @@ export class DetailsController {
     }
     destroyVoiceInput();
     this._unlockCard();
-    this.api.abortTag("details");
+    // Отменяем только чтение. Записи (callClose/calledit/callnote)
+    // не должны отменяться — сервер мог уже применить операцию.
+    this.api.abortTag("details-read");
 
     if (this._ticketSnapshot && this.ticket) {
       this._getTicketSnapshotKeys().forEach((k) => {
@@ -1852,5 +2290,7 @@ export class DetailsController {
     this.mode = "view";
     this.ticket = null;
     this.currentTicketId = null;
+    this._sourceArray = null;
+    this._sourceIdx = -1;
   }
 }

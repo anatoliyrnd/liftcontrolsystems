@@ -13,13 +13,13 @@ export function createAddressPicker(opts = {}) {
   const wrap = document.createElement("div");
   wrap.className = "address-picker-wrap";
   wrap.style.cssText =
-      "display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1001;";
+    "display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 1001;";
 
   const cityWrap = document.createElement("div");
   const cityLabel = document.createElement("label");
   cityLabel.textContent = "Город";
   cityLabel.style.cssText =
-      "font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;";
+    "font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;";
 
   const citySelect = document.createElement("select");
   citySelect.className = "search-input";
@@ -33,9 +33,9 @@ export function createAddressPicker(opts = {}) {
 
   const searchLabel = document.createElement("label");
   searchLabel.textContent =
-      mode === "house" ? "Поиск дома / лифта" : "Поиск адреса (Улица, дом, лифт)";
+    mode === "house" ? "Поиск дома / лифта" : "Поиск адреса (Улица, дом, лифт)";
   searchLabel.style.cssText =
-      "font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;";
+    "font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;";
 
   const searchInput = document.createElement("input");
   searchInput.type = "text";
@@ -73,7 +73,7 @@ export function createAddressPicker(opts = {}) {
   backdrop.addEventListener("click", onBackdropClick);
 
   dropdown.style.cssText =
-      "display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; max-height: 350px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); box-shadow: 0 4px 12px rgba(0,0,0,0.15); margin-top: 4px; padding-bottom: 8px;";
+    "display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; max-height: 350px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); box-shadow: 0 4px 12px rgba(0,0,0,0.15); margin-top: 4px; padding-bottom: 8px;";
 
   searchWrap.appendChild(searchLabel);
   searchWrap.appendChild(searchInput);
@@ -88,22 +88,7 @@ export function createAddressPicker(opts = {}) {
   let focusableElements = [];
   let activeIndex = -1;
 
-  function normalize(text) {
-    let t = text
-        .toLowerCase()
-        .replace(/[^\wа-яё\s]/gi, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    const stopWords = [
-      "ул", "улица", "пр", "проспект", "пр-т", "пер", "переулок",
-      "ш", "шоссе", "б-р", "бульвар", "пл", "площадь",
-      "д", "дом", "п", "под", "подъезд", "лифт", "п.", "авеню", "аллея",
-    ];
-    stopWords.forEach((w) => {
-      t = t.replace(new RegExp(`\\b${w}\\b`, "g"), "");
-    });
-    return t.replace(/\s+/g, " ").trim();
-  }
+  const normalize = normalizeSearchString;
 
   function highlight(text, query) {
     if (!query) return escapeHtml(text);
@@ -123,8 +108,8 @@ export function createAddressPicker(opts = {}) {
       const raw = localStorage.getItem("recent_addresses");
       const all = raw ? JSON.parse(raw) : [];
       return all
-          .filter((a) => a.city_id === Number(cityId))
-          .slice(0, UI.RECENT_ADDRESSES_LIMIT);
+        .filter((a) => a.city_id === Number(cityId))
+        .slice(0, UI.RECENT_ADDRESSES_LIMIT);
     } catch (e) {
       return [];
     }
@@ -149,8 +134,8 @@ export function createAddressPicker(opts = {}) {
     } else {
       const defaultCity = await offlineDB.getConfig("default_city_id");
       if (
-          defaultCity &&
-          currentCities.some((c) => String(c.id) === String(defaultCity))
+        defaultCity &&
+        currentCities.some((c) => String(c.id) === String(defaultCity))
       ) {
         citySelect.value = String(defaultCity);
         if (!readOnly) handleCityChange();
@@ -244,14 +229,14 @@ export function createAddressPicker(opts = {}) {
       const title = document.createElement("div");
       title.textContent = "Недавние адреса";
       title.style.cssText =
-          "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
+        "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
       dropdown.appendChild(title);
 
       recent.forEach((item) => {
         const el = document.createElement("div");
         el.className = "recent-address-item";
         el.style.cssText =
-            "padding: 10px 12px; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border-color);";
+          "padding: 10px 12px; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border-color);";
         el.textContent = item.display_name;
         el.onclick = () => selectAddress(item, "elevator");
         dropdown.appendChild(el);
@@ -260,7 +245,7 @@ export function createAddressPicker(opts = {}) {
 
     if (results.length === 0 && recent.length === 0) {
       dropdown.innerHTML =
-          '<div style="padding: 10px; font-size: 13px; color: var(--text-secondary); text-align: center;">Ничего не найдено</div>';
+        '<div style="padding: 10px; font-size: 13px; color: var(--text-secondary); text-align: center;">Ничего не найдено</div>';
       showDropdown();
       return;
     }
@@ -268,7 +253,7 @@ export function createAddressPicker(opts = {}) {
     if (results.length > 0 && recent.length > 0) {
       const divider = document.createElement("div");
       divider.style.cssText =
-          "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
+        "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
       divider.textContent = "Результаты поиска";
       dropdown.appendChild(divider);
     }
@@ -291,12 +276,12 @@ export function createAddressPicker(opts = {}) {
       const groupEl = document.createElement("div");
       groupEl.className = "address-group";
       groupEl.style.cssText =
-          "padding: 10px 12px; border-bottom: 1px solid var(--border-color);";
+        "padding: 10px 12px; border-bottom: 1px solid var(--border-color);";
 
       const houseEl = document.createElement("div");
       houseEl.className = "address-house-header";
       houseEl.style.cssText =
-          "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
+        "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
       houseEl.innerHTML = highlight(group.house_display, query);
 
       if (mode === "house" || mode === "any") {
@@ -317,8 +302,8 @@ export function createAddressPicker(opts = {}) {
         pill.type = "button";
         pill.className = "address-pill";
         pill.innerHTML = highlight(
-            elev.object_name || elev.display_name.split(", ").pop(),
-            query,
+          elev.object_name || elev.display_name.split(", ").pop(),
+          query,
         );
 
         pill.onclick = () => selectAddress(elev, "elevator");
@@ -333,7 +318,7 @@ export function createAddressPicker(opts = {}) {
     if (results.length === 50) {
       const footer = document.createElement("div");
       footer.style.cssText =
-          "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
+        "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
       footer.textContent = "Показаны первые 50 результатов. Уточните запрос.";
       dropdown.appendChild(footer);
     }
