@@ -28,8 +28,12 @@ export class NotificationsPoller {
     this.intervalId = null;
     this.isRunning = false;
     this._reloadModalShown = false;
+    // Флаг «тик в процессе». Без него setInterval(120s) плодит висящие
+    // промисы при нестабильной сети: каждый тик делает await api.post
+    // (до 15s) + await withIdbWriteLock (ждёт SyncManager). За 3 минуты
+    // в очереди лока может накопиться 2–3 «висяка».
+    this._isTicking = false;
   }
-
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
@@ -46,6 +50,8 @@ export class NotificationsPoller {
   }
 
   async _tick() {
+    if (this._isTicking) return;
+    this._isTicking = true;
     try {
       const sinceId = this._loadLastId();
       const versions = this._loadVersions();
@@ -106,6 +112,8 @@ export class NotificationsPoller {
       notify.batch(toasts);
     } catch (err) {
       console.warn("[NotificationsPoller] Ошибка опроса:", err);
+    } finally {
+      this._isTicking = false;
     }
   }
 
