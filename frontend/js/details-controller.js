@@ -1719,7 +1719,7 @@ export class DetailsController {
             const fromTicketId = ticketId;
             this.autoReturnTimer = setTimeout(() => {
               if (!this.ticket) return;
-              if (this.mode !== "view") return;
+
               appState.pendingCreateAddress = {
                 from_ticket_id: fromTicketId,
                 address: this.ticket.fullAddress || this.ticket.address || "",
@@ -2242,6 +2242,10 @@ export class DetailsController {
     const sol = document.getElementById("solutionInput");
     const solutionText = sol ? sol.value.trim() : "";
 
+    // Читаем галочку ДО мутации состояния
+    const closeAndCreateCheck = document.getElementById("closeAndCreateCheck");
+    const shouldCreateNew = closeAndCreateCheck && closeAndCreateCheck.checked;
+
     try {
       await outboxQueue.enqueueClose(ticketId, solutionText);
       logHistoryAction("Заявка закрыта локально.");
@@ -2261,6 +2265,27 @@ export class DetailsController {
       );
       if (container) this._renderCard(container);
       this._syncSourceArray();
+
+      // --- ЛОГИКА ПЕРЕХОДА НА СОЗДАНИЕ (ОФЛАЙН) ---
+      if (shouldCreateNew) {
+        if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
+        const backBtn = document.getElementById("backBtn");
+        if (backBtn) backBtn.style.display = "none";
+
+        this.autoReturnTimer = setTimeout(() => {
+          if (!this.ticket) return;
+          appState.pendingCreateAddress = {
+            from_ticket_id: ticketId,
+            address: this.ticket.fullAddress || this.ticket.address || "",
+            city_id: this.ticket.city_id || null,
+            street_id: this.ticket.street_id || null,
+            home_id: this.ticket.home_id || null,
+            object_id: this.ticket.object_id || null,
+          };
+          this.router.navigate("#/create");
+        }, 3000);
+      }
+
       return true;
     } catch (err) {
       console.error("[DetailsController] Offline close save error:", err);

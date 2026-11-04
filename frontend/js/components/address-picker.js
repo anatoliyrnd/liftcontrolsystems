@@ -1,6 +1,7 @@
 import { offlineDB } from "../offline-db.js";
 import { UI } from "../config.js";
 import { escapeHtml } from "../utils/escape-html.js";
+import { normalizeSearchString } from "../utils/address-normalize.js";
 
 export function createAddressPicker(opts = {}) {
   const {
