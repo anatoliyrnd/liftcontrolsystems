@@ -18,10 +18,12 @@ import { nowTs, formatTs } from "./utils/date-utils.js";
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
-import { nowTs, formatTs } from "./utils/date-utils.js";
 import { normalizeTicketFields } from "./details/ticket-normalizer.js";
 import { formatFullHistory } from "./details/history-view.js";
 import { getStatusWord } from "./details/status-word.js";
+import { render404, renderNetworkError } from "./details/error-views.js";
+import { ticketRepository } from "./details/ticket-repository.js";
+import { DetailsState } from "./details/details-state.js";
 
 const CAPS_REGEX = VALIDATION.CAPS_REGEX;
 const MIN_SOLUTION_LEN = VALIDATION.MIN_SOLUTION_LEN;
@@ -64,31 +66,26 @@ export class DetailsController {
     this.api = apiInstance;
     this.router = routerInstance;
     this.currentTicketId = null;
-    this.ticket = null;
+    // this.ticket = null;
     this.deptSelect = null;
     this.reqSelect = null;
     this.groupSelect = null;
-    this.pendingChanges = {};
-    this.mode = "view";
+    //this.state.clearDraft();
+    // this.mode = "view";
     this.autoReturnTimer = null;
-
+    this.state = new DetailsState();
     this._staffChangedInSession = false;
     this._autoOpenPending = false;
-    this._ticketSnapshot = null;
-    this._pendingCommands = [];
+
+    // this._pendingCommands = [];
     // Счётчик монтирований — см. комментарий в tickets-controller.
     // Инкремент в unmount() инвалидирует активные mount-потоки.
     this._mountId = 0;
-    // Причина последнего неуспешного _fetchTicketFromServer:
-    //   'not_found' — сервер вернул { status: 'ok', data: null }
-    //   'network'   — status: 'error', network_error, invalid_response
-    // Используется в mount для выбора между _render404 и _renderNetworkError.
-    this._lastFetchError = null;
     // Дедуп pending-команд в рамках одного mount. Ключ — command_uuid.
     // Сбрасывается в mount(). Нужен, потому что _applyPendingToTicket
     // может быть вызван несколько раз (mount + _saveEditOffline), и без
     // дедупа details/note дублируются.
-    this._appliedPendingUuids = new Set();
+    // this._appliedPendingUuids = new Set();
     // Ссылка на массив, из которого взят этот тикет (combinedTicketsArray
     // в main.js). После save/close синхронизируем элемент, чтобы журнал
     // не показывал устаревшие данные до следующего polling.
@@ -106,14 +103,8 @@ export class DetailsController {
     const isStale = () => this._mountId !== myMountId;
 
     this.currentTicketId = ticketId;
-    this.pendingChanges = {};
-    this.mode = "view";
-    // Сбрасываем состояние предыдущего тикета. Без этого при ошибке
-    // загрузки (404/network) this.ticket остаётся от прошлого mount,
-    // и фоновые вызовы (_refreshTicketAfterSave) работают не с тем.
-    this.ticket = null;
-    // Дедуп pending в рамках этого mount. См. правку 1.
-    this._appliedPendingUuids = new Set();
+    this.state.clearDraft(); // Вместо this.state.clearDraft();
+    this.state.setMode("view"); // Вместо this.mode = "view"
 
     const container = document.getElementById("ticketDetailsDynamicContainer");
     if (!container) return;
@@ -130,14 +121,15 @@ export class DetailsController {
           o.status === "pending" &&
           (o.offline_uuid === ticketId || o.command_uuid === ticketId),
       );
-
+      // ... (блок offline_ заявок) ...
       if (found) {
-        this.ticket = {
+        const offlineTicket = {
           ...found.payload,
           id: found.offline_uuid || found.command_uuid,
           isOffline: true,
           date: found.created_at,
         };
+        this.state.setServerTicket(offlineTicket, []); // Сохраняем в стейт
         this._renderCard(container);
         return;
       }
@@ -147,24 +139,34 @@ export class DetailsController {
       (t) => String(t.id) === String(ticketId),
     );
     if (!ticket) {
-      ticket = await this._fetchTicketFromServer(ticketId);
+      const result = await ticketRepository.fetchById(this.api, ticketId);
+
+      // Если пока ждали — ушли на другую страницу, abort.
       if (isStale()) return;
       if (this.currentTicketId !== ticketId) return;
-    }
 
-    if (!ticket) {
-      if (this._lastFetchError === "network") {
-        this._renderNetworkError(container, ticketId);
-      } else if (this._lastFetchError === "not_found") {
-        this._render404(container, ticketId);
+      if (!result.ok) {
+        if (result.errorType === "not_found") {
+          render404(container, ticketId, {
+            onBack: () => this.router.navigate("#/"),
+          });
+        } else if (result.errorType === "network") {
+          renderNetworkError(container, ticketId, {
+            onRetry: () => this.mount(ticketId, combinedTicketsArray),
+            onBack: () => this.router.navigate("#/"),
+          });
+        }
+        // Если aborted — просто ничего не делаем
+        return;
       }
-      return;
+
+      ticket = result.data;
     }
 
     // Shallow-копия + копия note-массива. Без этого _applyPendingToTicket
     // мутирует объект внутри combinedTicketsArray (общий), и при повторном
     // открытии карточки details/note дублируются.
-    this.ticket = normalizeTicketFields({
+    this._serverTicket = normalizeTicketFields({
       ...ticket,
       note: Array.isArray(ticket.note)
         ? [...ticket.note]
@@ -184,8 +186,10 @@ export class DetailsController {
       this._sourceIdx = -1;
     }
 
-    await this._applyPendingToTicket();
+    const cmds = await outboxQueue.getPendingByTicket(ticketId);
     if (isStale()) return;
+    this.state.setServerTicket(this._serverTicket, cmds);
+
     this._renderCard(container);
   }
   /**
@@ -221,30 +225,18 @@ export class DetailsController {
     const isStale = () => this._mountId !== myMountId;
 
     try {
-      const fresh = await this._fetchTicketFromServer(this.ticket.id);
+      const result = await ticketRepository.fetchById(this.api, this.ticket.id);
       if (isStale() || !this.ticket) return;
-      if (!fresh) return;
+      if (!result.ok) return;
+      const fresh = result.data;
 
-      if (this.mode !== "view") return;
+      if (this.state.mode !== "view") return;
 
       normalizeTicketFields(fresh);
 
-      const protectedKeys = new Set([
-        "type",
-        "isOffline",
-        "note",
-        "_pendingStaff",
-        "_pendingNotify",
-        "_pendingRepair",
-        "_pendingDetails",
-        "_pendingClose",
-      ]);
-      for (const [key, value] of Object.entries(fresh)) {
-        if (protectedKeys.has(key)) continue;
-        this.ticket[key] = value;
-      }
+      this.state.setServerTicket(fresh, this.state.pendingCommands);
 
-      if (isStale() || !this.ticket || this.mode !== "view") return;
+      if (isStale() || !this.ticket || this.state.mode !== "view") return;
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
@@ -273,169 +265,10 @@ export class DetailsController {
    * При ошибке (сеть/сервер) сохраняет this._lastFetchError = 'network'
    * (не 'not_found'), чтобы mount мог отличить 404 от сбоя.
    */
-  async _fetchTicketFromServer(ticketId) {
-    this._lastFetchError = null;
-    try {
-      const resp = await this.api.post(
-        { data: "ticket", call_id: ticketId },
-        "Загрузка карточки №" + ticketId + "...",
-        // Тег только на чтение. Записи (callClose/calledit/callnote)
-        // идут под 'details-write' и НЕ отменяются при уходе со страницы —
-        // сервер мог уже применить мутацию, отмена оставит UI в неведении.
-        "details-read",
-      );
-      if (!resp) {
-        this._lastFetchError = "network";
-        return null;
-      }
-
-      // Отмена по abortTag('details') при уходе со страницы — тихо.
-      // isStale() в mount отсечёт результат.
-      if (resp.code === "aborted") return null;
-
-      if (resp.status === "error") {
-        console.warn(
-          "[DetailsController] Ошибка загрузки заявки:",
-          resp.code,
-          resp.message,
-        );
-        this._lastFetchError = "network";
-        return null;
-      }
-
-      if (resp.status !== "ok") {
-        this._lastFetchError = "network";
-        return null;
-      }
-
-      // Согласовано: { status: 'ok', data: null } = not_found
-      const ticket = resp.data;
-      if (!ticket) {
-        this._lastFetchError = "not_found";
-        return null;
-      }
-
-      // Унифицируем type. Сервер может вернуть call_status (0/1)
-      // либо уже готовое type ('open'/'close').
-      if (!ticket.type) {
-        const isClosed = Number(ticket.call_status) === 1;
-        ticket.type = isClosed ? "close" : "open";
-      }
-
-      return ticket;
-    } catch (err) {
-      console.error("[DetailsController] Ошибка загрузки с сервера:", err);
-      this._lastFetchError = "network";
-      return null;
-    }
+  get ticket() {
+    return this.state.getDisplayTicket(staffStore.list);
   }
 
-  async _applyPendingToTicket() {
-    this._pendingCommands = [];
-    if (!this.ticket || !this.ticket.id || this.ticket.isOffline) return;
-    if (String(this.ticket.id).startsWith("offline_")) return;
-
-    const cmds = await outboxQueue.getPendingByTicket(this.ticket.id);
-    if (!this.ticket) return;
-    this._pendingCommands = cmds;
-
-    // Оборачиваем note в массив один раз, до цикла.
-    if (!Array.isArray(this.ticket.note)) {
-      this.ticket.note = this.ticket.note
-        ? Object.values(this.ticket.note)
-        : [];
-    }
-
-    for (const cmd of cmds) {
-      // Дедуп: не применяем одну команду повторно (повторный mount
-      // или _saveEditOffline → _applyPendingToTicket).
-      if (this._appliedPendingUuids.has(cmd.command_uuid)) continue;
-
-      const p = cmd.payload || {};
-
-      if (cmd.command_type === "EditTicket") {
-        // Применяем и помечаем — только если условие сработало.
-        // Если staff уже назначен другим — не помечаем, оставляем
-        // шанс другой команде (Soft Merge на сервере всё равно решит).
-        let applied = false;
-
-        if (p.staff_id != null && !this.ticket.staff_id) {
-          this.ticket.staff_id = Number(p.staff_id);
-          this.ticket.staff_name = staffStore.getById(p.staff_id)?.name || null;
-          this.ticket._pendingStaff = true;
-          applied = true;
-        }
-        if (p.notify_status != null && !this.ticket.notify_status) {
-          this.ticket.notify_status = Number(p.notify_status);
-          this.ticket.notify_date = cmd.created_at;
-          this.ticket._pendingNotify = true;
-          applied = true;
-        }
-        if (p.repair_time != null && !this.ticket.repair_time) {
-          this.ticket.repair_time = Number(p.repair_time);
-          this.ticket._pendingRepair = true;
-          applied = true;
-        }
-        if (p.details) {
-          this.ticket.details =
-            (this.ticket.details || "") +
-            (this.ticket.details ? "\n\n" : "") +
-            p.details;
-          this.ticket._pendingDetails = true;
-          applied = true;
-        }
-        if (applied) this._appliedPendingUuids.add(cmd.command_uuid);
-      } else if (cmd.command_type === "AddComment") {
-        this.ticket.note.push({
-          id: "pending_" + cmd.command_uuid,
-          user: cmd.offline_author_name || "Вы",
-          body: p.text || "",
-          date: cmd.created_at,
-          type: 0,
-          _pending: true,
-        });
-        this.ticket.note_num = (this.ticket.note_num || 0) + 1;
-        this._appliedPendingUuids.add(cmd.command_uuid);
-      } else if (cmd.command_type === "CloseTicket") {
-        this.ticket._pendingClose = {
-          solution: p.solution || "",
-          close_date: cmd.created_at,
-          close_name: cmd.offline_author_name || "—",
-          command_uuid: cmd.command_uuid,
-        };
-        this._appliedPendingUuids.add(cmd.command_uuid);
-      }
-    }
-  }
-
-  _getTicketSnapshotKeys() {
-    return [
-      "details",
-      "repair_time",
-      "department_id",
-      "department",
-      "request_id",
-      "request",
-      "group_id",
-      "group",
-      "solution",
-      "staff_id",
-      "staff_name",
-      "staff_phone",
-      "notify_status",
-      "notify_date",
-      "staff_id2",
-      "staff_name2",
-      "staff_phone2",
-      "notify_status2",
-      "notify_date2",
-      "staff_id3",
-      "staff_name3",
-      "staff_phone3",
-      "notify_status3",
-      "notify_date3",
-    ];
-  }
   /**
    * Обновить элемент в combinedTicketsArray, чтобы журнал при возврате
    * показал актуальные данные без ожидания polling.
@@ -445,16 +278,7 @@ export class DetailsController {
     if (!this.ticket) return;
     this._sourceArray[this._sourceIdx] = { ...this.ticket };
   }
-  _render404(container, ticketId) {
-    container.innerHTML = `
-            <div class="error-card" style="padding: 2rem; text-align: center; background: var(--bg-secondary); border: 2px solid var(--border-color); border-radius: 12px; max-width: 500px; margin: 2rem auto;">
-                <h2 style="color: #ef4444;">Инцидент №${escapeHtml(ticketId)} не найден</h2>
-                <p style="color: var(--text-secondary); margin: 1rem 0;">Возможно, заявка удалена или введён неверный номер.</p>
-                <button class="menu-item active" id="backToTableBtn" style="border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer;">Вернуться в журнал</button>
-            </div>`;
-    const btn = document.getElementById("backToTableBtn");
-    if (btn) btn.onclick = () => this.router.navigate("#/");
-  }
+
   /**
    * Экран «сбой сети» — отличается от 404 (заявка не существует).
    * Показывает кнопки «Повторить» и «Вернуться в журнал».
@@ -462,30 +286,7 @@ export class DetailsController {
    * _lastFetchError === 'network' (таймаут, сервер 5xx,
    * invalid_response).
    */
-  _renderNetworkError(container, ticketId) {
-    container.innerHTML = `
-            <div class="error-card" style="padding: 2rem; text-align: center; background: var(--bg-secondary); border: 2px solid #f59e0b; border-radius: 12px; max-width: 500px; margin: 2rem auto;">
-                <h2 style="color: #d97706;">Не удалось загрузить заявку №${escapeHtml(ticketId)}</h2>
-                <p style="color: var(--text-secondary); margin: 1rem 0;">Сбой сети или сервер недоступен. Проверьте соединение и попробуйте снова.</p>
-                <div style="display: flex; gap: 8px; justify-content: center;">
-                    <button class="menu-item active" id="retryTicketBtn" style="border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer;">Повторить</button>
-                    <button class="menu-item" id="backToTableBtnNetErr" style="border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; cursor: pointer;">Вернуться в журнал</button>
-                </div>
-            </div>`;
 
-    const retryBtn = document.getElementById("retryTicketBtn");
-    if (retryBtn) {
-      retryBtn.onclick = () => {
-        this._lastFetchError = null;
-        // mount сам вызовет _fetchTicketFromServer повторно
-        this.mount(ticketId);
-      };
-    }
-    const backBtn = document.getElementById("backToTableBtnNetErr");
-    if (backBtn) {
-      backBtn.onclick = () => this.router.navigate("#/");
-    }
-  }
   _renderCard(container) {
     destroyVoiceInput();
     // Полная перерисовка: все DOM-узлы внутри container уничтожаются
@@ -529,7 +330,7 @@ export class DetailsController {
       (userStore.can("close_ticket", { isAssigned }) ||
         Number(t.closureallowed) === 1);
 
-    const pendingList = this._pendingCommands || [];
+    const pendingList = this.state.pendingCommands || [];
     const hasPendingEdit = pendingList.some(
       (c) => c.command_type === "EditTicket",
     );
@@ -807,7 +608,7 @@ export class DetailsController {
 
     const slots = this._getStaffSlots();
     const isOpen = this.ticket.type !== "close";
-    const isEdit = this.mode === "edit";
+    const isEdit = this.state.mode === "edit";
     const isAdmin = userStore.isAdmin();
     const canAssign = isOpen && userStore.can("assign_staff");
     const isSessionLocked = this._staffChangedInSession;
@@ -817,8 +618,8 @@ export class DetailsController {
 
     const filled = slots.map((slot, idx) => {
       const keyId = "staff_id" + (idx === 0 ? "" : idx + 1);
-      if (keyId in this.pendingChanges) {
-        return !!this.pendingChanges[keyId];
+      if (keyId in this.state.draft) {
+        return !!this.state.draft[keyId];
       }
       return !!slot.id;
     });
@@ -921,7 +722,7 @@ export class DetailsController {
     row.appendChild(status);
 
     const keyStaffId = "staff_id" + suffix;
-    const isNewlyAssigned = keyStaffId in this.pendingChanges;
+    const isNewlyAssigned = keyStaffId in this.state.draft;
 
     // ИСПРАВЛЕНО: Синтаксическая ошибка (добавлено продолжение условия)
     // Два состояния:
@@ -957,9 +758,8 @@ export class DetailsController {
           if (!cb.checked) return;
           const keyNotify = "notify_status" + suffix;
           const keyNotifyDate = "notify_date" + suffix;
-          this.pendingChanges[keyNotify] = 1;
-          this.ticket[keyNotify] = 1;
-          this.ticket[keyNotifyDate] = nowTs();
+          this.state.updateDraft(keyNotify, 1);
+          this.state.updateDraft(keyNotifyDate, nowTs());
           this._renderStaffSlots();
           this._updateSaveButtonState();
         };
@@ -1046,15 +846,12 @@ export class DetailsController {
     const keyNotify = "notify_status" + suffix;
     const keyNotifyDate = "notify_date" + suffix;
 
-    this.pendingChanges[keyId] = null;
-    this.pendingChanges[keyNotify] = 0;
+    this.state.updateDraft(keyId, null);
+    this.state.updateDraft(keyName, null);
+    this.state.updateDraft(keyPhone, null);
+    this.state.updateDraft(keyNotify, 0);
+    this.state.updateDraft(keyNotifyDate, null);
     this._staffChangedInSession = true;
-
-    this.ticket[keyId] = null;
-    this.ticket[keyName] = null;
-    this.ticket[keyPhone] = null;
-    this.ticket[keyNotify] = null;
-    this.ticket[keyNotifyDate] = null;
 
     this._renderStaffSlots();
     this._updateSaveButtonState();
@@ -1111,8 +908,7 @@ export class DetailsController {
         const suffix = slotNumber === 1 ? "" : slotNumber;
         const keyId = "staff_id" + suffix;
         const isNewOrReassign =
-          !this.ticket[keyId] || keyId in this.pendingChanges;
-
+          !this.ticket[keyId] || keyId in this.state.draft;
         if (staff && isNewOrReassign) {
           notifyWrap.style.display = "inline-flex";
         } else {
@@ -1139,18 +935,16 @@ export class DetailsController {
       const keyName = "staff_name" + suffix;
 
       const finalId = isNaN(selectedId) ? selectedId : Number(selectedId);
-
-      this.pendingChanges[keyId] = finalId;
+      this.state.updateDraft(keyId, finalId);
+      this.state.updateDraft(
+        keyName,
+        staffStore.getById(selectedId)?.name || null,
+      );
 
       if (notifyCheck.checked) {
-        this.pendingChanges[keyNotify] = 1;
-        this.ticket[keyNotify] = 1;
-        this.ticket[keyNotifyDate] = nowTs();
+        this.state.updateDraft(keyNotify, 1);
+        this.state.updateDraft(keyNotifyDate, nowTs());
       }
-
-      this.ticket[keyId] = finalId;
-      this.ticket[keyName] = staffStore.getById(selectedId)?.name || null;
-
       this._staffChangedInSession = true;
       this._autoOpenPending = false;
 
@@ -1219,12 +1013,8 @@ export class DetailsController {
   }
 
   _enterEditMode() {
-    this.mode = "edit";
-
-    this._ticketSnapshot = {};
-    this._getTicketSnapshotKeys().forEach((k) => {
-      this._ticketSnapshot[k] = this.ticket[k] ?? null;
-    });
+    this.state.setMode("edit");
+    this.state.clearDraft(); // Начинаем с чистого листа
 
     this._staffChangedInSession = false;
     this._autoOpenPending = this.ticket.staff_id == null;
@@ -1289,9 +1079,9 @@ export class DetailsController {
             required: true,
             onChange: (value) => {
               if (value) {
-                this.pendingChanges[rule.idField] = String(value);
+                this.state.updateDraft(rule.idField, String(value));
               } else {
-                delete this.pendingChanges[rule.idField];
+                this.state.deleteDraft(rule.idField);
               }
               this._updateSaveButtonState();
             },
@@ -1312,7 +1102,7 @@ export class DetailsController {
           this.repairPicker = createRepairTimePicker({
             initialValue: this.ticket.repair_time,
             onChange: (value) => {
-              this.pendingChanges.repair_time = value;
+              this.state.updateDraft("repair_time", value);
               this._updateSaveButtonState();
             },
           });
@@ -1326,7 +1116,7 @@ export class DetailsController {
   }
 
   _enterCloseMode() {
-    this.mode = "close";
+    this.state.setMode("close");
 
     const bodyBlock = document.getElementById("ticketBodyBlock");
     if (bodyBlock) bodyBlock.style.display = "none";
@@ -1356,15 +1146,8 @@ export class DetailsController {
   _exitEditMode() {
     destroyVoiceInput();
 
-    if (this._ticketSnapshot) {
-      this._getTicketSnapshotKeys().forEach((k) => {
-        this.ticket[k] = this._ticketSnapshot[k];
-      });
-      this._ticketSnapshot = null;
-    }
-
-    this.pendingChanges = {};
-    this.mode = "view";
+    this.state.clearDraft();
+    this.state.setMode("view");
     this._staffChangedInSession = false;
     this._autoOpenPending = false;
 
@@ -1458,16 +1241,16 @@ export class DetailsController {
     if (!text || CAPS_REGEX.test(text)) return;
 
     // Сервер append-only: отправляем ТОЛЬКО новый текст, склеит сам
-    const existing = this.pendingChanges.details || "";
+    const existing = this.state.draft.details || "";
     const separator = existing ? "\n\n" : "";
-    this.pendingChanges.details =
-      existing + separator + "📝 Дополнение: " + text;
+    const newDraftDetails = existing + separator + "📝 Дополнение: " + text;
+    this.state.updateDraft("details", newDraftDetails);
 
     const display = document.getElementById("detailsDisplay");
     if (display) {
       const base = this.ticket.details || "";
       const sep = base ? "\n\n" : "";
-      display.textContent = base + sep + this.pendingChanges.details;
+      display.textContent = base + sep + newDraftDetails;
     }
 
     input.value = "";
@@ -1493,7 +1276,7 @@ export class DetailsController {
     const $ = (id) => document.getElementById(id);
     let enabled = false;
 
-    if (this.mode === "edit") {
+    if (this.state.mode === "edit") {
       const newDetails = $("newDetailsInput");
       const typed = newDetails ? newDetails.value.trim() : "";
       const hasUncommittedDetails = typed.length > 0 && !CAPS_REGEX.test(typed);
@@ -1502,14 +1285,13 @@ export class DetailsController {
       // изменения ИЛИ в newDetailsInput набран валидный текст без
       // нажатия «+ Добавить описание». _onSave подхватит его сам.
       enabled =
-        Object.keys(this.pendingChanges).length > 0 || hasUncommittedDetails;
-
+        Object.keys(this.state.draft).length > 0 || hasUncommittedDetails;
       if (newDetails && CAPS_REGEX.test(newDetails.value)) enabled = false;
       if (this.repairPicker && !this.repairPicker.isValid()) enabled = false;
       if (this.deptSelect && !this.deptSelect.isValid()) enabled = false;
       if (this.reqSelect && !this.reqSelect.isValid()) enabled = false;
       if (this.groupSelect && !this.groupSelect.isValid()) enabled = false;
-    } else if (this.mode === "close") {
+    } else if (this.state.mode === "close") {
       const sol = $("solutionInput");
       const len = sol ? sol.value.trim().length : 0;
       enabled = len >= MIN_SOLUTION_LEN && !CAPS_REGEX.test(sol.value);
@@ -1573,7 +1355,7 @@ export class DetailsController {
   }
 
   async _onSave() {
-    if (this.mode === "edit" && Object.keys(this.pendingChanges).length === 0) {
+    if (this.state.mode === "edit" && !this.state.hasDraftChanges()) {
       // Не сохраняем пустые изменения, но проверяем несохранённый
       // текст в newDetailsInput — если он валиден, добавим в pending
       // и продолжим (иначе пользователь молча теряет ввод).
@@ -1582,13 +1364,13 @@ export class DetailsController {
       if (typed && !CAPS_REGEX.test(typed)) {
         this._onAddDescription();
       }
-      if (Object.keys(this.pendingChanges).length === 0) return;
+      if (!this.state.hasDraftChanges()) return;
     }
 
     // Перед сохранением забираем необработанный текст из newDetailsInput.
     // Раньше пользователь, набравший описание и не нажавший
     // «+ Добавить описание», терял его при «Сохранить».
-    if (this.mode === "edit") {
+    if (this.state.mode === "edit") {
       const newDetailsEl = document.getElementById("newDetailsInput");
       const typed = newDetailsEl ? newDetailsEl.value.trim() : "";
       if (typed && !CAPS_REGEX.test(typed)) {
@@ -1597,11 +1379,11 @@ export class DetailsController {
     }
 
     if (!navigator.onLine) {
-      if (this.mode === "edit") {
+      if (this.state.mode === "edit") {
         await this._saveEditOffline();
         return;
       }
-      if (this.mode === "close") {
+      if (this.state.mode === "close") {
         await this._saveCloseOffline();
         return;
       }
@@ -1612,32 +1394,29 @@ export class DetailsController {
     if (ticketId == null) return;
 
     let payload;
-
-    if (this.mode === "close") {
-      const sol = document.getElementById("solutionInput");
-      const solutionText = sol ? sol.value.trim() : "";
-      const user = userStore.userId || authStore.getUser()?.id || 0;
-
-      payload = {
-        action: "callClose",
-        call_id: ticketId,
-        solution: solutionText,
-        user_id: user,
-      };
-    } else {
-      payload = {
-        action: "calledit",
-        call_id: ticketId,
-        ...this.pendingChanges,
-      };
-    }
-
+    let response;
     this._lockCard();
     this._setSaveBtnState("loading");
 
     try {
-      const response = await this.api.post(payload, "", "details-write");
-
+      if (this.state.mode === "close") {
+        const solutionText =
+          document.getElementById("solutionInput")?.value.trim() || "";
+        const user = userStore.userId || authStore.getUser()?.id || 0;
+        response = await ticketRepository.saveClose(
+          this.api,
+          ticketId,
+          solutionText,
+          user,
+        );
+      } else {
+        response = await ticketRepository.saveEdit(
+          this.api,
+          ticketId,
+          this.state.draft,
+        );
+      }
+      // ... далее идет существующая проверка if (!this.ticket || this.ticket.id !== ticketId) return; ...
       // Если unmount уже отработал — this.ticket === null.
       // Тихо выходим, ничего не уведомляем: сервер уже мог сохранить.
       if (!this.ticket || this.ticket.id !== ticketId) return;
@@ -1646,7 +1425,7 @@ export class DetailsController {
         response &&
         (response.code === "network_error" || response.offline === true)
       ) {
-        if (this.mode === "close") {
+        if (this.state.mode === "close") {
           const ok = await this._saveCloseOffline();
           if (!ok && this.ticket && this.ticket.id === ticketId) {
             this._unlockCard();
@@ -1664,9 +1443,8 @@ export class DetailsController {
 
         this._staffChangedInSession = false;
         this._autoOpenPending = false;
-        this._ticketSnapshot = null;
 
-        if (this.mode === "close") {
+        if (this.state.mode === "close") {
           const closeAndCreateCheck = document.getElementById(
             "closeAndCreateCheck",
           );
@@ -1697,31 +1475,20 @@ export class DetailsController {
           } else {
             this.autoReturnTimer = setTimeout(() => {
               if (!this.ticket) return;
-              if (this.mode !== "view") return;
+              if (this.state.mode !== "view") return;
               if (window.location.hash.startsWith("#/ticket/")) {
                 this.router.navigate("#/closed");
               }
             }, AUTO_RETURN_MS);
           }
         } else {
-          // Оптимистично применяем дельту описания к this.ticket
-          // ДО _exitEditMode: он отрендерит это значение в #detailsDisplay,
-          // и даже если _refreshTicketAfterSave упадёт — пользователь
-          // увидит свой текст, а не откат snapshot.
-          if (this.pendingChanges.details) {
-            this.ticket.details =
-              (this.ticket.details || "") +
-              (this.ticket.details ? "\n\n" : "") +
-              this.pendingChanges.details;
-          }
-
           this._syncSourceArray();
           this._refreshTicketAfterSave();
           this._exitEditMode();
 
           this.autoReturnTimer = setTimeout(() => {
             if (!this.ticket) return;
-            if (this.mode !== "view") return;
+            if (this.state.mode !== "view") return;
             if (window.location.hash.startsWith("#/ticket/")) {
               this.router.navigate(
                 this.ticket.type === "close" ? "#/closed" : "#/",
@@ -2006,21 +1773,14 @@ export class DetailsController {
       }
     }
 
-    const payload = {
-      action: "callnote",
-      call_id: ticketId,
-      note: text,
-    };
-    if (photoBase64) payload.photo_base64 = photoBase64;
-
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "Отправка...";
-      btn.style.opacity = "0.7";
-    }
-
+    // ...
     try {
-      const response = await this.api.post(payload, "", "details-write");
+      const response = await ticketRepository.addNote(
+        this.api,
+        ticketId,
+        text,
+        photoBase64,
+      );
 
       if (!this.ticket || this.ticket.id !== ticketId) return;
 
@@ -2108,7 +1868,8 @@ export class DetailsController {
       );
 
       if (!this.ticket || this.ticket.id !== ticketId) return;
-      await this._applyPendingToTicket();
+      const cmds = await outboxQueue.getPendingByTicket(ticketId);
+      this.state.setPendingCommands(cmds);
       if (!this.ticket || this.ticket.id !== ticketId) return;
 
       // Не _renderCard: при mode='edit'/'close' полная перерисовка
@@ -2131,31 +1892,31 @@ export class DetailsController {
 
     const patch = {};
 
-    if (this.pendingChanges.details) {
-      patch.details = this.pendingChanges.details;
+    if (this.state.draft.details) {
+      patch.details = this.state.draft.details;
     }
-    if (this.pendingChanges.staff_id != null) {
+    if (this.state.draft.staff_id != null) {
       if (!this.ticket.staff_id) {
-        patch.staff_id = this.pendingChanges.staff_id;
+        patch.staff_id = this.state.draft.staff_id;
       } else {
         notify.warning(
           "Ответственный уже назначен — изменение не будет синхронизировано офлайн.",
         );
       }
     }
-    if (this.pendingChanges.notify_status != null) {
+    if (this.state.draft.notify_status != null) {
       const currentStatus = this.ticket.notify_status;
       if (!currentStatus) {
-        patch.notify_status = this.pendingChanges.notify_status;
+        patch.notify_status = this.state.draft.notify_status;
       } else {
         notify.warning(
           "Статус уведомления уже установлен — изменение не будет синхронизировано офлайн.",
         );
       }
     }
-    if (this.pendingChanges.repair_time != null) {
+    if (this.state.draft.repair_time != null) {
       if (!this.ticket.repair_time) {
-        patch.repair_time = this.pendingChanges.repair_time;
+        patch.repair_time = this.state.draft.repair_time;
       } else {
         notify.warning(
           "Время ремонта уже установлено — изменение не будет синхронизировано офлайн.",
@@ -2177,14 +1938,14 @@ export class DetailsController {
         "Изменения сохранены. Будут синхронизированы при восстановлении сети.",
       );
 
-      this._ticketSnapshot = null;
       this._staffChangedInSession = false;
       this._autoOpenPending = false;
-      this.pendingChanges = {};
-      this.mode = "view";
+      this.state.clearDraft();
+      this.state.setMode("view");
 
       if (!this.ticket || this.ticket.id !== ticketId) return true;
-      await this._applyPendingToTicket();
+      const cmds = await outboxQueue.getPendingByTicket(ticketId);
+      this.state.setPendingCommands(cmds);
       if (!this.ticket || this.ticket.id !== ticketId) return true;
 
       const container = document.getElementById(
@@ -2217,11 +1978,12 @@ export class DetailsController {
         "Заявка закрыта. Будет синхронизирована при восстановлении сети.",
       );
 
-      this.pendingChanges = {};
-      this.mode = "view";
+      this.state.clearDraft();
+      this.state.setMode("view");
 
       if (!this.ticket || this.ticket.id !== ticketId) return true;
-      await this._applyPendingToTicket();
+      const cmds = await outboxQueue.getPendingByTicket(ticketId);
+      this.state.setPendingCommands(cmds);
       if (!this.ticket || this.ticket.id !== ticketId) return true;
 
       const container = document.getElementById(
@@ -2262,26 +2024,16 @@ export class DetailsController {
     this._mountId++;
     this._staffChangedInSession = false;
     this._autoOpenPending = false;
-    this._pendingCommands = [];
-    if (this.ticket) {
-      delete this.ticket._pendingClose;
-      delete this.ticket._pendingStaff;
-      delete this.ticket._pendingNotify;
-      delete this.ticket._pendingRepair;
-      delete this.ticket._pendingDetails;
-    }
+
+    this.state.clearDraft();
+    this.state.setMode("view");
+    this.state.setServerTicket(null);
+
     destroyVoiceInput();
     this._unlockCard();
     // Отменяем только чтение. Записи (callClose/calledit/callnote)
     // не должны отменяться — сервер мог уже применить операцию.
     this.api.abortTag("details-read");
-
-    if (this._ticketSnapshot && this.ticket) {
-      this._getTicketSnapshotKeys().forEach((k) => {
-        this.ticket[k] = this._ticketSnapshot[k];
-      });
-      this._ticketSnapshot = null;
-    }
 
     [
       "currentStaffSelect",
@@ -2304,9 +2056,7 @@ export class DetailsController {
     this._revokePreviewBlob();
     this.noteField = null;
     this.noteSubmitBtn = null;
-    this.pendingChanges = {};
-    this.mode = "view";
-    this.ticket = null;
+
     this.currentTicketId = null;
     this._sourceArray = null;
     this._sourceIdx = -1;
