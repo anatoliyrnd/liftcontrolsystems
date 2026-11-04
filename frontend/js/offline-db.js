@@ -296,6 +296,36 @@ class OfflineDB {
     await db.clear("outbox");
   }
 
+  /**
+   * Удаляет failed-команды старше `maxAgeDays`.
+   *
+   * Вызывается при старте SPA (main.js). Без этого outbox
+   * растёт бесконечно: SyncManager ставит status='failed' после
+   * MAX_RETRIES=5, и команда висит в статусе failed навсегда,
+   * замедляя getAllPending() и засоряя UI-бейджи.
+   *
+   * @param {number} [maxAgeDays=7]
+   * @returns {Promise<number>} количество удалённых записей
+   */
+  async cleanupFailed(maxAgeDays = 7) {
+    const db = await this.dbPromise;
+    const cutoff = Math.floor(Date.now() / 1000) - maxAgeDays * 24 * 60 * 60;
+    const tx = db.transaction("outbox", "readwrite");
+    const store = tx.objectStore("outbox");
+    const index = store.index("status");
+
+    let removed = 0;
+    let cursor = await index.openCursor(IDBKeyRange.only("failed"));
+    while (cursor) {
+      if (cursor.value.created_at < cutoff) {
+        cursor.delete();
+        removed++;
+      }
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+    return removed;
+  }
   // =========================================================================
   // Outbox — SHIM (старый API, до Фаз 1–3)
   // =========================================================================

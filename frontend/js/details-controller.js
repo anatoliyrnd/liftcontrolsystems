@@ -1865,6 +1865,9 @@ export class DetailsController {
 
     container.innerHTML = "";
 
+    // Сброс предыдущего blob URL при перерисовке композера
+    this._revokePreviewBlob();
+
     this.noteField = createValidatedTextarea({
       placeholder: "Введите комментарий к заявке...",
       rows: 3,
@@ -1880,9 +1883,6 @@ export class DetailsController {
       },
     });
 
-    // --- Фото: только онлайн, только с диска, без камеры ---
-    // Офлайн: input скрыт + кнопка disabled с tooltip.
-    // См. OFFLINE_PROTOCOL.md v3.0, разд. 15.1.
     const isOnline = navigator.onLine;
 
     const photoInput = document.createElement("input");
@@ -1913,9 +1913,9 @@ export class DetailsController {
     photoClearBtn.style.cssText =
       "padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary); cursor: pointer; font-size: 16px; line-height: 1;";
     photoClearBtn.onclick = () => {
+      this._revokePreviewBlob();
       photoInput.value = "";
       photoPreview.style.display = "none";
-      photoPreviewImg.src = "";
     };
 
     photoPreview.appendChild(photoPreviewImg);
@@ -1923,16 +1923,34 @@ export class DetailsController {
     photoPreview.appendChild(photoClearBtn);
 
     photoInput.onchange = () => {
+      // Освобождаем предыдущий URL ДО создания нового
+      this._revokePreviewBlob();
+
       const file = photoInput.files && photoInput.files[0];
       if (!file) {
         photoPreview.style.display = "none";
         return;
       }
+
       photoPreviewName.textContent =
         file.name + " (" + Math.round(file.size / 1024) + " КБ)";
+
       const url = URL.createObjectURL(file);
+      this._previewBlobUrl = url;
+
+      photoPreviewImg.onload = () => {
+        // Превью загружено — URL больше не нужен для декодирования,
+        // но оставляем живым пока превью отображается.
+        // Очистка произойдёт при замене/unmount/ошибке.
+      };
+
+      photoPreviewImg.onerror = () => {
+        // Ошибка загрузки — освобождаем немедленно
+        this._revokePreviewBlob();
+        photoPreview.style.display = "none";
+      };
+
       photoPreviewImg.src = url;
-      photoPreviewImg.onload = () => URL.revokeObjectURL(url);
       photoPreview.style.display = "flex";
     };
 
@@ -1966,6 +1984,16 @@ export class DetailsController {
     container.appendChild(submitBtn);
   }
 
+  /**
+   * Безопасное освобождение blob URL превью фото.
+   * Вызывается при: замене файла, ошибке загрузки, очистке, unmount.
+   */
+  _revokePreviewBlob() {
+    if (this._previewBlobUrl) {
+      URL.revokeObjectURL(this._previewBlobUrl);
+      this._previewBlobUrl = null;
+    }
+  }
   async _onAddNote() {
     const text = this.noteField ? this.noteField.getValue() : "";
     if (!text) return;
@@ -2284,6 +2312,7 @@ export class DetailsController {
     if (this.noteField && typeof this.noteField.destroy === "function") {
       this.noteField.destroy();
     }
+    this._revokePreviewBlob();
     this.noteField = null;
     this.noteSubmitBtn = null;
     this.pendingChanges = {};

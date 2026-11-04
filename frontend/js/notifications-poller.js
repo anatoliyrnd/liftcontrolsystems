@@ -14,7 +14,7 @@ import { staffStore } from "./staff-store.js";
 import { dictStore } from "./dict-store.js";
 import { API, BUSINESS, SYNC } from "./config.js";
 import { escapeHtml } from "./utils/escape-html.js";
-
+import { withIdbWriteLock } from "./utils/idb-write-lock.js";
 const STORAGE_KEY = API.NOTIFICATIONS_STORAGE_KEY;
 const POLL_INTERVAL_MS = API.NOTIFICATIONS_POLL_MS;
 const TYPE_MAP = BUSINESS.EVENT_TOAST_TYPE;
@@ -60,21 +60,24 @@ export class NotificationsPoller {
       const events = Array.isArray(response.notifications)
         ? response.notifications
         : [];
-      const newLastId = parseInt(response.last_id, 10);
 
-      if (!isNaN(newLastId) && newLastId > sinceId) {
-        this._saveLastId(newLastId);
-      }
-
-      // Сервер отдал свежие версии — сохраняем
-      if (response.versions && typeof response.versions === "object") {
-        this._saveVersions(response.versions);
-      }
-
-      // Справочники, которые сервер отметил устаревшими
-      if (Array.isArray(response.outdated) && response.outdated.length > 0) {
-        this._refreshStores(response.outdated);
-      }
+      // Запись last_id/versions идёт в localStorage, но оборачиваем
+      // в withIdbWriteLock вместе с _refreshStores ниже — это одна
+      // логическая серия, и если SyncManager в этот момент пишет
+      // в config (pendingBatchId), poller не должен проскочить
+      // вперёд и сохранить «устаревший» last_id после sync-операции.
+      await withIdbWriteLock(async () => {
+        const newLastId = parseInt(response.last_id, 10);
+        if (!isNaN(newLastId) && newLastId > sinceId) {
+          this._saveLastId(newLastId);
+        }
+        if (response.versions && typeof response.versions === "object") {
+          this._saveVersions(response.versions);
+        }
+        if (Array.isArray(response.outdated) && response.outdated.length > 0) {
+          await this._refreshStores(response.outdated);
+        }
+      });
 
       // Требуется полная перезагрузка
       if (response.force_reload === true) {

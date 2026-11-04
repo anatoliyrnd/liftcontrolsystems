@@ -241,7 +241,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     await initAuthorizedApp();
   }
 
-  // 5. Обработчики шапки
   const userProfileBtn = document.getElementById("userProfileBtn");
   const userDropdown = document.getElementById("userDropdown");
   const userProfileWrapper = document.getElementById("userProfileWrapper");
@@ -266,8 +265,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       await api.logout();
       authStore.clear();
 
-      openTicketsArray.length = 0;
-      closedTicketsArray.length = 0;
+      openTicketsArray.splice(0, openTicketsArray.length);
+      closedTicketsArray.splice(0, closedTicketsArray.length);
 
       syncAuthUI();
       logHistoryAction("Вы вышли из системы");
@@ -338,8 +337,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     api,
     router,
     (newTickets) => {
-      openTicketsArray.length = 0;
-      openTicketsArray.push(...newTickets);
+      // Атомарная замена: синхронный splice вместо .length=0 + .push.
+      // Иначе между двумя операциями массив пуст — параллельный
+      // рендер (detailsCtrl.mount) увидит пустоту.
+      openTicketsArray.splice(0, openTicketsArray.length, ...newTickets);
       if (window.location.hash === "#/" || window.location.hash === "") {
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       }
@@ -356,7 +357,33 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (navigator.onLine) {
     setTimeout(() => syncManager.startSync(), 1000);
   }
+  // Явно публикуем инстанс в window для внешних проверок
+  window.syncManagerInstance = syncManager;
+  const runFailedCleanup = () => {
+    // Если SyncManager ещё не создан или сейчас синхронизирует —
+    // откладываем на 60 сек. При старте менеджер создаётся позже,
+    // поэтому первый вызов почти всегда попадает в retry.
+    // Это защищает от гонки read-write транзакций в IndexedDB.
+    if (window.syncManagerInstance?.isSyncing) {
+      setTimeout(runFailedCleanup, 60_000);
+      return;
+    }
 
+    offlineDB
+      .cleanupFailed(7)
+      .then((removed) => {
+        if (removed > 0) {
+          console.log(`[App] Очищено устаревших failed-команд: ${removed}`);
+          // Обновляем бейдж синхронизации в шапке, если он был красным
+          window.dispatchEvent(new Event("refreshSyncState"));
+        }
+      })
+      .catch((err) => {
+        console.warn("[App] Ошибка очистки failed-команд:", err);
+      });
+  };
+
+  runFailedCleanup();
   // 9. Service Worker & PWA Auto-Update
   const updateSW = registerSW({
     onNeedRefresh() {

@@ -31,7 +31,7 @@ import { withSyncLock } from "./utils/sync-lock.js";
 import { notify } from "./components/notify.js";
 import { logHistoryAction } from "./history-logger.js";
 import { ApiService } from "./api-service.js";
-
+import { withIdbWriteLock } from "./utils/idb-write-lock.js";
 const POLL_INTERVAL_MS = 60_000;
 const NETWORK_RETRY_COOLDOWN_MS = 30_000;
 const AUTH_RETRY_COOLDOWN_MS = 30_000;
@@ -153,7 +153,13 @@ export class SyncManager {
 
     try {
       await withSyncLock(async () => {
-        await this._syncLoop();
+        // Внутривкладочный mutex: пока SyncManager обрабатывает
+        // пачку (updateOutboxCommand + deleteOutboxCommands + config),
+        // NotificationsPoller не полезет в те же stores. Web Locks
+        // выше сериализует вкладки, этот — операции внутри вкладки.
+        await withIdbWriteLock(async () => {
+          await this._syncLoop();
+        });
       });
     } catch (err) {
       console.error("[SyncManager] Ошибка синхронизации:", err);

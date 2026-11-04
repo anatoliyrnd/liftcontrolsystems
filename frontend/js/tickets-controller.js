@@ -49,6 +49,9 @@ export class TicketsController {
     // 🔥 ДОБАВЛЕНО: Защита от повторной подписки и биндинг обработчика
     this._isSubscribedToAddresses = false;
     this._onAddressesUpdated = this._onAddressesUpdated.bind(this);
+    // AbortController для делегированного слушателя кликов по tbody.
+    // Пересоздаётся при каждой _renderTableFull; в unmount() — abort.
+    this._rowClickAbort = null;
   }
 
   async mount(globalTicketsArrayRef) {
@@ -118,8 +121,16 @@ export class TicketsController {
       }
 
       if (fresh) {
-        globalTicketsArrayRef.length = 0;
-        globalTicketsArrayRef.push(...offlineTickets, ...fresh);
+        // Атомарная замена: splice в одном синхронном вызове.
+        // Старый код .length = 0 + .push(...) оставлял массив пустым
+        // между операциями — параллельный detailsCtrl.mount мог
+        // прочитать пустой openTicketsArray.
+        globalTicketsArrayRef.splice(
+          0,
+          globalTicketsArrayRef.length,
+          ...offlineTickets,
+          ...fresh,
+        );
         await offlineDB.saveTickets(this.dataType, fresh);
         if (isStale()) return;
       } else {
@@ -127,8 +138,12 @@ export class TicketsController {
         const cached = await offlineDB.getTickets(this.dataType);
         if (isStale()) return;
         if (cached.length > 0) {
-          globalTicketsArrayRef.length = 0;
-          globalTicketsArrayRef.push(...offlineTickets, ...cached);
+          globalTicketsArrayRef.splice(
+            0,
+            globalTicketsArrayRef.length,
+            ...offlineTickets,
+            ...cached,
+          );
         } else {
           logHistoryAction("Кэш пуст. Нет данных для отображения.");
         }
@@ -209,6 +224,21 @@ export class TicketsController {
       window.removeEventListener("addresses:updated", this._onAddressesUpdated);
       this._isSubscribedToAddresses = false;
     }
+
+    // Снимаем делегированный слушатель кликов. Без этого при переходе
+    // #/ → #/closed → #/ abort не сработает и старый tbody продолжит
+    // держать замыкание на unmount-нутый контроллер.
+    if (this._rowClickAbort) {
+      this._rowClickAbort.abort();
+      this._rowClickAbort = null;
+    }
+
+    // Явно сбрасываем кэш строк и ссылку на глобальный массив.
+    // rowsCache держит DOM-узлы tbody — если не сбросить, старый DOM
+    // живёт до следующего mount (или вообще до сборки мусора при
+    // уходе на #/login).
+    this.rowsCache = [];
+    this._currentTicketsRef = null;
   }
 
   // 🔥 ДОБАВЛЕНО: Обработчик фонового обновления справочника адресов
@@ -386,17 +416,37 @@ export class TicketsController {
     this._refreshRowsCache();
     this._initSearch();
 
-    // Навешиваем клики на строки
-    dataTable.querySelectorAll("tbody tr").forEach((row) => {
-      row.style.cursor = "pointer";
-      row.addEventListener("click", (e) => {
-        if (e.target.classList.contains("resizer")) return;
-        this.unmount();
-        const idCell = row.querySelector('td[data-col-id="id"]');
-        if (!idCell) return;
-        this.router.navigate("#/ticket/" + idCell.textContent);
-      });
-    });
+    // Один делегированный слушатель на tbody вместо N слушателей.
+    //
+    // Раньше было N addEventListener — по одному на каждую строку.
+    // При 500+ заявках и обновлении раз в 20 сек это создавало
+    // 500 × (60/20) × 60 × 8 = ~720k замыканий за 8-часовую смену.
+    // Старые DOM-узлы удалялись, но их замыкания (с row в scope)
+    // держались до GC-цикла.
+    //
+    // AbortController гарантирует снятие предыдущего слушателя при
+    // повторной регистрации (ре-маунт) — иначе они копились бы.
+    if (this._rowClickAbort) this._rowClickAbort.abort();
+    this._rowClickAbort = new AbortController();
+
+    const tbody = dataTable.querySelector("tbody");
+    if (tbody) {
+      tbody.addEventListener(
+        "click",
+        (e) => {
+          // Игнорируем клики по ресайзеру — он есть внутри th, но на
+          // всякий случай.
+          if (e.target.classList.contains("resizer")) return;
+          const row = e.target.closest("tr");
+          if (!row) return;
+          const idCell = row.querySelector('td[data-col-id="id"]');
+          if (!idCell) return;
+          this.unmount();
+          this.router.navigate("#/ticket/" + idCell.textContent);
+        },
+        { signal: this._rowClickAbort.signal },
+      );
+    }
 
     const searchInput = document.getElementById("searchInput");
     if (searchInput && searchInput.value.trim() !== "") {
