@@ -18,6 +18,11 @@ import { nowTs, formatTs } from "./utils/date-utils.js";
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
+import { nowTs, formatTs } from "./utils/date-utils.js";
+import { normalizeTicketFields } from "./details/ticket-normalizer.js";
+import { formatFullHistory } from "./details/history-view.js";
+import { getStatusWord } from "./details/status-word.js";
+
 const CAPS_REGEX = VALIDATION.CAPS_REGEX;
 const MIN_SOLUTION_LEN = VALIDATION.MIN_SOLUTION_LEN;
 const AUTO_RETURN_MS = UI.AUTO_RETURN_MS;
@@ -25,53 +30,12 @@ const ERROR_UNLOCK_MS = UI.ERROR_UNLOCK_MS;
 const NOTIFY_CHANNELS = BUSINESS.NOTIFY_CHANNELS;
 const ACCEPT_CHANNEL = BUSINESS.ACCEPT_CHANNEL;
 
-// Вспомогательный метод для красивого текста статуса (для закрытых заявок)
-function getStatusWord(status) {
-  if (!status) return "не уведомлен";
-  const ch = NOTIFY_CHANNELS[status];
-  if (!ch) return "не уведомлен";
-  return ch
-    .replace(/[^\wа-яё\s]/gi, "")
-    .trim()
-    .toLowerCase();
-}
-/**
- * Рендер full_history как plain text (вариант C из Q13).
- *
- * Блочные теги → \n ДО парсинга, потом textContent → escapeHtml.
- * DOMParser в detached document безопасен: скрипты не выполняются,
- * onerror не срабатывает. escapeHtml обязателен, потому что
- * textContent вернёт `&lt;script&gt;` как `<script>` — без escape
- * это снова стало бы тегом при вставке через innerHTML.
- */
-function formatFullHistory(rawHtml) {
-  if (!rawHtml) return "";
-
-  const withBreaks = String(rawHtml)
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|tr|h[1-6]|blockquote|td|th)>/gi, "\n");
-
-  const doc = new DOMParser().parseFromString(withBreaks, "text/html");
-  let text = doc.body.textContent || "";
-
-  // Заменяем только 10-значные числа в диапазоне реальных дат
-  // (2001-09-09 … 2033-05-18). Иначе телефоны/артикулы 10 цифр
-  // превращаются в «даты».
-  text = text.replace(/\b(\d{10})\b/g, (match) => {
-    const ts = Number(match);
-    if (ts < 1_000_000_000 || ts >= 2_000_000_000) return match;
-    return formatTs(match);
-  });
-  text = text.replace(/\n{3,}/g, "\n\n").trim();
-
-  return escapeHtml(text);
-}
 /**
  * Нормализация числовых полей тикета. Вызывается в mount и в
  * _refreshTicketAfterSave (без неё сервер возвращает "0" строками,
  * и проверки !staff_id / !notify_status дают ложные результаты).
  */
-function normalizeTicketFields(ticket) {
+/* function normalizeTicketFields(ticket) {
   if (!ticket) return ticket;
 
   if (ticket.staff_id != null && ticket.staff_id !== "")
@@ -94,7 +58,7 @@ function normalizeTicketFields(ticket) {
       : null;
 
   return ticket;
-}
+} */
 export class DetailsController {
   constructor(apiInstance, routerInstance) {
     this.api = apiInstance;
@@ -1729,7 +1693,7 @@ export class DetailsController {
                 object_id: this.ticket.object_id || null,
               };
               this.router.navigate("#/create");
-            }, 3000);
+            }, UI.CLOSE_AND_CREATE_REDIRECT_MS);
           } else {
             this.autoReturnTimer = setTimeout(() => {
               if (!this.ticket) return;
@@ -2283,7 +2247,7 @@ export class DetailsController {
             object_id: this.ticket.object_id || null,
           };
           this.router.navigate("#/create");
-        }, 3000);
+        }, UI.CLOSE_AND_CREATE_REDIRECT_MS);
       }
 
       return true;
