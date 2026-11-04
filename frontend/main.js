@@ -193,6 +193,12 @@ async function initAppData() {
 // --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 document.addEventListener("DOMContentLoaded", async () => {
   // 1. Базовая инициализация
+  const savedOrgName = localStorage.getItem("lift_org_name");
+  if (savedOrgName) {
+    const tenantEl = document.getElementById("navTenantName");
+    if (tenantEl) tenantEl.textContent = savedOrgName;
+  }
+
   new ThemeController("themeToggle");
   setNotifyRouter(router);
   syncTableSettingsFromStorage();

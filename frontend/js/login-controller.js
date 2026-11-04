@@ -17,7 +17,22 @@ export class LoginController {
     const datalist = document.getElementById("orgUsersList");
 
     if (!form) return;
-
+    // === ПОЛУЧЕНИЕ ИМЕНИ ОРГАНИЗАЦИИ ПО ПОДДОМЕНУ ===
+    // Вызываем тихо (silent), не блокируя интерфейс.
+    // Если бэкенд вернет ошибку (например, эндпоинт еще не сделан),
+    // просто останется заглушка из HTML или кэша.
+    this.api
+      .post({ data: "tenant_info" }, null, "silent")
+      .then((resp) => {
+        if (resp && resp.status === "ok" && resp.org_name) {
+          localStorage.setItem("lift_org_name", resp.org_name);
+          const tenantEl = document.getElementById("navTenantName");
+          if (tenantEl) tenantEl.textContent = resp.org_name;
+        }
+      })
+      .catch(() => {
+        // Игнорируем ошибки сети, чтобы не спамить в консоль
+      });
     setTimeout(() => nameInput && nameInput.focus(), 50);
 
     // onsubmit привязывается СИНХРОННО, до любого await.

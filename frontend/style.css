@@ -2523,3 +2523,59 @@ td.cell-alert-info {
         max-height: 100% !important;
     }
 }
+/* ==========================================================================
+   Новый логотип (Иконка + Текст + Тенант)
+   ========================================================================== */
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.nav-logo .logo-icon {
+    flex-shrink: 0;
+    /* Обводка и галочка меняют цвет в зависимости от темы (light/dark) */
+    color: var(--text-primary);
+}
+
+.logo-text-group {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    line-height: 1.1;
+}
+
+.logo-title {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.logo-subtitle {
+    font-size: 9px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.logo-tenant {
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-top: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+
+/* Адаптивность: на экранах уже 768px оставляем только иконку */
+@media (max-width: 768px) {
+    .logo-text-group {
+        display: none;
+    }
+}
