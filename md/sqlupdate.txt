@@ -67,3 +67,226 @@ dispatcher	123456	dispatcher	Иванов Иван Иванович	Обычны
 foreman	123456	dispatcher	Петров Пётр Петрович	Прораб
 mechanic	123456	engineer	Сергеенко Сергей Сергеевич	Механик
 guest	guest	guest	Аудитор УК	Только чтение 
+offline
+
+
+
+-- =============================================================================
+-- Миграция 1: Создание таблиц для офлайн-синхронизации
+-- =============================================================================
+
+-- 1.1. offline_sync_log (кэш ответов на уровне пачки, TTL 30 дней)
+CREATE TABLE IF NOT EXISTS `offline_sync_log` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `batch_id` VARCHAR(64) NOT NULL COMMENT 'UUID пачки из запроса',
+  `tenant_id` VARCHAR(32) NOT NULL COMMENT 'Идентификатор тенанта (например, l3)',
+  `user_id` INT(11) NOT NULL COMMENT 'ID пользователя, отправившего пачку',
+  `response_payload` JSON NOT NULL COMMENT 'Полный JSON-ответ сервера для этой пачки',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_batch_id` (`batch_id`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Кэш ответов syncCommands для идемпотентности на уровне пачки';
+
+-- 1.2. offline_command_log (защита от дублей команд, TTL 7 дней)
+CREATE TABLE IF NOT EXISTS `offline_command_log` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `command_uuid` VARCHAR(64) NOT NULL COMMENT 'UUID команды из запроса',
+  `batch_id` VARCHAR(64) NOT NULL COMMENT 'Связь с пачкой',
+  `command_type` VARCHAR(32) NOT NULL COMMENT 'CreateTicket|EditTicket|CloseTicket|AddComment',
+  `status` VARCHAR(32) NOT NULL COMMENT 'success|archived|ignored|failed',
+  `ticket_id` INT(11) DEFAULT NULL COMMENT 'ID заявки после успешного создания',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_command_uuid` (`command_uuid`),
+  KEY `idx_batch_id` (`batch_id`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Лог обработанных команд для intra-batch идемпотентности';
+
+-- 1.3. offline_actions_archive (отброшенные действия, TTL 30 дней)
+CREATE TABLE IF NOT EXISTS `offline_actions_archive` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `command_uuid` VARCHAR(64) NOT NULL,
+  `batch_id` VARCHAR(64) NOT NULL,
+  `command_type` VARCHAR(32) NOT NULL,
+  `reason` VARCHAR(64) NOT NULL COMMENT 'Код ошибки: no_rights, validation_error и т.д.',
+  `message` VARCHAR(500) DEFAULT NULL COMMENT 'Human-readable описание',
+  `payload_snapshot` JSON DEFAULT NULL COMMENT 'Срез payload для отладки',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_command_uuid` (`command_uuid`),
+  KEY `idx_batch_id` (`batch_id`),
+  KEY `idx_reason` (`reason`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Архив отброшенных действий для UI и аналитики ошибок';
+
+-- =============================================================================
+-- Миграция 2: Модификация существующих таблиц
+-- =============================================================================
+
+-- 2.1. Добавление поля `source` в lift_history
+-- Используется процедура для безопасного добавления (IF NOT EXISTS)
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `add_column_if_not_exists`$$
+CREATE PROCEDURE `add_column_if_not_exists`(
+    IN table_name VARCHAR(64),
+    IN column_name VARCHAR(64),
+    IN column_definition VARCHAR(500)
+)
+BEGIN
+    SET @dbname = DATABASE();
+    SET @exists = (
+        SELECT COUNT(*) 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = @dbname 
+          AND TABLE_NAME = table_name 
+          AND COLUMN_NAME = column_name
+    );
+    
+    IF @exists = 0 THEN
+        SET @sql = CONCAT('ALTER TABLE `', table_name, '` ADD COLUMN `', column_name, '` ', column_definition);
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- Применяем к lift_history
+CALL add_column_if_not_exists(
+    'lift_history', 
+    'source', 
+    "VARCHAR(32) NOT NULL DEFAULT 'online' COMMENT 'Источник: online, offline_sync, import'"
+);
+
+-- 2.2. Добавление поля `is_offline` в lift_notes
+CALL add_column_if_not_exists(
+    'lift_notes', 
+    'is_offline', 
+    "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = заметка создана из офлайн-синхронизации'"
+);
+
+-- Очистка вспомогательной процедуры
+DROP PROCEDURE IF EXISTS `add_column_if_not_exists`;
+
+
+-- 2.1. Явное добавление is_offline в lift_notes
+ALTER TABLE `lift_notes` 
+ADD COLUMN IF NOT EXISTS `is_offline` TINYINT(1) NOT NULL DEFAULT 0 
+COMMENT '1 = заметка создана из офлайн-синхронизации';
+
+-- 2.2. Явное добавление source в lift_history
+ALTER TABLE `lift_history` 
+ADD COLUMN IF NOT EXISTS `source` VARCHAR(32) NOT NULL DEFAULT 'online' 
+COMMENT 'Источник: online, offline_sync, import';
+
+-- Миграция 3: Индексы
+
+-- 3.1. Индекс для проверки дублей по объекту
+ALTER TABLE `lift_calls` 
+ADD INDEX IF NOT EXISTS `idx_calls_active_object` (`address_lift`, `call_status`);
+
+-- 3.2. Индекс для офлайн-заметок (ТОЛЬКО после добавления колонки!)
+ALTER TABLE `lift_notes` 
+ADD INDEX IF NOT EXISTS `idx_notes_offline` (`is_offline`, `note_relation`);
+
+
+
+-- =============================================================================
+-- Миграция 3: Индексы для lift_calls
+-- =============================================================================
+
+-- 3.1. idx_calls_active_object — для быстрой проверки дублей при CreateTicket
+-- Проверяем активные заявки (call_status = 0) на конкретный лифт (address_lift)
+-- Используем PROCEDURE для безопасного создания индекса
+
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `add_index_if_not_exists`$$
+CREATE PROCEDURE `add_index_if_not_exists`(
+    IN tbl_name VARCHAR(64),
+    IN idx_name VARCHAR(64),
+    IN idx_definition VARCHAR(500)
+)
+BEGIN
+    SET @dbname = DATABASE();
+    SET @exists = (
+        SELECT COUNT(*) 
+        FROM information_schema.STATISTICS 
+        WHERE TABLE_SCHEMA = @dbname 
+          AND TABLE_NAME = tbl_name 
+          AND INDEX_NAME = idx_name
+    );
+    
+    IF @exists = 0 THEN
+        SET @sql = CONCAT('ALTER TABLE `', tbl_name, '` ADD INDEX `', idx_name, '` (', idx_definition, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- Составной индекс: object_id + status для проверки дублей
+CALL add_index_if_not_exists('lift_calls', 'idx_calls_active_object', '`address_lift`, `call_status`');
+
+-- Индекс для быстрого поиска по offline_uuid (на случай, если UNIQUE недостаточно для некоторых запросов)
+-- Примечание: UNIQUE idx_offline_uuid уже существует в дампе, поэтому этот шаг можно пропустить
+-- CALL add_index_if_not_exists('lift_calls', 'idx_offline_uuid_search', '`offline_uuid`');
+
+-- Индекс для фильтрации по дате создания (ускорение отчетов и выборок)
+CALL add_index_if_not_exists('lift_notes', 'idx_notes_offline', '`is_offline`, `note_relation`');
+
+-- Очистка
+DROP PROCEDURE IF EXISTS `add_index_if_not_exists`;
+
+-- =============================================================================
+-- Миграция 4: Настройка EVENT для очистки таблиц по TTL
+-- Требует: SET GLOBAL event_scheduler = ON;
+-- =============================================================================
+
+-- Убедимся, что event_scheduler включен (обычно настраивается в my.cnf)
+-- SET GLOBAL event_scheduler = ON;
+
+DELIMITER $$
+
+DROP EVENT IF EXISTS `cleanup_offline_tables`$$
+CREATE EVENT IF NOT EXISTS `cleanup_offline_tables`
+ON SCHEDULE EVERY 1 DAY
+STARTS CURRENT_TIMESTAMP
+DO
+BEGIN
+    -- offline_command_log: TTL 7 дней
+    DELETE FROM `offline_command_log` 
+    WHERE `created_at` < NOW() - INTERVAL 7 DAY 
+    LIMIT 10000; -- Пакетное удаление для избежания блокировок
+    
+    -- offline_sync_log: TTL 30 дней
+    DELETE FROM `offline_sync_log` 
+    WHERE `created_at` < NOW() - INTERVAL 30 DAY 
+    LIMIT 10000;
+    
+    -- offline_actions_archive: TTL 30 дней
+    DELETE FROM `offline_actions_archive` 
+    WHERE `created_at` < NOW() - INTERVAL 30 DAY 
+    LIMIT 10000;
+END$$
+
+DELIMITER ;
+
+-- Проверка наличия колонок
+SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE 
+FROM information_schema.COLUMNS 
+WHERE TABLE_SCHEMA = 'zamotaev_l3' 
+  AND (TABLE_NAME = 'lift_notes' AND COLUMN_NAME = 'is_offline')
+   OR (TABLE_NAME = 'lift_history' AND COLUMN_NAME = 'source');
+
+-- Результат должен содержать 2 строки
+  SHOW VARIABLES LIKE 'event_scheduler';
+  -- должен быть on

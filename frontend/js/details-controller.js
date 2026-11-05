@@ -182,7 +182,7 @@ export class DetailsController {
    * Guard _mountId: если пользователь ушёл на другой роут, пока шёл
    * fetch, — не трогаем DOM.
    */
-  async _refreshTicketAfterSave() {
+  async _refreshTicketAfterSave(showSuccess = false) {
     if (!this.ticket) return;
 
     const myMountId = this._mountId;
@@ -197,15 +197,16 @@ export class DetailsController {
       if (this.state.mode !== "view") return;
 
       normalizeTicketFields(fresh);
-
       this.state.setServerTicket(fresh, this.state.pendingCommands);
 
       if (isStale() || !this.ticket || this.state.mode !== "view") return;
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
+
       if (container) {
         this._renderCard(container);
+        if (showSuccess) this._applySuccessUI(); // <--- ДОБАВЛЕНО
       }
       this._syncSourceArray();
     } catch (err) {
@@ -517,6 +518,20 @@ export class DetailsController {
 
     document.getElementById("closeBlock").style.display = "block";
 
+    // --- Управление кнопками ---
+    const editBtn = document.getElementById("editBtn");
+    if (editBtn) editBtn.style.display = "none";
+
+    const closeBtn = document.getElementById("closeBtn");
+    if (closeBtn) closeBtn.style.display = "none";
+
+    const saveBtn = document.getElementById("saveBtn");
+    if (saveBtn) saveBtn.hidden = false;
+
+    const cancelEditBtn = document.getElementById("cancelEditBtn");
+    if (cancelEditBtn) cancelEditBtn.style.display = "block";
+    // ----------------------------
+
     this.closeForm = createCloseForm({
       onChange: () => this._updateSaveButtonState(),
     });
@@ -578,7 +593,23 @@ export class DetailsController {
       this._updateSaveButtonState();
     }
   }
+  _applySuccessUI() {
+    const editBtn = document.getElementById("editBtn");
+    if (editBtn) editBtn.style.display = "none";
 
+    const closeBtn = document.getElementById("closeBtn");
+    if (closeBtn) closeBtn.style.display = "none";
+
+    const cancelEditBtn = document.getElementById("cancelEditBtn");
+    if (cancelEditBtn) cancelEditBtn.style.display = "none";
+
+    const saveBtn = document.getElementById("saveBtn");
+    if (saveBtn) {
+      saveBtn.hidden = false;
+      saveBtn.style.display = "block";
+      this._setSaveBtnState("success"); // Делает кнопку зелёной галочкой
+    }
+  }
   _lockCard() {
     const grid = document.querySelector(".ticket-card-layout-grid");
     if (grid) grid.classList.add("card-locked");
@@ -594,7 +625,6 @@ export class DetailsController {
   async _onSave() {
     if (this.state.mode === "edit" && !this.state.hasDraftChanges()) {
       if (this.editForm && this.editForm.hasUncommittedDetails()) {
-        // Нажимаем на кнопку "Добавить" программно
         const addBtn = document.getElementById("addDetailsBtn");
         if (addBtn) addBtn.click();
       }
@@ -603,7 +633,18 @@ export class DetailsController {
 
     if (!navigator.onLine) {
       if (this.state.mode === "edit") {
-        await this._saveEditOffline();
+        const ok = await this._saveEditOffline();
+        if (ok && this.ticket) {
+          if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
+          this.autoReturnTimer = setTimeout(() => {
+            if (!this.ticket) return;
+            if (window.location.hash.startsWith("#/ticket/")) {
+              this.router.navigate(
+                this.ticket.type === "close" ? "#/closed" : "#/",
+              );
+            }
+          }, AUTO_RETURN_MS);
+        }
         return;
       }
       if (this.state.mode === "close") {
@@ -612,7 +653,6 @@ export class DetailsController {
       }
     }
 
-    // Захватываем ticketId до await — unmount обнулит this.ticket.
     const ticketId = this.ticket ? this.ticket.id : null;
     if (ticketId == null) return;
     let response;
@@ -636,9 +676,6 @@ export class DetailsController {
           this.state.draft,
         );
       }
-      // ... далее идет существующая проверка if (!this.ticket || this.ticket.id !== ticketId) return; ...
-      // Если unmount уже отработал — this.ticket === null.
-      // Тихо выходим, ничего не уведомляем: сервер уже мог сохранить.
       if (!this.ticket || this.ticket.id !== ticketId) return;
 
       if (
@@ -653,8 +690,8 @@ export class DetailsController {
           }
           return;
         }
-        // edit — fallthrough → else-ветка ниже (notify.error).
       }
+
       if (response && response.status === "ok") {
         this._setSaveBtnState("success");
         const msg = response.message || "Изменения сохранены.";
@@ -665,6 +702,8 @@ export class DetailsController {
         this._autoOpenPending = false;
 
         if (this.state.mode === "close") {
+          this._applySuccessUI(); // <--- ДОБАВЛЕНО: делаем зелёную галочку
+
           const { shouldCreateNew } = this.closeForm.getValue();
           this._syncSourceArray();
           if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
@@ -676,7 +715,6 @@ export class DetailsController {
             const fromTicketId = ticketId;
             this.autoReturnTimer = setTimeout(() => {
               if (!this.ticket) return;
-
               appState.pendingCreateAddress = {
                 from_ticket_id: fromTicketId,
                 address: this.ticket.fullAddress || this.ticket.address || "",
@@ -698,9 +736,20 @@ export class DetailsController {
           }
         } else {
           this._syncSourceArray();
-          this._refreshTicketAfterSave();
-          this._exitEditMode();
 
+          // 1. Убираем форму без _exitEditMode (он бы показал кнопки "Редактировать" и "Закрыть")
+          if (this.editForm) {
+            this.editForm.destroy();
+            this.editForm = null;
+          }
+          this.state.clearDraft();
+          this.state.setMode("view");
+          this._renderStaffSlots();
+
+          // 2. Перерисовываем карточку и делаем зелёную галочку
+          await this._refreshTicketAfterSave(true);
+          this._applySuccessUI(); // <--- Страховка: применит UI, даже если fetch упал
+          // 3. Таймер возврата
           this.autoReturnTimer = setTimeout(() => {
             if (!this.ticket) return;
             if (this.state.mode !== "view") return;
@@ -944,7 +993,10 @@ export class DetailsController {
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
-      if (container) this._renderCard(container);
+      if (container) {
+        this._renderCard(container);
+        this._applySuccessUI();
+      }
       this._syncSourceArray();
       return true;
     } catch (err) {
@@ -979,7 +1031,10 @@ export class DetailsController {
       const container = document.getElementById(
         "ticketDetailsDynamicContainer",
       );
-      if (container) this._renderCard(container);
+      if (container) {
+        this._renderCard(container);
+        this._applySuccessUI();
+      }
       this._syncSourceArray();
 
       // --- ЛОГИКА ПЕРЕХОДА НА СОЗДАНИЕ (ОФЛАЙН) ---
