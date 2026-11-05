@@ -7,7 +7,7 @@ config/db.php
 .env.local
 .env.development
 .env.production
-md/
+#md/
 # ==========================================
 # ЗАВИСИМОСТИ И СБОРКА
 # ==========================================
@@ -41,6 +41,6 @@ Thumbs.db
 .idea/
 
 # (Папка md/ здесь ОТСУТСТВУЕТ намеренно — она должна быть в Git!)
-md/API_PROTOCOL.md
-md/offline_protocol.md
-md/sqlupdate.txt
+#md/API_PROTOCOL.md
+#md/offline_protocol.md
+#md/sqlupdate.txt

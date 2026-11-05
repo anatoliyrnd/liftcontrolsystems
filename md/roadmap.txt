@@ -1,0 +1,164 @@
+Понял: **фото — только онлайн, только с диска (file picker), без камеры**. Офлайн — кнопки фото нет вообще.
+
+## Что возвращается в дорожную карту (только для онлайн-пути)
+
+| Файл | Назначение |
+|---|---|
+| `vendor/browser-image-compression.js` | бандл npm-пакета |
+| `utils/photo-compressor.js` | `compressPhoto(file)` → `{ base64, size }`, лимит 500 KB (серверный), 1280×1280, quality 0.7→0.3 |
+| `details-controller.js` | в `_renderNoteComposer`: `<input type="file" accept="image/jpeg,image/png">` (без `capture` — только диск). При `navigator.onLine` — сжатие → `callnote` с `photo_base64`. При `!navigator.onLine` — инпут **скрыт** с tooltip «Фото доступно только онлайн» |
+| `utils/photo-compressor` — unit-тест | проверка `< 500KB`, порча качества |
+
+## Что остаётся вычеркнутым (офлайн-фото)
+
+| Файл | Статус |
+|---|---|
+| `offline_photo_blobs` store | ❌ не нужен |
+| Резолв `photo_blob_id` → `photo_base64` в `batch-builder.js` | ❌ не нужен |
+| `outbox-queue.enqueueComment` с blob | ❌ только `text` |
+| Обработка `photo_limit_exceeded` на клиенте | ❌ полагаемся на сервер → `archived` → тост «Лимит фото исчерпан» |
+| «Повторить без фото» в модалке | ❌ не нужно |
+
+## Где живёт фото-логика
+
+```
+details-controller.js
+  _renderNoteComposer()
+    ├─ createValidatedTextarea (text)
+    ├─ <input type="file"> (hidden if !navigator.onLine)
+    └─ _onAddNote()
+         ├─ navigator.onLine === false → outboxQueue.enqueueComment(ticketId, text)
+         └─ navigator.onLine === true
+              ├─ есть file → photoCompressor.compressPhoto(file)
+              │    → callnote({ text, photo_base64 })
+              └─ нет file → callnote({ text })
+```
+
+## Обновлённая оценка
+
+| Было | Стало |
+|---|---|
+| 26–33 (с полным фото) | **22–28** (фото только онлайн) |
+| 20–26 (без фото) | — |
+
+Разница с «без фото» — **+2 дня** (бандл + компрессор + тест + UI file-input в композере).
+
+## Один уточняющий момент
+
+**Онлайн `callnote` с фото — что если сжатие не удалось (не влезло в 500 KB)?**
+- (a) Блокируем отправку, тост «Фото слишком большое, выберите другое»
+- (b) Отправляем без фото + тост «Фото не прикреплено — слишком большое»
+
+> **Рекомендую (a)** — пользователь явно выбрал фото, молча терять его плохо. И это **не** офлайн-сценарий, retry не нужен.
+
+## Стартуем Фазу 0
+
+| Шаг | Файл | Статус |
+|---|---|---|
+| 0.1 | `utils/uuid.js` | ✅ старт |
+| 0.2 | `utils/online-status.js` | ✅ старт |
+| 0.3 | `utils/sync-lock.js` | ✅ старт |
+| 0.4 | `vendor/browser-image-compression.js` | следующий заход (бандл) |
+| 0.5 | `utils/photo-compressor.js` | зависит от 0.4 |
+| 0.6 | `offline-db.js` v2 | после 0.1 |
+
+**Подтвердите:**
+1. Фото-ошибка — **(a)** блокировать отправку или **(b)** отправить без фото?
+2. **Старт 0.1 + 0.2 + 0.3** — ок?
+
+
+
+Понял: **фото — только онлайн, только с диска (file picker), без камеры**. Офлайн — кнопки фото нет вообще.
+
+## Что возвращается в дорожную карту (только для онлайн-пути)
+
+| Файл | Назначение |
+|---|---|
+| `vendor/browser-image-compression.js` | бандл npm-пакета |
+| `utils/photo-compressor.js` | `compressPhoto(file)` → `{ base64, size }`, лимит 500 KB (серверный), 1280×1280, quality 0.7→0.3 |
+| `details-controller.js` | в `_renderNoteComposer`: `<input type="file" accept="image/jpeg,image/png">` (без `capture` — только диск). При `navigator.onLine` — сжатие → `callnote` с `photo_base64`. При `!navigator.onLine` — инпут **скрыт** с tooltip «Фото доступно только онлайн» |
+| `utils/photo-compressor` — unit-тест | проверка `< 500KB`, порча качества |
+
+## Что остаётся вычеркнутым (офлайн-фото)
+
+| Файл | Статус |
+|---|---|
+| `offline_photo_blobs` store | ❌ не нужен |
+| Резолв `photo_blob_id` → `photo_base64` в `batch-builder.js` | ❌ не нужен |
+| `outbox-queue.enqueueComment` с blob | ❌ только `text` |
+| Обработка `photo_limit_exceeded` на клиенте | ❌ полагаемся на сервер → `archived` → тост «Лимит фото исчерпан» |
+| «Повторить без фото» в модалке | ❌ не нужно |
+
+## Где живёт фото-логика
+
+```
+details-controller.js
+  _renderNoteComposer()
+    ├─ createValidatedTextarea (text)
+    ├─ <input type="file"> (hidden if !navigator.onLine)
+    └─ _onAddNote()
+         ├─ navigator.onLine === false → outboxQueue.enqueueComment(ticketId, text)
+         └─ navigator.onLine === true
+              ├─ есть file → photoCompressor.compressPhoto(file)
+              │    → callnote({ text, photo_base64 })
+              └─ нет file → callnote({ text })
+```
+
+## Обновлённая оценка
+
+| Было | Стало |
+|---|---|
+| 26–33 (с полным фото) | **22–28** (фото только онлайн) |
+| 20–26 (без фото) | — |
+
+Разница с «без фото» — **+2 дня** (бандл + компрессор + тест + UI file-input в композере).
+
+## Один уточняющий момент
+
+**Онлайн `callnote` с фото — что если сжатие не удалось (не влезло в 500 KB)?**
+- (a) Блокируем отправку, тост «Фото слишком большое, выберите другое»
+- (b) Отправляем без фото + тост «Фото не прикреплено — слишком большое»
+
+> **Рекомендую (a)** — пользователь явно выбрал фото, молча терять его плохо. И это **не** офлайн-сценарий, retry не нужен.
+
+## Стартуем Фазу 0
+
+| Шаг | Файл | Статус |
+|---|---|---|
+| 0.1 | `utils/uuid.js` | ✅ старт |
+| 0.2 | `utils/online-status.js` | ✅ старт |
+| 0.3 | `utils/sync-lock.js` | ✅ старт |
+| 0.4 | `vendor/browser-image-compression.js` | следующий заход (бандл) |
+| 0.5 | `utils/photo-compressor.js` | зависит от 0.4 |
+| 0.6 | `offline-db.js` v2 | после 0.1 |
+
+**Подтвердите:**
+1. Фото-ошибка — **(a)** блокировать отправку или **(b)** отправить без фото?
+2. **Старт 0.1 + 0.2 + 0.3** — ок?
+
+Обновление решения Q-C / C
+Было: фильтруем outbox по offline_author_id → чужие команды «висят» до возврата автора.
+Стало: синхронизируем все pending, независимо от автора. Если синхронизирует не автор — в текст команды добавляется маркер авторства.
+
+Маркер авторства — где и как
+Добавляется на клиенте в batch-builder.js (Фаза 1), если offline_author_id !== currentUser.id. Серверных изменений не требует — работает уже в v1.
+
+Тип команды	Куда добавляется маркер
+CreateTicket	❌ не нужен — offline_author_id/offline_author_name уже в payload по протоколу (раздел 4.2), сервер запишет автора
+EditTicket	payload.details (append-only) → \n\n[Синхронизировано: <syncer> (ID: N). Автор: <author> (ID: M)]
+CloseTicket	payload.solution → \n\n[Синхронизировано: ...]
+AddComment	payload.text → \n\n[Синхронизировано: ...]
+AcceptTicket	payload пустой → не трогаем (в v1 не используется)
+Формат: [Синхронизировано: {syncer.name} (ID: {syncer.id}). Автор: {author.name || '?'} (ID: {author_id})]
+
+⚠️ Уточнить у бэка: если syncCommands принимает offline_author_id/offline_author_name в payload любого типа — маркер можно не добавлять, сервер сам запишет автора в историю. Но в v1 маркер в тексте — гарантированно работает.
+
+Дорожная карта — дельта
+Фаза	Что меняется
+0 — Фундамент	❌ без изменений
+1 — Outbox Queue	➕ batch-builder.js: applyAuthorMarker(cmd, currentUser) + needsAuthorMarker(cmd, currentUser). outbox-queue.getAllPending() — без фильтра по автору (уже так)
+2 — SyncManager	➕ _syncLoop() не фильтрует по offline_author_id, синхронизирует всё. pendingBatchId — как было. duplicate_detected — если команда не текущего автора, модалку не показываем (нет кому решать), команду → failed с last_error='duplicate_needs_author'
+3 — Контроллеры	➕ tickets-controller.js: бейдж «⏳» по getPendingByTicket() без фильтра автора — любой диспетчер видит, что заявка ждёт sync. details-controller.js: аналогично
+4 — UI	➕ queue.js: колонка «Автор» (offline_author_name); фильтр «Только мои» — необязательный тумблер
+5 — Тесты	➕ Кейс: диспетчер A создал, диспетчер B синхронизировал → в solution/comment есть маркер с обоими именами и ID
+Оценка: +0.5 дня. Итого 22–28.5 чел.-дней (было 22–28).
