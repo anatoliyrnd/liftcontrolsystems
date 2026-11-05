@@ -7,16 +7,40 @@
  *   saveClose     → сырой ответ api.post
  *   addNote       → сырой ответ api.post
  */
-
+import { offlineDB } from "../offline-db.js";
 export const ticketRepository = {
-  /**
-   * Точечная загрузка заявки через { data: 'ticket', call_id }.
-   *
-   * @param {ApiService} api
-   * @param {string|number} ticketId
-   * @returns {Promise<{ok: boolean, data: object|null, errorType: string|null}>}
-   */
   async fetchById(api, ticketId) {
+    // #6: offline_ → читаем только из offlineDB, без запроса на сервер
+    // (API_syncCommands.md v5.2 §12.2).
+    if (typeof ticketId === "string" && ticketId.startsWith("offline_")) {
+      try {
+        const found = await offlineDB.findPendingCreateByOfflineUuid(ticketId);
+        if (!found) {
+          // CreateTicket уже синхронизирован и удалён из outbox —
+          // для UI это not_found (пользователь обновит журнал).
+          return { ok: false, data: null, errorType: "not_found" };
+        }
+        const p = found.payload || {};
+        const offlineTicket = {
+          ...p,
+          id: found.offline_uuid,
+          isOffline: true,
+          // type нужен контроллеру до применения overlay #8
+          type: p.solution ? "close" : "open",
+          // opened_at (после #2) точнее, чем created_at outbox-записи
+          date: p.opened_at ?? found.created_at,
+        };
+        return {
+          ok: true,
+          data: offlineTicket,
+          errorType: null,
+          offline: true,
+        };
+      } catch (err) {
+        console.error("[TicketRepo] Offline fetch error:", err);
+        return { ok: false, data: null, errorType: "network" };
+      }
+    }
     try {
       const resp = await api.post(
         { data: "ticket", call_id: ticketId },

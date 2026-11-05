@@ -1,3 +1,43 @@
+const OFFLINE_COMMENT_HEADER = "⏳ [Офлайн-комментарии]";
+const OFFLINE_COMMENT_LINE_RE = /^\[([^,]+),\s*([^\]]+)\]:\s*(.*)$/;
+
+function parseRuDateTime(s) {
+  const m = String(s || "")
+    .trim()
+    .match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const [, dd, mm, yyyy, hh, min] = m;
+  const d = new Date(
+    Number(yyyy),
+    Number(mm) - 1,
+    Number(dd),
+    Number(hh),
+    Number(min),
+  );
+  return isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
+}
+
+function parseOfflineComments(commentsStr) {
+  if (typeof commentsStr !== "string" || !commentsStr.trim()) return [];
+  const out = [];
+  for (const raw of commentsStr.split("\n")) {
+    const line = raw.trim();
+    if (!line || line === OFFLINE_COMMENT_HEADER) continue;
+    const m = line.match(OFFLINE_COMMENT_LINE_RE);
+    if (m) {
+      out.push({
+        user: m[1].trim(),
+        date: parseRuDateTime(m[2]),
+        body: m[3].trim(),
+      });
+    } else {
+      // fallback: не распарсили — показываем как есть
+      out.push({ user: "Офлайн", date: null, body: line });
+    }
+  }
+  return out;
+}
+
 /**
  * Чистая функция наложения офлайн-команд (outbox) на серверный тикет.
  *
@@ -76,6 +116,30 @@ export function applyPendingOverlay(
       };
     }
   }
-
+  // #8: офлайн-заявка — разворачиваем поля payload в отображаемые
+  // note / _pendingClose (payload.comments/solution/closed_at/closed_by_name).
+  if (t.isOffline) {
+    if (t.comments) {
+      const parsed = parseOfflineComments(t.comments);
+      for (const n of parsed) {
+        t.note.push({
+          id: "offline_" + t.note.length,
+          user: n.user,
+          body: n.body,
+          date: n.date,
+          type: 0,
+          _pending: true,
+        });
+      }
+      t.note_num = (t.note_num || 0) + parsed.length;
+    }
+    if (t.solution) {
+      t._pendingClose = {
+        solution: t.solution,
+        close_date: t.closed_at || null,
+        close_name: t.closed_by_name || "—",
+      };
+    }
+  }
   return t;
 }

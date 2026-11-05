@@ -13,26 +13,26 @@
  *      (автор уже в offline_author_id/name по протоколу).
  */
 
-import { isRetryDue } from './backoff.js';
+import { isRetryDue } from "./backoff.js";
 
 const MAX_BATCH_WEIGHT_BYTES = 3.5 * 1024 * 1024;
 const MAX_COMMANDS_PER_BATCH = 20;
 
 function buildAuthorMarker(syncerUser, authorName, authorId) {
-    const syncer = syncerUser?.name
-        ? `${syncerUser.name} (ID: ${syncerUser.id ?? '?'})`
-        : `ID: ${syncerUser?.id ?? '?'}`;
-    const author = authorName
-        ? `${authorName} (ID: ${authorId ?? '?'})`
-        : `ID: ${authorId ?? '?'}`;
-    return `[Синхронизировано: ${syncer}. Автор: ${author}]`;
+  const syncer = syncerUser?.name
+    ? `${syncerUser.name} (ID: ${syncerUser.id ?? "?"})`
+    : `ID: ${syncerUser?.id ?? "?"}`;
+  const author = authorName
+    ? `${authorName} (ID: ${authorId ?? "?"})`
+    : `ID: ${authorId ?? "?"}`;
+  return `[Синхронизировано: ${syncer}. Автор: ${author}]`;
 }
 
 function needsAuthorMarker(cmd, currentUser) {
-    if (!currentUser || !currentUser.id) return false;
-    if (cmd.offline_author_id == null) return false;
-    if (String(cmd.offline_author_id) === String(currentUser.id)) return false;
-    return cmd.command_type !== 'CreateTicket';
+  if (!currentUser || !currentUser.id) return false;
+  if (cmd.offline_author_id == null) return false;
+  if (String(cmd.offline_author_id) === String(currentUser.id)) return false;
+  return cmd.command_type !== "CreateTicket";
 }
 
 /**
@@ -40,29 +40,38 @@ function needsAuthorMarker(cmd, currentUser) {
  * Чистая функция — не мутирует оригинал.
  */
 export function applyAuthorMarker(cmd, currentUser) {
-    const original = cmd.payload || {};
+  const original = cmd.payload || {};
 
-    if (!needsAuthorMarker(cmd, currentUser)) {
-        return { ...original };
-    }
+  if (!needsAuthorMarker(cmd, currentUser)) {
+    return { ...original };
+  }
 
-    const marker = buildAuthorMarker(
-        currentUser,
-        cmd.offline_author_name,
-        cmd.offline_author_id
-    );
+  const marker = buildAuthorMarker(
+    currentUser,
+    cmd.offline_author_name,
+    cmd.offline_author_id,
+  );
 
-    const patched = { ...original };
+  const patched = { ...original };
 
-    if (cmd.command_type === 'EditTicket' && typeof patched.details === 'string') {
-        patched.details = `${marker}\n\n${patched.details}`;
-    } else if (cmd.command_type === 'CloseTicket' && typeof patched.solution === 'string') {
-        patched.solution = `${marker}\n\n${patched.solution}`;
-    } else if (cmd.command_type === 'AddComment' && typeof patched.text === 'string') {
-        patched.text = `${marker}\n\n${patched.text}`;
-    }
+  if (
+    cmd.command_type === "EditTicket" &&
+    typeof patched.details === "string"
+  ) {
+    patched.details = `${marker}\n\n${patched.details}`;
+  } else if (
+    cmd.command_type === "CloseTicket" &&
+    typeof patched.solution === "string"
+  ) {
+    patched.solution = `${marker}\n\n${patched.solution}`;
+  } else if (
+    cmd.command_type === "AddComment" &&
+    typeof patched.text === "string"
+  ) {
+    patched.text = `${marker}\n\n${patched.text}`;
+  }
 
-    return patched;
+  return patched;
 }
 
 /**
@@ -74,20 +83,27 @@ export function applyAuthorMarker(cmd, currentUser) {
  * @param {boolean} [opts.forceCreate] — добавить force_create: true
  */
 export function buildCommand(cmd, currentUser, opts = {}) {
-    const payload = applyAuthorMarker(cmd, currentUser);
-    const command = {
-        command_uuid: cmd.command_uuid,
-        command_type: cmd.command_type,
-        ticket_id: cmd.ticket_id ?? null,
-        offline_uuid: cmd.offline_uuid ?? null,
-        payload
-    };
-    if (opts.forceCreate) {
-        command.force_create = true;
-    }
-    return command;
-}
+  const payload = applyAuthorMarker(cmd, currentUser);
 
+  // #1: CreateTicket — сервер ждёт offline_author_id/name в payload
+  // (API_syncCommands.md v5.2 §4.2), не только на уровне outbox-записи.
+  if (cmd.command_type === "CreateTicket") {
+    payload.offline_author_id = cmd.offline_author_id ?? null;
+    payload.offline_author_name = cmd.offline_author_name ?? null;
+  }
+
+  const command = {
+    command_uuid: cmd.command_uuid,
+    command_type: cmd.command_type,
+    ticket_id: cmd.ticket_id ?? null,
+    offline_uuid: cmd.offline_uuid ?? null,
+    payload,
+  };
+  if (opts.forceCreate) {
+    command.force_create = true;
+  }
+  return command;
+}
 /**
  * Собрать пачку.
  *
@@ -100,34 +116,34 @@ export function buildCommand(cmd, currentUser, opts = {}) {
  * @returns {Array<Object>} commands[]
  */
 export function buildBatch(pendingCommands, currentUser, opts = {}) {
-    const maxWeight = opts.maxWeightBytes ?? MAX_BATCH_WEIGHT_BYTES;
-    const maxCount = opts.maxCommands ?? MAX_COMMANDS_PER_BATCH;
-    const nowSec = typeof opts.nowSec === 'number'
-        ? opts.nowSec
-        : Math.floor(Date.now() / 1000);
+  const maxWeight = opts.maxWeightBytes ?? MAX_BATCH_WEIGHT_BYTES;
+  const maxCount = opts.maxCommands ?? MAX_COMMANDS_PER_BATCH;
+  const nowSec =
+    typeof opts.nowSec === "number"
+      ? opts.nowSec
+      : Math.floor(Date.now() / 1000);
 
-    const batch = [];
-    let weight = 0;
+  const batch = [];
+  let weight = 0;
 
-    for (const cmd of pendingCommands) {
-        if (batch.length >= maxCount) break;
-        if (!isRetryDue(cmd, nowSec)) continue;
+  for (const cmd of pendingCommands) {
+    if (batch.length >= maxCount) break;
+    if (!isRetryDue(cmd, nowSec)) continue;
 
-        const command = buildCommand(cmd, currentUser);
-        const size = JSON.stringify(command).length;
+    const command = buildCommand(cmd, currentUser);
+    const size = JSON.stringify(command).length;
 
-        if (batch.length > 0 && weight + size > maxWeight) break;
+    if (batch.length > 0 && weight + size > maxWeight) break;
 
-        batch.push(command);
-        weight += size;
-    }
+    batch.push(command);
+    weight += size;
+  }
 
-    return batch;
+  return batch;
 }
 
 export function hasSyncable(pendingCommands, nowSec) {
-    const now = typeof nowSec === 'number'
-        ? nowSec
-        : Math.floor(Date.now() / 1000);
-    return pendingCommands.some(c => isRetryDue(c, now));
+  const now =
+    typeof nowSec === "number" ? nowSec : Math.floor(Date.now() / 1000);
+  return pendingCommands.some((c) => isRetryDue(c, now));
 }

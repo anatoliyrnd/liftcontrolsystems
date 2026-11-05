@@ -209,7 +209,23 @@ class OfflineDB {
     batch.sort((a, b) => a.created_at - b.created_at);
     return batch;
   }
-
+  /**
+   * Найти pending-CreateTicket по offline_uuid.
+   * Используется outbox-queue (merge Edit/Comment/Close #3–#5)
+   * и ticket-repository (#6 fetchById для offline_).
+   * Возвращает запись outbox или null.
+   */
+  async findPendingCreateByOfflineUuid(offlineUuid) {
+    const all = await this.getAllPending();
+    return (
+      all.find(
+        (c) =>
+          c.command_type === "CreateTicket" &&
+          c.status === "pending" &&
+          c.offline_uuid === offlineUuid,
+      ) || null
+    );
+  }
   /**
    * Pending-команды, привязанные к заявке (любые авторы).
    * Используется tickets-controller / details-controller для бейджей «⏳».

@@ -6,9 +6,6 @@ import { destroyVoiceInput } from "./components/voiceInput.js";
 import { notify } from "./components/notify.js";
 import { UI } from "./config.js";
 import { appState } from "./app-state.js";
-
-import { offlineDB } from "./offline-db.js";
-
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
@@ -57,35 +54,12 @@ export class DetailsController {
     const container = document.getElementById("ticketDetailsDynamicContainer");
     if (!container) return;
 
-    if (String(ticketId).startsWith("offline_")) {
-      const outbox = await offlineDB.getAllPending();
-      if (isStale()) return;
+    const isOfflineId = String(ticketId).startsWith("offline_");
 
-      // getAllPending возвращает все записи. Фильтруем только нужный
-      // CreateTicket со статусом 'pending'. Поле uuid теперь — command_uuid.
-      const found = outbox.find(
-        (o) =>
-          o.command_type === "CreateTicket" &&
-          o.status === "pending" &&
-          (o.offline_uuid === ticketId || o.command_uuid === ticketId),
-      );
-      // ... (блок offline_ заявок) ...
-      if (found) {
-        const offlineTicket = {
-          ...found.payload,
-          id: found.offline_uuid || found.command_uuid,
-          isOffline: true,
-          date: found.created_at,
-        };
-        this.state.setServerTicket(offlineTicket, []); // Сохраняем в стейт
-        this._renderCard(container);
-        return;
-      }
-    }
+    let ticket = isOfflineId
+      ? null
+      : combinedTicketsArray.find((t) => String(t.id) === String(ticketId));
 
-    let ticket = combinedTicketsArray.find(
-      (t) => String(t.id) === String(ticketId),
-    );
     if (!ticket) {
       const result = await ticketRepository.fetchById(this.api, ticketId);
 
@@ -139,6 +113,48 @@ export class DetailsController {
     this.state.setServerTicket(normalizedTicket, cmds);
 
     this._renderCard(container);
+  }
+  /**
+   * После офлайн-операции (edit / comment / close) обновить state.
+   *
+   * Для offline_ заявки: правки/комментарии/закрытие свёрнуты в
+   * CreateTicket.payload (см. outbox-queue #3–#5), а
+   * getPendingByTicket(offline_) всегда пуст. Поэтому перечитываем
+   * свежий payload через ticketRepository.fetchById — для offline_
+   * он читает из offlineDB, без сети (правка #6).
+   *
+   * Для серверной заявки (fallback при network_error): создан
+   * отдельный EditTicket/AddComment/CloseTicket — обновляем только
+   * pendingCommands, overlay применит их в getDisplayTicket.
+   * fetchById здесь НЕ вызываем: сети нет, будет 30s таймаут.
+   *
+   * Guard по this.ticket.id — если пользователь ушёл на другой роут
+   * во время await — тихо выходим. Рендер — на стороне вызывающего
+   * (_renderCard у edit/close, renderNotesList у comment).
+   */
+  async _refreshOfflineState(ticketId) {
+    if (!this.ticket || this.ticket.id !== ticketId) return;
+
+    const isOffline =
+      typeof ticketId === "string" && ticketId.startsWith("offline_");
+    const cmds = await outboxQueue.getPendingByTicket(ticketId);
+    if (!this.ticket || this.ticket.id !== ticketId) return;
+
+    if (isOffline) {
+      const fresh = await ticketRepository.fetchById(this.api, ticketId);
+      if (!this.ticket || this.ticket.id !== ticketId) return;
+      if (fresh.ok) {
+        normalizeTicketFields(fresh.data);
+        this.state.setServerTicket(fresh.data, cmds);
+      } else {
+        // CreateTicket уже синхронизирован и удалён из outbox
+        // (редкий race с момента старта операции). Оставляем как есть —
+        // следующий mount по journal-id откроет серверную заявку.
+        this.state.setPendingCommands(cmds);
+      }
+    } else {
+      this.state.setPendingCommands(cmds);
+    }
   }
   /**
    * После успешного сохранения (calledit / callClose) — перезапрашиваем
@@ -843,8 +859,9 @@ export class DetailsController {
       );
 
       if (!this.ticket || this.ticket.id !== ticketId) return;
-      const cmds = await outboxQueue.getPendingByTicket(ticketId);
-      this.state.setPendingCommands(cmds);
+      // Было: setPendingCommands(cmds) — для offline_ давал пусто
+      // (payload.comments не появлялся в state.serverTicket).
+      await this._refreshOfflineState(ticketId);
       if (!this.ticket || this.ticket.id !== ticketId) return;
 
       // Не _renderCard: при mode='edit'/'close' полная перерисовка
@@ -919,8 +936,9 @@ export class DetailsController {
       this.state.setMode("view");
 
       if (!this.ticket || this.ticket.id !== ticketId) return true;
-      const cmds = await outboxQueue.getPendingByTicket(ticketId);
-      this.state.setPendingCommands(cmds);
+
+      // Было: setPendingCommands(cmds) + _renderCard на stale serverTicket.
+      await this._refreshOfflineState(ticketId);
       if (!this.ticket || this.ticket.id !== ticketId) return true;
 
       const container = document.getElementById(
@@ -952,8 +970,10 @@ export class DetailsController {
       this.state.setMode("view");
 
       if (!this.ticket || this.ticket.id !== ticketId) return true;
-      const cmds = await outboxQueue.getPendingByTicket(ticketId);
-      this.state.setPendingCommands(cmds);
+
+      // Было: setPendingCommands(cmds) + _renderCard на stale serverTicket —
+      // для offline_ _pendingClose не устанавливался, статус оставался «В РАБОТЕ».
+      await this._refreshOfflineState(ticketId);
       if (!this.ticket || this.ticket.id !== ticketId) return true;
 
       const container = document.getElementById(

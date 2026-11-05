@@ -1,8 +1,3 @@
-**v5.2**. Изменения от v5.1 помечены значком 🔄.
-
----
-
-```markdown
 # 📋 API_PROTOCOL.md — Приложение: Синхронизация офлайн-команд (`syncCommands`)
 
 **Версия:** 5.2
@@ -50,36 +45,37 @@
 ## 1. Обзор эндпоинта
 
 ### 1.1. Endpoint
+
 ```
 
 POST https://api.liftcs.ru/calls/syncCommands
 
-````
+```
 
 **Назначение:** Универсальный эндпоинт для пакетной синхронизации офлайн-действий: создание, редактирование, закрытие, комментирование.
 
 ### 1.2. HTTP-характеристики
 
-| Параметр | Значение |
-|---|---|
-| Метод | `POST` |
-| Content-Type | `application/json; charset=utf-8` |
-| Accept | `application/json` |
-| Таймаут клиента | 30 секунд |
+| Параметр                    | Значение                                 |
+| --------------------------- | ---------------------------------------- |
+| Метод                       | `POST`                                   |
+| Content-Type                | `application/json; charset=utf-8`        |
+| Accept                      | `application/json`                       |
+| Таймаут клиента             | 30 секунд                                |
 | Максимальный размер запроса | **10 MB** (Nginx `client_max_body_size`) |
-| Максимальный вес пачки | **3.5 MB** (JSON) |
-| Максимум команд в пачке | 20 |
-| HTTP-статус | Всегда `200 OK` (ошибки в теле) |
+| Максимальный вес пачки      | **3.5 MB** (JSON)                        |
+| Максимум команд в пачке     | 20                                       |
+| HTTP-статус                 | Всегда `200 OK` (ошибки в теле)          |
 
 ### 1.3. Поддерживаемые типы команд
 
-| Тип | Кто может отправлять | Статус |
-|---|---|---|
-| `CreateTicket` | Только `administrator` / `dispatcher` | ✅ Production |
-| `EditTicket` | Только `administrator` / `dispatcher` | ✅ Production |
-| `CloseTicket` | `administrator`, `dispatcher`, `engineer` | ✅ Production |
-| `AddComment` | `administrator`, `dispatcher`, `engineer` | ✅ Production |
-| `AcceptTicket` | — | ⚠️ `reserved_for_mobile` |
+| Тип            | Кто может отправлять                      | Статус                   |
+| -------------- | ----------------------------------------- | ------------------------ |
+| `CreateTicket` | Только `administrator` / `dispatcher`     | ✅ Production            |
+| `EditTicket`   | Только `administrator` / `dispatcher`     | ✅ Production            |
+| `CloseTicket`  | `administrator`, `dispatcher`, `engineer` | ✅ Production            |
+| `AddComment`   | `administrator`, `dispatcher`, `engineer` | ✅ Production            |
+| `AcceptTicket` | —                                         | ⚠️ `reserved_for_mobile` |
 
 ---
 
@@ -94,7 +90,7 @@ Content-Type: application/json; charset=utf-8
 Accept: application/json
 Authorization: Bearer <access_token>
 X-Tenant: l3
-````
+```
 
 | Заголовок       | Обязательно | Описание                                    |
 | --------------- | :---------: | ------------------------------------------- |
@@ -230,7 +226,7 @@ X-Tenant: l3
 | ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `comments`        | string | Единый текст офлайн-комментариев (`⏳ [Офлайн-комментарии]\n[Автор, дата]: текст\n...`). Сервер сохраняет как одну заметку в `lift_notes` с `is_offline = 1` |
 | `solution`        | string | Текст решения, если заявка закрыта офлайн                                                                                                                    |
-| `closed_at`       | int    | Unix timestamp закрытия если отсутствует то применяем автокерекцию                                                                                           |
+| `closed_at`       | int    | Unix timestamp закрытия. Еслиsolutionуказан, аclosed_atнет — сервер применяет автокоррекцию (см. ниже)                                                       |
 | `closed_by_name`  | string | ФИО закрывшего (если закрыта офлайн)                                                                                                                         |
 | `closed_by_id`    | int    | ID закрывшего (если закрыта офлайн)                                                                                                                          |
 | `call_phone`      | string | Телефон заявителя                                                                                                                                            |
@@ -470,13 +466,12 @@ X-Tenant: l3
 
 ### 6.2. Матрица статусов по типам команд
 
-| Команда                |           Успех            |                                  Архивация                                   | Игнорирование |     Ошибка     |
-| ---------------------- | :------------------------: | :--------------------------------------------------------------------------: | :-----------: | :------------: |
-| `CreateTicket`         |         ✅ создана         |    `no_rights`, `validation_error`, `duplicate_uuid`, `ticket_not_found`     |       —       | `server_error` |
-| `EditTicket`           |        ✅ изменения        | `no_rights`, `ticket_already_closed`, `ticket_not_found`, `validation_error` |       —       | `server_error` |
-| `CloseTicket`          |         ✅ закрыта         |                 `ticket_already_closed`, `ticket_not_found`                  |       —       | `server_error` |
-| `AddComment`           |        ✅ добавлен         |       `ticket_already_closed`, `ticket_not_found`, `validation_error`        |       —       | `server_error` |
-| `CreateTicket` (дубль) | ✅ создан (`force_create`) |                                      —                                       |       —       |       —        |
+| Команда        |    Успех     |                                               Архивация                                               | Игнорирование |     Ошибка     |
+| -------------- | :----------: | :---------------------------------------------------------------------------------------------------: | :-----------: | :------------: |
+| `EditTicket`   | ✅ изменения |             `no_rights`, `ticket_already_closed`, `ticket_not_found`, `validation_error`              |       —       | `server_error` |
+| `CloseTicket`  |  ✅ закрыта  |                              `ticket_already_closed`, `ticket_not_found`                              |       —       | `server_error` |
+| `AddComment`   | ✅ добавлен  |                    `ticket_already_closed`, `ticket_not_found`, `validation_error`                    |       —       | `server_error` |
+| `CreateTicket` |  ✅ создана  | `no_rights`, `forbidden: group_not_allowed`, `validation_error`, `duplicate_uuid`, `ticket_not_found` |       —       | `server_error` |
 
 **Важно:** причина `contract_terminated` **не используется** для `CreateTicket` при `object.vis = 0`. Такая заявка создаётся (см. §7.6). `contract_terminated` остаётся только для случаев глобального расторжения договора с организацией (тенант заблокирован).
 
@@ -550,10 +545,6 @@ X-Tenant: l3
 - Заявка попадает в открытые, её позже закроют вручную с пометкой «выведен из обслуживания».
 
 **Обоснование:** данные офлайн-работы пользователя не теряются. Если объект уже не обслуживается — диспетчер закроет заявку с нужной пометкой.
-
-Понял, полностью согласен. Термина «переоткрыть» в системе нет вообще. Есть только «Закрыть и создать новую для этого объекта» — и это **создание новой заявки**, а не возрождение старой.
-
-Вот исправленный пункт:
 
 ---
 
@@ -711,18 +702,19 @@ function generateOfflineUuid() {
 
 ### 11.2. Ошибки уровня команды (`results[].reason`)
 
-| Код                     |        Статус        | Описание                                                                                                  |
-| ----------------------- | :------------------: | --------------------------------------------------------------------------------------------------------- |
-| `no_rights`             |      `archived`      | Нет прав на действие                                                                                      |
-| `ticket_already_closed` |      `archived`      | Заявка уже закрыта                                                                                        |
-| `ticket_not_found`      |      `archived`      | Заявка не найдена                                                                                         |
-| `contract_terminated`   |      `archived`      | Расторгнут договор с организацией (тенант заблокирован). **НЕ применяется** к `object.vis = 0` (см. §7.6) |
-| `validation_error`      |      `archived`      | Ошибка валидации payload                                                                                  |
-| `duplicate_uuid`        |      `ignored`       | `offline_uuid` уже существует                                                                             |
-| `already_processed`     |      `ignored`       | Идемпотентность                                                                                           |
-| `duplicate_detected`    | `duplicate_detected` | Активная заявка на объект есть                                                                            |
-| `missing_ticket_id`     |       `failed`       | Не удалось определить `ticket_id`                                                                         |
-| `server_error`          |       `failed`       | Внутренняя ошибка сервера                                                                                 |
+| Код                            |        Статус        | Описание                                                                                                  |
+| ------------------------------ | :------------------: | --------------------------------------------------------------------------------------------------------- |
+| `no_rights`                    |      `archived`      | Нет прав на действие                                                                                      |
+| `forbidden: group_not_allowed` |      `archived`      | Группа лифтов вне доступа пользователя                                                                    |
+| `ticket_already_closed`        |      `archived`      | Заявка уже закрыта                                                                                        |
+| `ticket_not_found`             |      `archived`      | Заявка не найдена                                                                                         |
+| `contract_terminated`          |      `archived`      | Расторгнут договор с организацией (тенант заблокирован). **НЕ применяется** к `object.vis = 0` (см. §7.6) |
+| `validation_error`             |      `archived`      | Ошибка валидации payload                                                                                  |
+| `duplicate_uuid`               |      `ignored`       | `offline_uuid` уже существует                                                                             |
+| `already_processed`            |      `ignored`       | Идемпотентность                                                                                           |
+| `duplicate_detected`           | `duplicate_detected` | Активная заявка на объект есть                                                                            |
+| `missing_ticket_id`            |       `failed`       | Не удалось определить `ticket_id`                                                                         |
+| `server_error`                 |       `failed`       | Внутренняя ошибка сервера                                                                                 |
 
 **Примечание:** `ticket_deleted` не используется — при удалении/архивации заявки сервер возвращает `ticket_not_found` → `archived`.
 
@@ -936,7 +928,7 @@ Content-Type: application/json
 - [ ] `ticket-repository.fetchById`: если `ticketId` начинается с `offline_` → читать из `offlineDB`, не отправлять запрос на сервер
 - [ ] `details-controller.mount`: удалить блок `if (String(ticketId).startsWith("offline_"))` (переносится в `ticket-repository`)
 - [ ] `pending-overlay.js`: учитывать `payload.comments`, `payload.solution`, `payload.closed_at`, `payload.closed_by_name` для офлайн-заявок
-- [ ] `details-controller`: скрывать кнопки «Редактировать» / «Открыть заново» для офлайн-закрытых заявок (§7.7)
+- [x] details-controller: скрытие кнопок «Редактировать» / «Закрыть» для офлайн-закрытых заявок **уже реализовано** общим правиломisClosed(type === 'close' || !!\_pendingClose). Дополнительных изменений не требуется.
 - [ ] `get_tenant_info`: кэширование в `localStorage` (TTL 5 минут), показ из кэша при старте
 
 ### Тестирование
