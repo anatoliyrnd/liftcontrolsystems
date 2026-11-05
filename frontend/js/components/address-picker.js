@@ -423,6 +423,14 @@ export function createAddressPicker(opts = {}) {
       }
       onChange(selectedData);
     },
+    reset: () => {
+      selectedData = null;
+      searchInput.value = "";
+      citySelect.value = "";
+      searchWrap.style.display = "none";
+      hideDropdown();
+      onChange(null);
+    },
     destroy: () => {
       if (debounceTimer) clearTimeout(debounceTimer);
 

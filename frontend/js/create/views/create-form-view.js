@@ -264,12 +264,14 @@ export function createCreateFormView({ onChange }) {
     reset: () => {
       sessionStorage.removeItem("create_draft");
       if (formDetails) formDetails.value = "";
-      addressPicker?.reset();
-      staffSelect?.reset();
-      deptSelect?.reset();
-      reqSelect?.reset();
-      groupSelect?.reset();
-      repairPicker?.reset();
+
+      if (typeof addressPicker?.reset === "function") addressPicker.reset();
+      if (typeof staffSelect?.reset === "function") staffSelect.reset();
+      if (typeof deptSelect?.reset === "function") deptSelect.reset();
+      if (typeof reqSelect?.reset === "function") reqSelect.reset();
+      if (typeof groupSelect?.reset === "function") groupSelect.reset();
+      if (typeof repairPicker?.reset === "function") repairPicker.reset();
+
       _updateSaveBtnState();
     },
     destroy: () => {

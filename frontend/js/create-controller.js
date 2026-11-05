@@ -68,12 +68,12 @@ export class CreateController {
       }
 
       if (response && response.status === "ok") {
-        this.formView.reset();
         this._setSaveBtnState("success");
         const msg = response.message || "Заявка зарегистрирована.";
         logHistoryAction(msg);
         notify.success(msg);
 
+        // Обновляем глобальный список
         try {
           const freshOpen = await this.api.post(
             { data: "open" },
@@ -87,6 +87,10 @@ export class CreateController {
         } catch (e) {
           console.warn("[CreateController] Не удалось обновить список open", e);
         }
+
+        // Вызываем reset() ТОЛЬКО когда всё успешно.
+        // Если reset упадет, это не вызовет _handleOfflineSave.
+        this.formView.reset();
 
         if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
         this.autoReturnTimer = setTimeout(
@@ -106,6 +110,7 @@ export class CreateController {
         }, UI.ERROR_UNLOCK_MS);
       }
     } catch (err) {
+      // Сюда попадают только реальные сетевые сбои от createRepository.saveOnline
       console.error("[CreateController] Save error:", err);
       await this._handleOfflineSave(payload, globalTicketsArrayRef);
     }
@@ -114,6 +119,7 @@ export class CreateController {
   async _handleOfflineSave(payload, globalTicketsArrayRef) {
     try {
       const result = await createRepository.saveOffline(payload);
+
       if (!result.ok) {
         this._setSaveBtnState("error");
         const msg = `Достигнут лимит офлайн-заявок. Дождитесь синхронизации.`;
@@ -126,7 +132,6 @@ export class CreateController {
         return;
       }
 
-      this.formView.reset();
       this._setSaveBtnState("success");
       notify.offline(
         "Заявка сохранена. Будет синхронизирована при восстановлении сети.",
@@ -143,12 +148,16 @@ export class CreateController {
         isOffline: true,
       });
 
+      // Вызываем reset() здесь
+      this.formView.reset();
+
       if (this.autoReturnTimer) clearTimeout(this.autoReturnTimer);
       this.autoReturnTimer = setTimeout(
         () => this.router.navigate("#/"),
         UI.AUTO_RETURN_MS,
       );
     } catch (e) {
+      // Сюда попадут только реальные ошибки IndexedDB
       console.error("[CreateController] Offline save error:", e);
       this._setSaveBtnState("error");
       notify.error("Сбой локальной базы данных.");

@@ -10,7 +10,7 @@ import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
 import { normalizeTicketFields } from "./details/ticket-normalizer.js";
-
+import { nowTs } from "./utils/date-utils.js";
 import { render404, renderNetworkError } from "./details/error-views.js";
 import { ticketRepository } from "./details/ticket-repository.js";
 import { DetailsState } from "./details/details-state.js";
