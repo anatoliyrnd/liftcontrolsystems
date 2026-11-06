@@ -44,3 +44,4 @@ Thumbs.db
 #md/API_PROTOCOL.md
 #md/offline_protocol.md
 #md/sqlupdate.txt
+/config/

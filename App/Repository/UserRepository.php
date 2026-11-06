@@ -79,11 +79,43 @@ final class UserRepository
     }
 
     /**
-     * Удаляет Refresh-токен при выходе (Logout)
+     * Сохранить новый Access-токен для устройства
      */
-    public function deleteRefreshToken(string $rawToken): void
+    public function saveAccessToken(int $userId, string $rawToken, int $expiresAt): void
     {
         $hash = hash('sha256', $rawToken);
-        $this->db->execute("DELETE FROM lift_refresh_tokens WHERE token_hash = :hash", ['hash' => $hash]);
+        $expires = date('Y-m-d H:i:s', $expiresAt);
+
+        $sql = "INSERT INTO lift_access_tokens (token_hash, user_id, expires_at) 
+                VALUES (:hash, :user_id, :expires)";
+
+        $this->db->execute($sql, [
+            'hash' => $hash,
+            'user_id' => $userId,
+            'expires' => $expires
+        ]);
+    }
+
+    /**
+     * Найти пользователя по Access-токену
+     */
+    public function findByAccessToken(string $rawToken): ?array
+    {
+        $hash = hash('sha256', $rawToken);
+
+        $sql = "SELECT u.* FROM lift_users u 
+                JOIN lift_access_tokens a ON u.user_id = a.user_id 
+                WHERE a.token_hash = :hash AND a.expires_at > NOW() LIMIT 1";
+
+        return $this->db->fetchOne($sql, ['hash' => $hash]);
+    }
+
+    /**
+     * Удалить конкретный Access-токен (при логауте)
+     */
+    public function deleteAccessToken(string $rawToken): void
+    {
+        $hash = hash('sha256', $rawToken);
+        $this->db->execute("DELETE FROM lift_access_tokens WHERE token_hash = :hash", ['hash' => $hash]);
     }
 }

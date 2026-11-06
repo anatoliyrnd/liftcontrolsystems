@@ -1,15 +1,26 @@
 <?php
+
 declare(strict_types=1);
 
 require_once __DIR__ . '/bootstrap.php';
 
 use App\Http\{Request, Response, ErrorCode, Cors};
 use App\Controller\ApiController;
+use App\Controller\PublicController;
 use App\Exceptions\ApiException;
 
 try {
     $request = Request::fromGlobals();
+
+    // Публичные actions — без авторизации
+    if ($request->action === 'get_tenant_info') {
+        PublicController::create()->handle($request)->send();
+        exit;
+    }
+
+    // Все остальные actions — через ApiController (с авторизацией)
     ApiController::create()->handle($request)->send();
+
 } catch (ApiException $e) {
     Response::error($e->errorCode, $e->getMessage())->send();
 } catch (Throwable $e) {

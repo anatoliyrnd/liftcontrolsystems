@@ -59,7 +59,7 @@ final class AuthService
     public function validate(string $token): array
     {
         // UserRepository сам захэширует токен и найдет пользователя
-        $user = $this->userRepo->findByApiToken($token);
+        $user = $this->userRepo->findByAccessToken($token);
 
         if (!$user) {
             throw new ApiException(ErrorCode::TokenInvalid, 'Токен недействителен');

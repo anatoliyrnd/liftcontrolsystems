@@ -51,14 +51,15 @@ final class ApiController
     {
         $tenant = Tenant::fromRequest();
         $db = DB::forTenant($tenant);
-
         $userRepo    = new UserRepository($db);
         $callRepo    = new CallRepository($db);
         $noteRepo    = new NoteRepository($db);
         $historyRepo = new HistoryRepository($db);
-
         $legacyProxy   = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
-        $configService = new ConfigService($db);
+
+        // ИСПРАВЛЕНО: передаем $tenant как второй аргумент
+        $configService = new ConfigService($db, $tenant);
+
         $addressService = new AddressService($db);
         $notificationsService = new NotificationsService($db);
         $addressCacheService = new AddressCacheService($db);
@@ -81,7 +82,6 @@ final class ApiController
             $addressCacheService
         );
     }
-
     public function handle(Request $request): Response
     {
         if ($request->bearer === null)
@@ -134,16 +134,12 @@ private function getTicket(Request $request): ?array
         $sinceId = (int) ($request->input('since_id') ?? 0);
         $clientVersions = $request->input('versions') ?? [];
 
-        // Используем уже созданные сервисы (не создаём новые!)
-        $notifications = $this->notificationsService->getSince($sinceId);
-        $outdated = $this->addressCacheService->getOutdated($clientVersions);
-        $versions = $this->addressCacheService->getVersions();
+        // 🚨 ИСПОЛЬЗУЕМ getPollingData, КОТОРЫЙ ОТДАЕТ timestamps 🚨
+        $pollingData = $this->notificationsService->getPollingData($sinceId);
 
-        return [
-            'notifications' => $notifications['notifications'],
-            'last_id'       => $notifications['last_id'],
-            'versions'      => $versions,
-            'outdated'      => $outdated,
-        ];
+        // Перезаписываем outdated реальными данными
+        $pollingData['outdated'] = $this->addressCacheService->getOutdated($clientVersions);
+
+        return $pollingData;
     }
 }

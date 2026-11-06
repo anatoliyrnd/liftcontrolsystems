@@ -64,7 +64,18 @@ final class AuthController
             'samesite' => 'Strict'
         ]);
 
-        return Response::ok($result);
+        // Генерируем НОВЫЙ Access-токен
+        $accessToken = bin2hex(random_bytes(32));
+        $expires = time() + 7200; // 2 часа
+
+        // Сохраняем в новую таблицу для ТЕКУЩЕГО устройства
+        $this->userRepo->saveAccessToken((int) $result['user']['id'], $accessToken, $expires);
+
+        return Response::ok([
+            'access_token' => $accessToken,
+            'expires_at' => $expires,
+            'user' => $this->authService->validate($accessToken)
+        ]);
     }
 
     private function handleRefresh(Request $request): Response
@@ -84,10 +95,17 @@ final class AuthController
         $expires = time() + 7200; // 2 часа
         $this->userRepo->updateApiToken((int) $user['user_id'], $accessToken, $expires, (string) $user['webgl_info_spa']);
 
+        // Генерируем НОВЫЙ Access-токен
+        $accessToken = bin2hex(random_bytes(32));
+        $expires = time() + 7200; // 2 часа
+
+        // Сохраняем в новую таблицу для ТЕКУЩЕГО устройства
+        $this->userRepo->saveAccessToken((int) $user['user_id'], $accessToken, $expires);
+
         return Response::ok([
             'access_token' => $accessToken,
             'expires_at' => $expires,
-            'user' => $this->authService->validate($accessToken) // Берем актуальные данные пользователя
+            'user' => $this->authService->validate($accessToken)
         ]);
     }
 
