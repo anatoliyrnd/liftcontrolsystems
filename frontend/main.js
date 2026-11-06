@@ -189,10 +189,52 @@ async function initAppData() {
     notify.error("Не удалось загрузить справочник адресов.", { once: true });
   }
 }
+// Функция для получения и обновления данных тенанта
+async function loadTenantInfo() {
+  const CACHE_KEY = "lift_tenant_info";
+  const TTL = 5 * 60 * 1000; // 5 минут
+  const tenantEl = document.getElementById("navTenantName");
 
+  // 1. Мгновенно показываем из кэша
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) {
+      const { data, ts } = JSON.parse(raw);
+      if (tenantEl && data.org_name) tenantEl.textContent = data.org_name;
+
+      // Если кэш свежий — на сервер не идем
+      if (Date.now() - ts < TTL) return;
+    }
+  } catch (e) {
+    console.warn("[App] Ошибка чтения кэша тенанта", e);
+  }
+
+  // 2. Фоновое обновление (только если сеть есть)
+  if (!navigator.onLine) return;
+
+  try {
+    const resp = await api.post({ action: "get_tenant_info" }, null, "public");
+    if (resp && resp.status === "ok" && resp.data) {
+      if (tenantEl && resp.data.org_name)
+        tenantEl.textContent = resp.data.org_name;
+      localStorage.setItem(
+        CACHE_KEY,
+        JSON.stringify({ data: resp.data, ts: Date.now() }),
+      );
+      // Для обратной совместимости (если где-то используется старый ключ)
+      localStorage.setItem("lift_org_name", resp.data.org_name || "");
+    } else if (resp && resp.code === "tenant_not_found") {
+      console.error("[App] Домен не привязан к организации");
+      // Тут можно показать заглушку на странице логина
+    }
+  } catch (err) {
+    console.warn("[App] Не удалось фоновое обновление tenant_info:", err);
+  }
+}
 // --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 document.addEventListener("DOMContentLoaded", async () => {
   // 1. Базовая инициализация
+  loadTenantInfo();
   const savedOrgName = localStorage.getItem("lift_org_name");
   if (savedOrgName) {
     const tenantEl = document.getElementById("navTenantName");
@@ -204,6 +246,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncTableSettingsFromStorage();
   syncIndicator.init();
   offlineBanner.init();
+  // Дельта-синхронизация от NotificationsPoller
+  window.addEventListener("sync:fetch_open_tickets", () => {
+    if (openTicketsCtrl) openTicketsCtrl.refreshSilently(openTicketsArray);
+  });
+  window.addEventListener("sync:fetch_closed_tickets", () => {
+    if (closedTicketsCtrl)
+      closedTicketsCtrl.refreshSilently(closedTicketsArray);
+  });
+  window.addEventListener("sync:fetch_addresses", async () => {
+    console.log("[App] Получен сигнал об обновлении базы адресов.");
+  });
   // 2. Подписки на события
   // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
   // (см. sync-manager._bindTriggers). Здесь их НЕ дублируем.

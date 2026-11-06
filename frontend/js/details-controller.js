@@ -48,12 +48,16 @@ export class DetailsController {
     const isStale = () => this._mountId !== myMountId;
 
     this.currentTicketId = ticketId;
-    this.state.clearDraft(); // Вместо this.state.clearDraft();
-    this.state.setMode("view"); // Вместо this.mode = "view"
+    this.state.clearDraft();
+    this.state.setMode("view");
 
     const container = document.getElementById("ticketDetailsDynamicContainer");
     if (!container) return;
 
+    // Правка #7 (из чек-листа API_syncCommands.md v5.2):
+    // Явный блок offline_ удалён. Теперь ticketRepository.fetchById сам решает,
+    // откуда брать данные (из offlineDB для offline_, или из сети для серверных).
+    // Мы лишь пропускаем поиск в combinedTicketsArray для offline_ ID.
     const isOfflineId = String(ticketId).startsWith("offline_");
 
     let ticket = isOfflineId
@@ -113,6 +117,16 @@ export class DetailsController {
     this.state.setServerTicket(normalizedTicket, cmds);
 
     this._renderCard(container);
+    // Подписка на внешнее обновление карточки (от NotificationsPoller)
+    this._onExternalUpdate = () => {
+      if (this.state.mode === "view" && this.ticket) {
+        this._refreshTicketAfterSave(false);
+      }
+    };
+    window.addEventListener(
+      "sync:refresh_current_ticket",
+      this._onExternalUpdate,
+    );
   }
   /**
    * После офлайн-операции (edit / comment / close) обновить state.
@@ -593,6 +607,33 @@ export class DetailsController {
       this._updateSaveButtonState();
     }
   }
+  _cleanupAfterAuthError() {
+    this._unlockCard();
+    this._setSaveBtnState("idle");
+
+    if (this.editForm) {
+      this.editForm.destroy();
+      this.editForm = null;
+    }
+    if (this.closeForm) {
+      this.closeForm.destroy();
+      this.closeForm = null;
+    }
+    this.state.clearDraft();
+    this.state.setMode("view");
+
+    if (this.autoReturnTimer) {
+      clearTimeout(this.autoReturnTimer);
+      this.autoReturnTimer = null;
+    }
+  }
+  /**
+   * Проверяет, является ли ответ сервера или выброшенная ошибка
+   * признаком истекшей сессии / потери авторизации.
+   * Если да — api-service уже задиспатчил AUTH_LOST_EVENT ("auth:lost"),
+   * и main.js сам сделает редирект на #/login.
+   */
+
   _applySuccessUI() {
     const editBtn = document.getElementById("editBtn");
     if (editBtn) editBtn.style.display = "none";
@@ -691,12 +732,17 @@ export class DetailsController {
           return;
         }
       }
+      // 🚨 Сессия истекла (api-service уже пометил флагом _authLost) 🚨
+      if (response && response._authLost) {
+        this._cleanupAfterAuthError();
+        return; // main.js сам сделает редирект
+      }
 
       if (response && response.status === "ok") {
         this._setSaveBtnState("success");
         const msg = response.message || "Изменения сохранены.";
-        logHistoryAction(msg);
-        notify.success(msg);
+        logHistoryAction(msg); // ← В историю пишем, но тост НЕ показываем
+        // notify.success(msg);  ← УДАЛЕНО (согласно новой архитектуре)
 
         this._staffChangedInSession = false;
         this._autoOpenPending = false;
@@ -777,6 +823,8 @@ export class DetailsController {
     } catch (err) {
       console.error("[DetailsController] Save error:", err);
       if (!this.ticket) return;
+
+      // ... (обработка прочих ошибок сети) ...
       this._setSaveBtnState("error");
       const msg =
         "Сбой сети при сохранении: " + (err.message || "неизвестная ошибка");
@@ -850,7 +898,6 @@ export class DetailsController {
       if (response && response.status === "ok") {
         const msg = response.message || "Комментарий добавлен.";
         logHistoryAction(msg);
-        notify.success(msg);
 
         const note = {
           id: "local_" + Date.now(),
@@ -891,6 +938,8 @@ export class DetailsController {
     } catch (err) {
       console.error("[DetailsController] AddNote error:", err);
       if (!this.ticket || this.ticket.id !== ticketId) return;
+      // 🚨 ОБРАБОТКА ИСТЕКШЕЙ СЕССИИ (exception) 🚨
+
       logHistoryAction("Сбой сети при добавлении комментария.");
       notify.error("Не удалось добавить комментарий. Проверьте соединение.");
       this.notesComposer.resetButton();
@@ -1101,7 +1150,13 @@ export class DetailsController {
       this.notesComposer.destroy();
       this.notesComposer = null;
     }
-
+    if (this._onExternalUpdate) {
+      window.removeEventListener(
+        "sync:refresh_current_ticket",
+        this._onExternalUpdate,
+      );
+      this._onExternalUpdate = null;
+    }
     this.currentTicketId = null;
     this._sourceArray = null;
     this._sourceIdx = -1;

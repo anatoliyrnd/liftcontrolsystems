@@ -68,15 +68,6 @@ export class TicketsController {
     if (isStale()) return;
     dataTable.setAttribute("data-mode", this.dataType);
 
-    if (this.dataType === "open") {
-      await this._initFilters();
-      if (isStale()) return;
-      await this._updateSyncButton();
-      if (isStale()) return;
-    } else {
-      const filtersBlock = document.getElementById("openOnlyFilters");
-      if (filtersBlock) filtersBlock.style.display = "none";
-    }
     this._initPeriodSelector(globalTicketsArrayRef);
 
     // ПРИНУДИТЕЛЬНО УДАЛЯЕМ СТАРУЮ ШАПКУ.
@@ -302,6 +293,8 @@ export class TicketsController {
       );
 
       if (data && data.code === "aborted") return null;
+      // 🚨 Сессия истекла — молча выходим, не пишем «Сбой сети» в историю 🚨
+      if (data && data._authLost) return null;
       if (!data || data.status === "error") {
         throw new Error((data && data.message) || "Сбой структуры БД");
       }
@@ -559,7 +552,57 @@ export class TicketsController {
       sortedTh.classList.add(this.isAscending ? "sort-asc" : "sort-desc");
     }
   }
+  async refreshSilently(globalTicketsArrayRef) {
+    if (this._isPolling) return;
+    this._isPolling = true;
+    try {
+      const fresh = await this._loadDataFromServer(true);
+      if (!fresh) return;
 
+      // Страховка на окна «онлайн + pending» (backoff / cooldown /
+      // модалка дубликата / старт после сети). В установившемся
+      // состоянии outbox пуст → offlineTickets = [] → merge = no-op.
+      let offlineTickets = [];
+      if (this.dataType === "open") {
+        const outbox = await offlineDB.getAllPending();
+        offlineTickets = outbox
+          .filter(
+            (o) => o.command_type === "CreateTicket" && o.status === "pending",
+          )
+          .map((o) => {
+            const createdAt = Number(o.created_at);
+            const dateInSeconds =
+              createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
+            return {
+              ...o.payload,
+              id: o.offline_uuid || o.command_uuid,
+              type: "open",
+              isOffline: true,
+              address: o.payload.fullAddress || o.payload.address,
+              date: dateInSeconds,
+            };
+          });
+      }
+
+      globalTicketsArrayRef.splice(
+        0,
+        globalTicketsArrayRef.length,
+        ...offlineTickets,
+        ...fresh,
+      );
+      await offlineDB.saveTickets(this.dataType, fresh);
+
+      const dataTable = document.getElementById("dataTable");
+      if (dataTable) {
+        this._renderTableFull(dataTable, globalTicketsArrayRef);
+        if (this.currentSortColumnId !== -1) this._reApplyCurrentSort();
+      }
+    } catch (e) {
+      console.error(`[TicketsController] refreshSilently failed:`, e);
+    } finally {
+      this._isPolling = false;
+    }
+  }
   refreshFromMemory(ticketsArrayRef) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;

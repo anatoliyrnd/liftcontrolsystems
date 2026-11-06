@@ -207,6 +207,7 @@ export class ApiService {
           } else {
             networkLed.reportFailure();
             this._emitAuthLost(code);
+            data._authLost = true;
             return data;
           }
         }
@@ -214,6 +215,7 @@ export class ApiService {
         if (code === "device_mismatch" || code === "user_blocked") {
           networkLed.reportFailure();
           this._emitAuthLost(code);
+          data._authLost = true;
           return data;
         }
 
