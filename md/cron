@@ -1,0 +1,1 @@
+DELETE FROM lift_access_tokens WHERE expires_at < NOW();
