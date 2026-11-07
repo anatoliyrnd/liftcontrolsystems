@@ -3,8 +3,13 @@ import { outboxQueue } from "../outbox-queue.js";
 import { OFFLINE } from "../config.js";
 
 export const createRepository = {
-  async saveOnline(api, payload) {
-    return api.post({ action: "callnew", ...payload }, "Запись инцидента...");
+  // 🔥 ДОБАВЛЕН 3-й аргумент options
+  async saveOnline(api, payload, options = {}) {
+    const body = { action: "callnew", ...payload };
+    if (options.force_create) {
+      body.force_create = true;
+    }
+    return api.post(body, "Запись инцидента...");
   },
 
   async saveOffline(payload) {

@@ -303,6 +303,9 @@ export class TicketsController {
   }
 
   _renderTableFull(dataTable, globalTicketsArrayRef) {
+     if (!Array.isArray(globalTicketsArrayRef)) {
+        globalTicketsArrayRef = []; 
+    }
     this._currentTicketsRef = globalTicketsArrayRef;
     let filteredData = [...globalTicketsArrayRef];
 
@@ -535,66 +538,21 @@ export class TicketsController {
       sortedTh.classList.add(this.isAscending ? "sort-asc" : "sort-desc");
     }
   }
-  async refreshSilently(globalTicketsArrayRef) {
-    if (this._isPolling) return;
-    this._isPolling = true;
-    try {
-      const fresh = await this._loadDataFromServer(true);
-      if (!fresh) return;
-
-      // Страховка на окна «онлайн + pending» (backoff / cooldown /
-      // модалка дубликата / старт после сети). В установившемся
-      // состоянии outbox пуст → offlineTickets = [] → merge = no-op.
-      let offlineTickets = [];
-      if (this.dataType === "open") {
-        const outbox = await offlineDB.getAllPending();
-        offlineTickets = outbox
-          .filter(
-            (o) => o.command_type === "CreateTicket" && o.status === "pending",
-          )
-          .map((o) => {
-            const createdAt = Number(o.created_at);
-            const dateInSeconds =
-              createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
-            return {
-              ...o.payload,
-              id: o.offline_uuid || o.command_uuid,
-              type: "open",
-              isOffline: true,
-              address: o.payload.fullAddress || o.payload.address,
-              date: dateInSeconds,
-            };
-          });
-      }
-
-      globalTicketsArrayRef.splice(
-        0,
-        globalTicketsArrayRef.length,
-        ...offlineTickets,
-        ...fresh,
-      );
-      await offlineDB.saveTickets(this.dataType, fresh);
-
-      const dataTable = document.getElementById("dataTable");
-      if (dataTable) {
-        this._renderTableFull(dataTable, globalTicketsArrayRef);
-        if (this.currentSortColumnId !== -1) this._reApplyCurrentSort();
-      }
-    } catch (e) {
-      console.error(`[TicketsController] refreshSilently failed:`, e);
-    } finally {
-      this._isPolling = false;
-    }
-  }
   refreshFromMemory(ticketsArrayRef) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
+    
+    if (!Array.isArray(ticketsArrayRef)) {
+        console.warn("[TicketsController] refreshFromMemory получил null.");
+        return;
+    } 
 
     this._renderTableFull(dataTable, ticketsArrayRef);
     if (this.currentSortColumnId !== -1) {
       this._reApplyCurrentSort();
     }
   }
+
 
   _applySort(columnId, isAscending) {
     const dataTable = document.getElementById("dataTable");
@@ -794,6 +752,7 @@ export class TicketsController {
   _applyLocalFilters() {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
+  if (!this._currentTicketsRef) return; 
 
     // Убрали пустой цикл, оставили только перерисовку
     this._renderTableFull(dataTable, this._currentTicketsRef);

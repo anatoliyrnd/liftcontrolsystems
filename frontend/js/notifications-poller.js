@@ -22,8 +22,13 @@ export class NotificationsPoller {
     this._isTicking = false;
 
     this._onVisibilityChange = this._onVisibilityChange.bind(this);
+     this._refreshStores = this._refreshStores.bind(this); 
   }
-
+ _handleForceReload(reason) {
+    console.warn("[NotificationsPoller] Получен force_reload. Причина:", reason);
+    // TODO: реализовать модалку принудительной перезагрузки, если потребуется.
+    // Пока просто игнорируем, чтобы не крашить приложение.
+  }
   start() {
     if (this.isRunning) return;
     this.isRunning = true;

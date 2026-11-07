@@ -5,7 +5,8 @@ import { appState } from "./app-state.js";
 import { nowTs } from "./utils/date-utils.js";
 import { createCreateFormView } from "./create/views/create-form-view.js";
 import { createRepository } from "./create/create-repository.js";
-
+import { duplicateTicketModal } from "./components/duplicate-ticket-modal.js";
+import { authStore } from "./auth-store.js";
 export class CreateController {
   constructor(apiInstance, routerInstance) {
     this.api = apiInstance;
@@ -66,7 +67,78 @@ export class CreateController {
         await this._handleOfflineSave(payload, globalTicketsArrayRef);
         return;
       }
+      // 🔥 ПЕРЕХВАТ ДУБЛИКАТА ОТ СЕРВЕРА (ОНЛАЙН)
+      // Проверяем все возможные варианты ответа сервера
+      const isDuplicate = response && (
+          response.code === "duplicate_detected" ||
+          response.status === "duplicate_detected" ||
+          (typeof response.message === "string" && response.message.includes("duplicate_detected"))
+      );
 
+      if (isDuplicate) {
+        this.formView.unlock();
+        this._setSaveBtnState("idle");
+
+        // Пытаемся достать массив существующих заявок
+        let existingTickets = response.existing_tickets || response.data?.existing_tickets || [];
+        
+        // Если сервер засунул массив в строку message (как на скрине), пробуем его вытащить
+        if (existingTickets.length === 0 && typeof response.message === "string" && response.message.includes("[")) {
+            try {
+                const jsonStr = response.message.substring(response.message.indexOf("["));
+                existingTickets = JSON.parse(jsonStr);
+            } catch (e) {
+                console.warn("[CreateController] Не удалось распарсить existing_tickets из message", e);
+            }
+        }
+        
+        // Передаем payload как record (модалке нужен этот объект для отображения)
+        const userName = authStore.getUser()?.name || "вами";
+        const mockRecord = { ...payload, offline_author_name: userName };
+        
+        const confirmed = await duplicateTicketModal.show(mockRecord, existingTickets);
+        
+        if (confirmed) {
+            this._setSaveBtnState("loading");
+            this.formView.lock();
+            try {
+                // Отправляем повторно с force_create: true
+                const forceResponse = await createRepository.saveOnline(this.api, payload, { force_create: true });
+                
+                if (forceResponse && forceResponse.status === "ok") {
+                    this._setSaveBtnState("success");
+                    notify.success(forceResponse.message || "Заявка создана (дубликат).");
+                    logHistoryAction("Создана заявка (дубликат).");
+                    
+                    // Обновляем глобальный список через безопасный splice
+                    try {
+                      const freshOpen = await this.api.post({ data: "open" }, null, "global");
+                      if (Array.isArray(freshOpen)) {
+                        globalTicketsArrayRef.splice(0, globalTicketsArrayRef.length, ...freshOpen);
+                      }
+                    } catch (e) { /* ignore */ }
+
+                    this.formView.reset();
+                    setTimeout(() => this.router.navigate("#/"), UI.AUTO_RETURN_MS);
+                } else {
+                    throw new Error(forceResponse?.message || "Ошибка при создании дубликата");
+                }
+            } catch (err) {
+                console.error("[CreateController] Force create error:", err);
+                this._setSaveBtnState("error");
+                notify.error(err.message || "Не удалось создать дубликат.");
+                setTimeout(() => {
+                    this.formView.unlock();
+                    this._setSaveBtnState("idle");
+                }, UI.ERROR_UNLOCK_MS);
+            }
+        } else {
+            // Пользователь нажал "Отмена"
+            this._setSaveBtnState("idle");
+            notify.info("Создание заявки отменено.");
+        }
+        return; // Прерываем дальнейшую обработку
+      }
       if (response && response.status === "ok") {
         this._setSaveBtnState("success");
         const msg = response.message || "Заявка зарегистрирована.";

@@ -60,7 +60,7 @@ class DuplicateTicketModal {
           ? new Date(t.date * 1000).toLocaleString("ru")
           : "";
         return `<li style="margin-bottom:6px;font-size:13px;">
-                <b>№${this._escape(String(t.call_id ?? "—"))}</b>${d}
+                <b>№${this._escape(String(t.ticket_id ?? t.call_id ?? "—"))}</b>
                 ${dateStr ? `<br><span style="color:var(--text-secondary);font-size:11px;">${this._escape(dateStr)}</span>` : ""}
             </li>`;
       })
