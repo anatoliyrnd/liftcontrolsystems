@@ -173,4 +173,15 @@ export class NotificationsPoller {
       localStorage.setItem(SYNC.VERSIONS_STORAGE_KEY, JSON.stringify(versions));
     } catch (e) {}
   }
+    async _refreshStores(outdatedArray) {
+    if (!outdatedArray || !outdatedArray.length) return;
+    
+    // Примерная логика: если в outdated есть 'open_tickets', стучимся в Main.js
+    if (outdatedArray.includes("open_tickets")) {
+        window.dispatchEvent(new CustomEvent("sync:fetch_open_tickets"));
+    }
+    if (outdatedArray.includes("addresses")) {
+        window.dispatchEvent(new CustomEvent("sync:fetch_addresses"));
+    }
+  }
 }

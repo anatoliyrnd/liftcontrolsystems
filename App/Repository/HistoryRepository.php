@@ -11,8 +11,6 @@ final class HistoryRepository
     {
     }
 
-
-
     public function listByCall(int $callId): array
     {
         return $this->db->fetchAll(
@@ -20,14 +18,15 @@ final class HistoryRepository
             ['id' => $callId]
         );
     }
+
     /**
-     * Запись действия в историю заявки
+     * Запись действия в историю заявки со строгим разделением на колонки
      */
-    public function add(int $callId, string $info, ?int $userId = null): void
+    public function add(int $callId, string $info, ?int $userId = null, string $source = 'online'): void
     {
         $this->db->execute(
-            "INSERT INTO lift_history (history_date, history_info, call_id) VALUES (?, ?, ?)",
-            [time(), $info, $callId]
+            "INSERT INTO lift_history (history_date, history_info, call_id, source) VALUES (?, ?, ?, ?)",
+            [time(), $info, $callId, $source]
         );
     }
 }

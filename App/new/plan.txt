@@ -1,85 +1,9 @@
-План доработки бэкенда
-Фаза 1: Идемпотентность и валидация (блокирует продакшен)
-handleSyncCommands(): Добавить проверку offline_sync_log по batch_id перед обработкой.
-handleSyncCommands(): Добавить проверку offline_command_log по command_uuid для каждой команды.
-handleSyncCommands(): Добавить валидацию лимитов (макс. 20 команд, дубликаты command_uuid, длина batch_id).
-handleSyncCommands(): Обернуть обработку в транзакцию БД.
-handleSyncCommands(): При ошибке команды сохранять в offline_actions_archive.
-Фаза 2: Офлайн-контракт CreateTicket
-CallService: Создать отдельный метод callnewOffline() или расширить callnew() для приёма офлайн-полей.
-CallService: Сохранять offline_uuid в lift_calls.
-CallService: Реализовать три автокоррекции.
-CallService: При наличии comments — сохранять как одну заметку в lift_notes с is_offline = 1.
-CallService: При наличии solution + closed_at — создавать заявку сразу закрытой.
-CallService: При object.vis = 0 — создавать заявку + пометка в историю.
-Фаза 3: Права и политики
-handleSyncCommands(): Добавить проверку ролей перед выполнением каждой команды.
-CallService: Реализовать CallPolicy::can{Action}($user, $payload) или добавить проверки в сервис.
-Фаза 4: Остальные типы команд
-CallService::calledit(): Реализовать Soft Merge (только если поле = 0).
-CallService::callClose(): Сериализовать lift_notes в call_full_note_history и удалять из lift_notes.
-CallService::callnote(): Поддерживать created_at из офлайн.
-Фаза 5: Проверка дублей
-CallService: Перед CreateTicket проверять активные заявки на объект через idx_calls_active_object.
-handleSyncCommands(): Обрабатывать force_create на уровне команды.
-Фаза 6: Инфраструктура
-HistoryRepository: Добавить параметр $source = 'online' в метод add().
-Cron: Создать задачу очистки таблиц идемпотентности по TTL (7/30/30 дней).
-Rate-limiting: Добавить middleware или проверку в ApiController.
-
-<?php
-declare(strict_types=1);
-
-namespace App\Repository;
-
-use App\Database\DB;
-
-final class HistoryRepository
-{
-    public function __construct(private readonly DB $db)
-    {
-    }
-
-    public function listByCall(int $callId): array
-    {
-        return $this->db->fetchAll(
-            "SELECT * FROM lift_history WHERE call_id = :id ORDER BY history_date ASC",
-            ['id' => $callId]
-        );
-    }
-
-    /**
-     * Запись действия в историю заявки с указанием источника
-     * @param string $source Источник действия ('online' | 'offline_sync' | 'spult')
-     */
-    public function add(int $callId, string $info, ?int $userId = null, string $source = 'online'): void
-    {
-        // Если в вашей таблице lift_history пока нет колонки source,
-        // текст источника склеивается с информацией, чтобы не ломать структуру до миграции
-        $historyText = $source === 'offline_sync' ? "[Офлайн] {$info}" : $info;
-
-        $this->db->execute(
-            "INSERT INTO lift_history (history_date, history_info, call_id) VALUES (?, ?, ?)",
-            [time(), $historyText, $callId]
-        );
-    }
-}
-    /**
-     * Поиск активного дубликата заявки по критическим параметрам
-     */
-    public function findActiveDuplicate(int $liftId, int $groupId, int $departmentId): ?array
-    {
-        $sql = "SELECT call_id, call_details, call_status
-                FROM lift_calls
-                WHERE address_lift = :lift_id
-                  AND call_group = :group_id
-                  AND call_department = :department_id
-                  AND call_status = 0
-                LIMIT 1";
-
-        return $this->db->fetchOne($sql, [
-            'lift_id'       => $liftId,
-            'group_id'      => $groupId,
-            'department_id' => $departmentId
-        ]);
-    }
+duplicate_detected через парсинг сообщения исключения
+🟡 Средняя
+Используется проверка str_starts_with($message, 'duplicate_detected:') и извлечение JSON из строки сообщения. Это работает, но хрупко: если формат сообщения изменится, парсинг сломается. Рекомендуется в будущем выделить отдельный тип исключения или возвращаемую структуру
+force_create переносится в payload
+🟡 Средняя
+Протокол требует, чтобы force_create был только на уровне команды. Контроллер сам кладёт его в payload для внутреннего использования. Это допустимо как внутренний контракт, но нужно убедиться, что обычный онлайн-роут callnew не принимает этот флаг от фронтенда
+Метод add() не принимает флаг is_offline
+🟡 Средняя
+Для создания офлайн-заметки нужно сначала вызвать add(), затем updateOfflineFlag(). Это допустимо, но требует двух запросов. В будущем можно расширить add() для приёма флага

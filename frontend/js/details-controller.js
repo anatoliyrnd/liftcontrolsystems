@@ -352,16 +352,23 @@ export class DetailsController {
     });
 
     // Инициализация вложенных компонентов
-    this._renderStaffSlots();
-    renderNotesList(
-      document.getElementById("notesContainerDOM"),
-      document.getElementById("notesCountBadge"),
-      t.note || [],
-    );
-    this.notesComposer = createNotesComposer(
-      document.getElementById("noteComposer"),
-      { onSubmit: () => this._onAddNote() },
-    );
+      this._renderStaffSlots();
+    
+    const notesContainer = document.getElementById("notesContainerDOM");
+    const notesBadge = document.getElementById("notesCountBadge");
+    if (notesContainer && notesBadge) {
+        renderNotesList(notesContainer, notesBadge, t.note || []);
+    }
+
+    // Инициализируем композер только если он есть в DOM (т.е. заявка открыта)
+    const noteComposerEl = document.getElementById("noteComposer");
+    if (noteComposerEl) {
+        this.notesComposer = createNotesComposer(
+          noteComposerEl,
+          { onSubmit: () => this._onAddNote() },
+        );
+    }
+    
     this._bindEvents();
   }
   _renderStaffSlots() {

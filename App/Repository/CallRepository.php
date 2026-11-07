@@ -261,4 +261,44 @@ final class CallRepository
 
         return $result;
     }
+    /**
+     * Поиск ВСЕХ активных дубликатов заявок на конкретном объекте (лифте) (§5)
+     * Возвращает список для формирования модального окна duplicate_detected на клиенте
+     * @return array<int, array{call_id: int, call_details: string, call_date: int}>
+     */
+    public function findActiveDuplicates(int $liftId): array
+    {
+        $sql = "SELECT call_id, call_details, call_date 
+                FROM lift_calls 
+                WHERE address_lift = :lift_id 
+                  AND call_status = 0 
+                ORDER BY call_id DESC";
+
+        return $this->db->fetchAll($sql, [
+            'lift_id' => $liftId
+        ]);
+    }
+
+
+    /**
+     * Поиск существующей заявки по уникальному offline_uuid для предотвращения дублирования
+     */
+    public function findByOfflineUuid(string $offlineUuid): ?array
+    {
+        return $this->db->fetchOne(
+            "SELECT call_id FROM lift_calls WHERE offline_uuid = :offline_uuid LIMIT 1",
+            ['offline_uuid' => $offlineUuid]
+        );
+    }
+
+    /**
+     * Сохранить сериализованный JSON-слепок комментариев в карточку заявки при закрытии (§4.4)
+     */
+    public function saveNotesHistory(int $callId, string $jsonHistory): void
+    {
+        $this->db->execute(
+            "UPDATE lift_calls SET call_full_note_history = :json_history WHERE call_id = :id",
+            ['json_history' => $jsonHistory, 'id' => $callId]
+        );
+    }
 }

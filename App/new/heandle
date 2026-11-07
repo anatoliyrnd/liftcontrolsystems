@@ -1,0 +1,227 @@
+/**
+ * Пакетная обработка офлайн-команд с гарантией идемпотентности.
+ * Протокол v5.2: Batch -> Command -> Archive
+ */
+private function handleSyncCommands(array $user, Request $request): array
+{
+    $batchId = (string) ($request->input('batch_id') ?? '');
+    $commands = $request->input('commands') ?? [];
+
+    if ($batchId === '') {
+        throw new ApiException(ErrorCode::InvalidInput, 'invalid_batch_id');
+    }
+
+    if (empty($commands)) {
+        throw new ApiException(ErrorCode::InvalidInput, 'commands_empty');
+    }
+
+    // 🛡️ 1. ПРОВЕРКА ИДЕМПОТЕНТНОСТИ ПАЧКИ
+    // Если пачка уже была обработана, возвращаем кэшированный ответ из БД.
+    // Это защищает от дублирования заявок при повторной отправке из-за обрыва сети.
+    $cachedResponse = $this->db->fetchOne(
+        "SELECT response_payload FROM offline_sync_log WHERE batch_id = :batch_id",
+        ['batch_id' => $batchId]
+    );
+
+    if ($cachedResponse && !empty($cachedResponse['response_payload'])) {
+        $decoded = json_decode($cachedResponse['response_payload'], true);
+        if ($decoded) {
+            return $decoded; // Возвращаем сохранённый ответ
+        }
+    }
+
+    $results = [];
+    $successCount = 0;
+    $archivedCount = 0;
+    $ignoredCount = 0;
+    $createdTickets = [];
+
+    // 🔄 2. НАЧИНАЕМ ТРАНЗАКЦИЮ
+    // Вся пачка либо применяется целиком, либо не применяется совсем.
+    $this->db->beginTransaction();
+
+    try {
+        foreach ($commands as $cmd) {
+            $uuid = (string) ($cmd['command_uuid'] ?? '');
+            $type = (string) ($cmd['command_type'] ?? '');
+            $payload = $cmd['payload'] ?? [];
+            $offlineUuid = $cmd['offline_uuid'] ?? null;
+
+            // 🛡️ 3. ПРОВЕРКА ИДЕМПОТЕНТНОСТИ КОМАНДЫ
+            $existingCommand = $this->db->fetchOne(
+                "SELECT status, ticket_id FROM offline_command_log WHERE command_uuid = :uuid",
+                ['uuid' => $uuid]
+            );
+
+            if ($existingCommand) {
+                // Команда уже была обработана ранее. Пропускаем выполнение.
+                $ignoredCount++;
+                $results[] = [
+                    'command_uuid' => $uuid,
+                    'status' => 'ignored',
+                    'ticket_id' => (int) ($existingCommand['ticket_id'] ?? 0),
+                    'message' => 'Команда уже была обработана ранее'
+                ];
+                continue;
+            }
+
+            try {
+                // Валидация типа команды
+                if (!in_array($type, ['CreateTicket', 'EditTicket', 'CloseTicket', 'AddComment'], true)) {
+                    throw new \InvalidArgumentException('unknown_command_type');
+                }
+
+                // Выполняем бизнес-логику
+                // ВАЖНО: Внутри этих методов УЖЕ вызывается $this->cacheService->invalidateTickets()
+                $res = match ($type) {
+                    'CreateTicket' => $this->callService->callnew($user, $payload),
+                    'EditTicket'   => $this->callService->calledit($user, $payload),
+                    'CloseTicket'  => $this->callService->callClose($user, $payload),
+                    'AddComment'   => $this->callService->callnote($user, $payload),
+                };
+
+                $successCount++;
+                $serverTicketId = (int) ($res['call_id'] ?? $cmd['ticket_id'] ?? 0);
+
+                // 📝 Логируем успешную команду
+                $this->db->execute(
+                    "INSERT INTO offline_command_log (command_uuid, batch_id, command_type, status, ticket_id)
+                     VALUES (:uuid, :batch_id, :type, 'success', :ticket_id)",
+                    ['uuid' => $uuid, 'batch_id' => $batchId, 'type' => $type, 'ticket_id' => $serverTicketId]
+                );
+
+                $results[] = [
+                    'command_uuid' => $uuid,
+                    'status' => 'success',
+                    'ticket_id' => $serverTicketId,
+                    'server_id' => $serverTicketId,
+                    'offline_uuid' => $offlineUuid,
+                    'message' => 'Команда успешно выполнена'
+                ];
+
+                if ($type === 'CreateTicket' && $offlineUuid) {
+                    $createdTickets[$offlineUuid] = $serverTicketId;
+                }
+
+            } catch (ApiException $e) {
+                // ⚠️ Бизнес-ошибка (валидация, нет прав, заявка закрыта)
+                $archivedCount++;
+                $reason = $this->mapErrorCodeToReason($e->errorCode);
+
+                // 📦 Архивируем для отладки и UI
+                $this->db->execute(
+                    "INSERT INTO offline_actions_archive (command_uuid, batch_id, command_type, reason, message, payload_snapshot)
+                     VALUES (:uuid, :batch_id, :type, :reason, :message, :payload)",
+                    [
+                        'uuid' => $uuid,
+                        'batch_id' => $batchId,
+                        'type' => $type,
+                        'reason' => $reason,
+                        'message' => $e->getMessage(),
+                        'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)
+                    ]
+                );
+
+                // 📝 Логируем как архивную
+                $this->db->execute(
+                    "INSERT INTO offline_command_log (command_uuid, batch_id, command_type, status, ticket_id)
+                     VALUES (:uuid, :batch_id, :type, 'archived', NULL)",
+                    ['uuid' => $uuid, 'batch_id' => $batchId, 'type' => $type]
+                );
+
+                $results[] = [
+                    'command_uuid' => $uuid,
+                    'status' => 'archived',
+                    'reason' => $reason,
+                    'message' => $e->getMessage()
+                ];
+
+            } catch (\Throwable $e) {
+                // 💥 Системная ошибка
+                $archivedCount++;
+                $reason = 'internal_error';
+
+                $this->db->execute(
+                    "INSERT INTO offline_actions_archive (command_uuid, batch_id, command_type, reason, message, payload_snapshot)
+                     VALUES (:uuid, :batch_id, :type, :reason, :message, :payload)",
+                    [
+                        'uuid' => $uuid,
+                        'batch_id' => $batchId,
+                        'type' => $type,
+                        'reason' => $reason,
+                        'message' => 'Внутренняя ошибка: ' . $e->getMessage(),
+                        'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)
+                    ]
+                );
+
+                $this->db->execute(
+                    "INSERT INTO offline_command_log (command_uuid, batch_id, command_type, status, ticket_id)
+                     VALUES (:uuid, :batch_id, :type, 'failed', NULL)",
+                    ['uuid' => $uuid, 'batch_id' => $batchId, 'type' => $type]
+                );
+
+                $results[] = [
+                    'command_uuid' => $uuid,
+                    'status' => 'archived',
+                    'reason' => $reason,
+                    'message' => 'Внутренняя ошибка при выполнении команды'
+                ];
+            }
+        }
+
+        $responseData = [
+            'batch_id' => $batchId,
+            'results' => $results,
+            'summary' => [
+                'success' => $successCount,
+                'archived' => $archivedCount,
+                'ignored' => $ignoredCount,
+                'failed' => 0,
+                'duplicate_detected' => 0
+            ],
+            'created_tickets' => $createdTickets
+        ];
+
+        // 💾 4. СОХРАНЯЕМ ОТВЕТ ДЛЯ ИДЕМПОТЕНТНОСТИ ПАЧКИ
+        $this->db->execute(
+            "INSERT INTO offline_sync_log (batch_id, tenant_id, user_id, response_payload)
+             VALUES (:batch_id, :tenant_id, :user_id, :payload)",
+            [
+                'batch_id' => $batchId,
+                'tenant_id' => $this->tenant?->id ?? 'unknown',
+                'user_id' => (int) $user['id'],
+                'payload' => json_encode($responseData, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)
+            ]
+        );
+
+        $this->db->commit();
+
+        // 🚨 Инвалидация тикетов УЖЕ происходит внутри CallService при каждой мутации.
+        // Дополнительный вызов здесь не требуется.
+
+        return $responseData;
+
+    } catch (\Throwable $e) {
+        $this->db->rollBack();
+        \App\Support\Logger::error("[OFFLINE_SYNC] Критическая ошибка обработки пачки {$batchId}", [
+            'batch_id' => $batchId,
+            'exception' => $e
+        ]);
+        throw new ApiException(ErrorCode::InternalError, 'Ошибка синхронизации офлайн-команд');
+    }
+}
+
+/**
+ * Маппинг кодов ошибок на строковые причины для архива
+ */
+private function mapErrorCodeToReason(ErrorCode $code): string
+{
+    return match ($code) {
+        ErrorCode::InvalidInput => 'validation_error',
+        ErrorCode::NotFound => 'not_found',
+        ErrorCode::Closed => 'ticket_closed',
+        ErrorCode::NoRights => 'no_rights',
+        ErrorCode::MissingToken => 'auth_error',
+        default => 'unknown_error'
+    };
+}

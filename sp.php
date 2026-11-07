@@ -268,24 +268,28 @@ try {
     ];
 
     // === ИНВАЛИДАЦИЯ КЭША ДО создания заявки ===
-// Фронтенд поллит notifications endpoint каждые 120 сек,
-// и должен увидеть обновление версий справочников сразу
+    // Фронтенд поллит notifications endpoint каждые 120 сек,
+    // и должен увидеть обновление версий справочников сразу
+    $addressCache = new \App\Service\AddressCacheService($db);
+
     if ($addressChanged) {
-        $addressCache = new \App\Service\AddressCacheService($db);
         $addressCache->invalidateCache();
         error_log('SPult ADDR: Address cache invalidated (version incremented)');
     }
 
-    // Создаём заявку через CallService (с NotificationsService!)
+    // Создаём заявку через CallService (с NotificationsService и явным кэш-сервисом)
     $notificationsService = new \App\Service\NotificationsService($db);
+    $configService = new \App\Service\ConfigService($db, $tenant);
 
+    // 🌟 ИСПРАВЛЕНО: Сборка CallService приведена к общему паттерну Dependency Injection
     $callService = new CallService(
         new CallRepository($db),
         new NoteRepository($db),
         new HistoryRepository($db),
         new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? ''),
-        new ConfigService($db),
+        $configService,
         $notificationsService,
+        $addressCache, // ← 🌟 Передаем седьмым аргументом для авто-синхронизации версий заявок
         $tenant
     );
 
@@ -295,6 +299,7 @@ try {
     header('Content-Type: text/plain');
     echo "OK: " . ($result['message'] ?? 'Created');
 } catch (ApiException $e) {
+
     error_log('SPult ApiException: ' . $e->getMessage());
     http_response_code(400);
     exit('Error: ' . $e->getMessage());

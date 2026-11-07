@@ -62,6 +62,9 @@ export class TicketsController {
     const myMountId = ++this._mountId;
     const isStale = () => this._mountId !== myMountId;
 
+    if (!Array.isArray(globalTicketsArrayRef)) {
+        globalTicketsArrayRef = []; // Защита от null/undefined
+    }
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
     await this._loadPendingState();
@@ -796,63 +799,48 @@ export class TicketsController {
     this._renderTableFull(dataTable, this._currentTicketsRef);
   }
 
-  async _updateSyncButton() {
-    const [pending, failed] = await Promise.all([
-      offlineDB.getOutboxCount(),
-      offlineDB.getFailedCount(),
-    ]);
-    const btn = document.getElementById("refreshBtn");
-    const badge = document.getElementById("syncBadge");
+     async _updateSyncButton() {
+        const [pending, failed] = await Promise.all([
+            offlineDB.getOutboxCount(),
+            offlineDB.getFailedCount()
+        ]);
+        const btn = document.getElementById("refreshBtn");
+        const badge = document.getElementById("syncBadge");
 
-    if (!btn || !badge) return;
+        if (!btn || !badge) return;
 
-    if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
-      btn.disabled = true;
-      btn.title = "Идет синхронизация...";
-      return;
+        // Если прямо сейчас идет фоновая синхронизация — блокируем кнопку
+        if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
+            btn.disabled = true;
+            btn.title = "Идет синхронизация...";
+            return;
+        }
+
+        btn.disabled = false;
+        const total = pending + failed;
+
+        // 1. Визуальная индикация (цвет и бейдж)
+        if (total > 0) {
+            const isError = failed > 0;
+            btn.style.color = isError ? "#ef4444" : "#f59e0b";
+            badge.textContent = total;
+            badge.style.display = "block";
+            badge.style.background = isError ? "#ef4444" : "#f59e0b";
+            btn.title = isError
+                ? `Ошибка синхронизации: ${failed}. Нажмите для обновления списка.`
+                : `Ожидает синхронизации: ${pending}. Нажмите для обновления списка.`;
+        } else {
+            btn.style.color = "var(--text-primary)";
+            badge.style.display = "none";
+            btn.title = "Перезагрузить данные";
+        }
+
+        // 2. Действие кнопки (ВСЕГДА ручное обновление данных)
+        btn.onclick = (e) => {
+            if (e) e.preventDefault();
+            this.unmount();
+            this.isLoaded = false;
+            this.mount(this._currentTicketsRef);
+        };
     }
-
-    if (
-      window.syncManagerInstance &&
-      Date.now() < window.syncManagerInstance._cooldownUntil
-    ) {
-      const waitMins = Math.ceil(
-        (window.syncManagerInstance._cooldownUntil - Date.now()) / 60000,
-      );
-      btn.disabled = true;
-      btn.title = `Синхронизация заблокирована на ${waitMins} мин. из-за ошибки.`;
-      btn.style.color = "var(--text-secondary)";
-      return;
-    }
-
-    btn.disabled = false;
-
-    const total = pending + failed;
-
-    if (total > 0) {
-      // 🔴 если есть failed, 🟡 если только pending
-      const isError = failed > 0;
-      btn.style.color = isError ? "#ef4444" : "#f59e0b";
-      btn.title = isError
-        ? `Ошибка синхронизации: ${failed} действий. Нажмите, чтобы повторить.`
-        : `Нажмите, чтобы синхронизировать ${pending} офлайн-действий`;
-      badge.textContent = total;
-      badge.style.display = "block";
-      badge.style.background = isError ? "#ef4444" : "#f59e0b";
-      btn.onclick = (e) => {
-        e.preventDefault();
-        window.dispatchEvent(new Event("triggerSync"));
-      };
-    } else {
-      btn.style.color = "var(--text-primary)";
-      btn.title = "Перезагрузить данные";
-      badge.style.display = "none";
-      btn.onclick = (e) => {
-        if (e) e.preventDefault();
-        this.unmount();
-        this.isLoaded = false;
-        this.mount(this._currentTicketsRef);
-      };
-    }
-  }
 }

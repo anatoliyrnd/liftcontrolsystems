@@ -34,4 +34,26 @@ final class NoteRepository
             ['id' => $callId]
         );
     }
+
+    /**
+     * Обновить таймстемп и выставить оффлайн-флаг для заметки
+     */
+    public function updateOfflineFlag(int $noteId, int $createdAt): void
+    {
+        $this->db->execute(
+            "UPDATE lift_notes SET note_post_date = :created_at, is_offline = 1 WHERE note_id = :note_id",
+            ['created_at' => $createdAt, 'note_id' => $noteId]
+        );
+    }
+
+    /**
+     * Каноническое удаление заметок по конкретной заявке при закрытии
+     */
+    public function deleteByCall(int $callId): void
+    {
+        $this->db->execute(
+            "DELETE FROM lift_notes WHERE note_relation = :call_id",
+            ['call_id' => $callId]
+        );
+    }
 }

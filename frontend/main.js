@@ -422,7 +422,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Атомарная замена: синхронный splice вместо .length=0 + .push.
       // Иначе между двумя операциями массив пуст — параллельный
       // рендер (detailsCtrl.mount) увидит пустоту.
-      openTicketsArray.splice(0, openTicketsArray.length, ...newTickets);
+      const safeTickets = Array.isArray(newTickets) ? newTickets : [];
+        openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
       if (window.location.hash === "#/" || window.location.hash === "") {
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       }

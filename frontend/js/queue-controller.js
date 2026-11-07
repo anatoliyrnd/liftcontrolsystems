@@ -112,14 +112,8 @@ export class QueueController {
                     ${cmd.status === "failed" ? "Ошибка" : "Ожидает"}
                 </td>
                 <td>${formatTs(cmd.created_at)}</td>
-                <td>
-                    ${
-                      cmd.status === "failed"
-                        ? '<button class="queue-delete-btn" data-uuid="' +
-                          this._esc(cmd.command_uuid) +
-                          '" title="Удалить из очереди">×</button>'
-                        : ""
-                    }
+                 <td>
+                    <button class="queue-delete-btn" data-uuid="${this._esc(cmd.command_uuid)}" title="Удалить из очереди">×</button>
                 </td>
             `;
 

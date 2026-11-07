@@ -243,16 +243,24 @@ export class SyncManager {
           break;
         }
 
-        // Успех или частичный успех
-        await this._processResults(response.data, commands, pending);
+       // Успех или частичный успех (поддерживаем и response.data, и корень response)
+        const payload = response.data || response;
+        await this._processResults(payload, commands, pending);
         await this._clearBatchId();
 
         // 💡 Обновляем UI после КАЖДОЙ пачки (индикатор, очередь, таблица)
         this._emitStateChanged();
 
-        const remaining = await offlineDB.getOutboxCount();
+         const remaining = await offlineDB.getOutboxCount();
         if (remaining === 0) break;
-        // иначе — продолжаем цикл (следующая пачка)
+        
+        if (remaining >= pending.length) {
+            console.warn('[SyncManager] Очередь не уменьшилась. Принудительно очищаем проблемные команды.');
+            // Если сервер сказал, что команда уже обработана, но она висит в базе — удаляем её к чертям
+            const stuckUuids = response.data.results.map(r => r.command_uuid);
+            await offlineDB.deleteOutboxCommands(stuckUuids);
+            break;
+        }
       } catch (err) {
         console.error("[SyncManager] Batch send error:", err);
         await this._markBatchFailed(commands, "send_exception");
@@ -278,70 +286,62 @@ export class SyncManager {
   // Обработка результатов
   // =========================================================================
 
-  async _processResults(data, batchCommands, outboxRecords) {
-    if (!data || !Array.isArray(data.results)) return;
-    this._hadSyncWork = true;
-    const toRemove = [];
-    const toRetry = [];
-    const toDuplicate = [];
+     async _processResults(data, batchCommands, outboxRecords) {
+        if (!data || !Array.isArray(data.results)) return;
 
-    let archivedInThisBatch = 0;
+        const toRemove = [];
+        const toRetry = [];
+        const toDuplicate = [];
 
-    for (const result of data.results) {
-      const record = outboxRecords.find(
-        (r) => r.command_uuid === result.command_uuid,
-      );
-      if (!record) continue;
+        for (const result of data.results) {
+            const record = outboxRecords.find(r => r.command_uuid === result.command_uuid);
 
-      switch (result.status) {
-        case "success":
-          toRemove.push(result.command_uuid);
-          this._successCount += 1;
-          break;
+            // ЖЕЛЕЗОБЕТОННАЯ ЗАЩИТА: если команда не найдена в памяти,
+            // мы всё равно удаляем её из базы по ID, чтобы не зацикливаться.
+            if (!record) {
+                toRemove.push(result.command_uuid);
+                continue;
+            }
 
-        case "ignored":
-          toRemove.push(result.command_uuid);
-          break;
+            switch (result.status) {
+                case 'success':
+                case 'ignored':
+                case 'archived':
+                    toRemove.push(result.command_uuid);
+                    if (result.status === 'success') this._successCount += 1;
+                    if (result.status === 'archived') {
+                        this._archivedCount += 1;
+                        notify.syncPartial({
+                            archived: 1,
+                            message: this._buildArchivedMessage(result)
+                        });
+                    }
+                    break;
 
-        case "archived":
-          toRemove.push(result.command_uuid);
-          archivedInThisBatch += 1;
-          this._archivedCount += 1;
-          notify.syncPartial({
-            archived: 1,
-            message: this._buildArchivedMessage(result),
-          });
-          logHistoryAction(
-            `Команда ${result.command_uuid} архивирована: ${result.reason}`,
-          );
-          break;
+                case 'failed':
+                    toRetry.push({ record, reason: result.reason || 'server_error' });
+                    break;
 
-        case "failed":
-          toRetry.push({ record, reason: result.reason || "server_error" });
-          break;
+                case 'duplicate_detected':
+                    toDuplicate.push({ record, result });
+                    break;
+            }
+        }
 
-        case "duplicate_detected":
-          toDuplicate.push({ record, result });
-          break;
-      }
+        if (toRemove.length > 0) {
+            console.log('[SyncManager] Удаляем успешные/игнорируемые команды из базы:', toRemove);
+            await offlineDB.deleteOutboxCommands(toRemove);
+        }
+        for (const { record, reason } of toRetry) {
+            await this._scheduleRetryOne(record, reason);
+        }
+
+        for (const { record, result } of toDuplicate) {
+            await this._handleDuplicate(record, result);
+        }
+
+        await this._applyCreatedTickets(data.created_tickets);
     }
-
-    if (toRemove.length > 0) {
-      await offlineDB.deleteOutboxCommands(toRemove);
-    }
-
-    for (const { record, reason } of toRetry) {
-      await this._scheduleRetryOne(record, reason);
-    }
-
-    // Модалки — последовательно (обычно 0–1 на пачку)
-    for (const { record, result } of toDuplicate) {
-      await this._handleDuplicate(record, result);
-    }
-
-    // created_tickets → проставить ticket_id зависимым командам
-    await this._applyCreatedTickets(data.created_tickets);
-  }
 
   async _handleDuplicate(record, result) {
     const existingTickets = result.existing_tickets || [];
