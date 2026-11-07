@@ -158,27 +158,7 @@ export class TicketsController {
       this.refreshIntervalId = null;
     }
 
-    if (this.dataType === "open") {
-      this.refreshIntervalId = setInterval(async () => {
-        const hash = window.location.hash || "#/";
-        if (hash !== "#/") {
-          this.unmount();
-          return;
-        }
-
-        if (this._isPolling) return;
-        this._isPolling = true;
-
-        try {
-          await loadData(true);
-        } catch (e) {
-          console.error("[TicketsController] Background refresh failed:", e);
-          logHistoryAction("Фоновое обновление: " + (e.message || "ошибка"));
-        } finally {
-          this._isPolling = false;
-        }
-      }, API.TICKETS_REFRESH_MS);
-    }
+ 
 
     if (!this._isSubscribedToAddresses) {
       window.addEventListener("addresses:updated", this._onAddressesUpdated);

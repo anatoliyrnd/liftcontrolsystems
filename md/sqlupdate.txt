@@ -290,3 +290,17 @@ WHERE TABLE_SCHEMA = 'zamotaev_l3'
 -- Результат должен содержать 2 строки
   SHOW VARIABLES LIKE 'event_scheduler';
   -- должен быть on
+
+  CREATE TABLE lift_access_tokens (
+    token_hash VARCHAR(64) NOT NULL PRIMARY KEY,
+    user_id INT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_id (user_id),
+    INDEX idx_expires (expires_at)
+);
+INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`) VALUES
+('addresses', 1, UNIX_TIMESTAMP()),
+('staff', 1, UNIX_TIMESTAMP()),
+('dicts', 1, UNIX_TIMESTAMP()),
+('tickets', 1, UNIX_TIMESTAMP());

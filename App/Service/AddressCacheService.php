@@ -7,7 +7,7 @@ use App\Database\DB;
 
 /**
  * Сервис для управления кэшем адресов и версиями справочников
- * При изменении адресов инкрементирует версию, фронтенд узнаёт об этом через notifications endpoint
+ * При изменении данных инкрементирует числовую версию слоя
  */
 final class AddressCacheService
 {
@@ -16,17 +16,24 @@ final class AddressCacheService
     }
 
     /**
+     * Внутренний метод для атомарного инкремента версии слоя
+     */
+    private function increment(string $dictName): void
+    {
+        $this->db->execute(
+            "UPDATE lift_dict_versions
+             SET version = version + 1, updated_at = UNIX_TIMESTAMP()
+             WHERE dict_name = :name",
+            ['name' => $dictName]
+        );
+    }
+
+    /**
      * Инкрементировать версию адресного справочника
-     * Вызывается при создании новых адресов через СПульт или API
      */
     public function invalidateCache(): void
     {
-        $this->db->execute(
-            "UPDATE lift_dict_versions 
-             SET version = version + 1, updated_at = :now 
-             WHERE dict_name = 'addresses'",
-            ['now' => time()]
-        );
+        $this->increment('addresses');
     }
 
     /**
@@ -34,12 +41,7 @@ final class AddressCacheService
      */
     public function invalidateStaff(): void
     {
-        $this->db->execute(
-            "UPDATE lift_dict_versions 
-             SET version = version + 1, updated_at = :now 
-             WHERE dict_name = 'staff'",
-            ['now' => time()]
-        );
+        $this->increment('staff');
     }
 
     /**
@@ -47,17 +49,20 @@ final class AddressCacheService
      */
     public function invalidateDicts(): void
     {
-        $this->db->execute(
-            "UPDATE lift_dict_versions 
-             SET version = version + 1, updated_at = :now 
-             WHERE dict_name = 'dicts'",
-            ['now' => time()]
-        );
+        $this->increment('dicts');
     }
 
     /**
-     * Получить текущие версии всех справочников
-     * @return array{staff: int, dicts: int, addresses: int}
+     * Инкрементировать версию слоя активных и закрытых заявок
+     */
+    public function invalidateTickets(): void
+    {
+        $this->increment('tickets');
+    }
+
+    /**
+     * Получить текущие числовые версии всех слоев данных
+     * @return array{staff: int, dicts: int, addresses: int, tickets: int}
      */
     public function getVersions(): array
     {
@@ -65,7 +70,7 @@ final class AddressCacheService
             "SELECT dict_name, version FROM lift_dict_versions"
         );
 
-        $versions = ['staff' => 0, 'dicts' => 0, 'addresses' => 0];
+        $versions = ['staff' => 0, 'dicts' => 0, 'addresses' => 0, 'tickets' => 0];
         foreach ($rows as $row) {
             $versions[$row['dict_name']] = (int) $row['version'];
         }
@@ -74,22 +79,28 @@ final class AddressCacheService
     }
 
     /**
-     * Определить, какие справочники устарели относительно версий клиента
-     * @param array $clientVersions Версии клиента {staff: int, dicts: int, addresses: int}
-     * @return array Массив устаревших ключей ['addresses', 'staff', ...]
+     * Определить, какие слои данных устарели относительно версий клиента
+     * @param array $clientVersions Версии клиента {staff: int, dicts: int, addresses: int, tickets: int}
+     * @return array Массив устаревших ключей ['addresses', 'tickets', ...]
+     */
+      /**
+     * Определить, какие слои данных устарели относительно версий клиента
+     * @param array $clientVersions Версии клиента {staff: int, dicts: int, addresses: int, open_tickets: int}
+     * @return array Массив устаревших ключей ['addresses', 'open_tickets', ...]
      */
     public function getOutdated(array $clientVersions): array
     {
-        $serverVersions = $this->getVersions();
+        $serverVersions = $this->getVersions(); // Здесь уже лежит 'open_tickets'
         $outdated = [];
 
         foreach ($serverVersions as $key => $serverVer) {
-            $clientVer = $clientVersions[$key] ?? 0;
+            $clientVer = $clientVersions[$key] ?? 0; // Фронтенд передаст localVersions.open_tickets
             if ($serverVer > $clientVer) {
-                $outdated[] = $key;
+                $outdated[] = $key; // В массив упадет 'open_tickets'
             }
         }
 
         return $outdated;
     }
+
 }

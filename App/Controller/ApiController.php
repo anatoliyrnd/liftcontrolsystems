@@ -20,7 +20,6 @@ use App\Service\{
 
 final class ApiController
 {
-    // Без readonly — присваиваются в приватном конструкторе
     private AuthService $authService;
     private CallService $callService;
     private ConfigService $configService;
@@ -57,24 +56,28 @@ final class ApiController
         $historyRepo = new HistoryRepository($db);
         $legacyProxy   = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
 
-        // ИСПРАВЛЕНО: передаем $tenant как второй аргумент
         $configService = new ConfigService($db, $tenant);
-
         $addressService = new AddressService($db);
         $notificationsService = new NotificationsService($db);
+
+        // 1. Создаем инстанс кэша версий
         $addressCacheService = new AddressCacheService($db);
+
+        // 2. Передаем его 7-ым аргументом в CallService
+        $callService = new CallService(
+            $callRepo,
+            $noteRepo,
+            $historyRepo,
+            $legacyProxy,
+            $configService,
+            $notificationsService,
+            $addressCacheService, // 🌟 Передаем инстанс сюда
+            $tenant
+        );
 
         return new self(
             new AuthService($userRepo),
-            new CallService(
-                $callRepo,
-                $noteRepo,
-                $historyRepo,
-                $legacyProxy,
-                $configService,
-                $notificationsService,
-                $tenant
-            ),
+            $callService,
             $configService,
             $addressService,
             $db,
@@ -82,6 +85,8 @@ final class ApiController
             $addressCacheService
         );
     }
+
+
     public function handle(Request $request): Response
     {
         if ($request->bearer === null)
@@ -99,45 +104,48 @@ final class ApiController
             'callnote'      => Response::ok($this->callService->callnote($user, $request->body)),
             'callnew'       => Response::ok($this->callService->callnew($user, $request->body)),
             'notifications' => Response::ok($this->getNotifications($request)),
-            'ticket' => Response::ok(['data' => $this->getTicket($request)]),
+            'ticket'        => Response::ok(['data' => $this->getTicket($request)]),
             default         => throw new ApiException(ErrorCode::UnknownAction, 'Неизвестное действие: ' . $request->action)
         };
     }
-private function getTicket(Request $request): ?array
-{
-    $callId = (int) ($request->input('call_id') ?? 0);
-    if (!$callId) {
+
+    private function getTicket(Request $request): ?array
+    {
+        $callId = (int) ($request->input('call_id') ?? 0);
+        if (!$callId) {
+            return null;
+        }
+
+        $user = $this->authService->validate($request->bearer);
+        $openTickets = $this->callService->open($user);
+        foreach ($openTickets as $ticket) {
+            if ((int) ($ticket['id'] ?? 0) === $callId) {
+                return $ticket;
+            }
+        }
+
+        $closedTickets = $this->callService->close($user, '365');
+        foreach ($closedTickets as $ticket) {
+            if ((int) ($ticket['id'] ?? 0) === $callId) {
+                return $ticket;
+            }
+        }
+
         return null;
     }
 
-    // Ищем в открытых
-    $user = $this->authService->validate($request->bearer);
-    $openTickets = $this->callService->open($user);
-    foreach ($openTickets as $ticket) {
-        if ((int) ($ticket['id'] ?? 0) === $callId) {
-            return $ticket;
-        }
-    }
-
-    // Ищем в закрытых (последние 365 дней)
-    $closedTickets = $this->callService->close($user, '365');
-    foreach ($closedTickets as $ticket) {
-        if ((int) ($ticket['id'] ?? 0) === $callId) {
-            return $ticket;
-        }
-    }
-
-    return null;
-}
     private function getNotifications(Request $request): array
     {
         $sinceId = (int) ($request->input('since_id') ?? 0);
         $clientVersions = $request->input('versions') ?? [];
 
-        // 🚨 ИСПОЛЬЗУЕМ getPollingData, КОТОРЫЙ ОТДАЕТ timestamps 🚨
-        $pollingData = $this->notificationsService->getPollingData($sinceId);
+        // Получаем активные уведомления из базы тенанта
+        $pollingData = $this->notificationsService->getSince($sinceId);
 
-        // Перезаписываем outdated реальными данными
+        // Получаем актуальный срез всех версий с бэкенда для ответа
+        $pollingData['versions'] = $this->addressCacheService->getVersions();
+
+        // Формируем список слоев, которые устарели у данного клиента
         $pollingData['outdated'] = $this->addressCacheService->getOutdated($clientVersions);
 
         return $pollingData;

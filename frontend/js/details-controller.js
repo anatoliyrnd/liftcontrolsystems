@@ -117,7 +117,7 @@ export class DetailsController {
     this.state.setServerTicket(normalizedTicket, cmds);
 
     this._renderCard(container);
-    // Подписка на внешнее обновление карточки (от NotificationsPoller)
+   /*  // Подписка на внешнее обновление карточки (от NotificationsPoller)
     this._onExternalUpdate = () => {
       if (this.state.mode === "view" && this.ticket) {
         this._refreshTicketAfterSave(false);
@@ -126,7 +126,7 @@ export class DetailsController {
     window.addEventListener(
       "sync:refresh_current_ticket",
       this._onExternalUpdate,
-    );
+    ); */
   }
   /**
    * После офлайн-операции (edit / comment / close) обновить state.
@@ -1150,13 +1150,13 @@ export class DetailsController {
       this.notesComposer.destroy();
       this.notesComposer = null;
     }
-    if (this._onExternalUpdate) {
+/*     if (this._onExternalUpdate) {
       window.removeEventListener(
         "sync:refresh_current_ticket",
         this._onExternalUpdate,
       );
       this._onExternalUpdate = null;
-    }
+    } */
     this.currentTicketId = null;
     this._sourceArray = null;
     this._sourceIdx = -1;

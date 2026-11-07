@@ -250,13 +250,27 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("sync:fetch_open_tickets", () => {
     if (openTicketsCtrl) openTicketsCtrl.refreshSilently(openTicketsArray);
   });
-  window.addEventListener("sync:fetch_closed_tickets", () => {
+/*   window.addEventListener("sync:fetch_closed_tickets", () => {
     if (closedTicketsCtrl)
       closedTicketsCtrl.refreshSilently(closedTicketsArray);
-  });
-  window.addEventListener("sync:fetch_addresses", async () => {
-    console.log("[App] Получен сигнал об обновлении базы адресов.");
-  });
+  }); */
+ window.addEventListener("sync:fetch_addresses", async () => {
+  console.log("[App] Получен сигнал об обновлении базы адресов.");
+  notify.info("Обновление справочника адресов. Пожалуйста, подождите...", { once: true });
+  
+  try {
+    const response = await api.post({ data: "loadAddress" }, null, "global");
+    if (response && response.status === "ok") {
+      const flatData = flattenAddresses(response);
+      await offlineDB.saveAddresses(flatData);
+      window.dispatchEvent(new CustomEvent("addresses:updated"));
+      notify.success(`Справочник адресов обновлен (${flatData.length} шт.)`);
+    }
+  } catch (err) {
+    console.error("[App] Ошибка фонового обновления адресов:", err);
+    notify.error("Не удалось обновить справочник адресов.");
+  }
+});
   // 2. Подписки на события
   // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
   // (см. sync-manager._bindTriggers). Здесь их НЕ дублируем.
@@ -282,7 +296,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     router.navigate("#/login");
     // Outbox НЕ очищаем — при следующем логине синхронизация продолжится.
   });
+  // 🚨 Защита от случайного обновления (F5) или закрытия вкладки в офлайне
+  window.addEventListener("beforeunload", (e) => {
+    // Если есть сеть, или пользователь не авторизован — не мешаем ему уходить
+    if (navigator.onLine || !authStore.hasAccess()) return;
 
+    // Если мы офлайн и авторизованы — предупреждаем о потере сессии
+    e.preventDefault();
+    e.returnValue = ""; // Стандартный триггер для показа диалога в браузере
+    return "";
+  });
   // 3. Аутентификация
   if (AUTH.BYPASS_AUTH) {
     authStore.setSession("mock-token", Date.now() + 86400000, {
