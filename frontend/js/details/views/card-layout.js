@@ -92,10 +92,13 @@ export function renderCardLayout({
                         <div id="staffSlotsContainer" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;"></div>
                     </div>
 
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                                       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                         <div class="info-group">
                             <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">📅 Дата регистрации</label>
                             <div style="font-size: 14px; margin-top: 2px;">${formatTs(t.date)}</div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                                👤 ${escapeHtml(t.creator_name || t.offline_author_name || "Неизвестно")}
+                            </div>
                         </div>
                         <div class="info-group">
                             <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">🛠 Дата ремонта</label>
