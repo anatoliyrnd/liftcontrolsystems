@@ -1,0 +1,43 @@
+final class ApiController
+{
+    private AuthService $authService;
+    private CallService $callService;
+    private ConfigService $configService;
+    private AddressService $addressService;
+    private DB $db;
+    private NotificationsService $notificationsService;
+    private AddressCacheService $addressCacheService;
+    private ?Tenant $tenant; // 🌟 ДОБАВЛЕНО
+
+    private function __construct(
+        AuthService $authService,
+        CallService $callService,
+        ConfigService $configService,
+        AddressService $addressService,
+        DB $db,
+        NotificationsService $notificationsService,
+        AddressCacheService $addressCacheService,
+        ?Tenant $tenant // 🌟 ДОБАВЛЕНО
+    ) {
+        // ... присвоение свойств
+        $this->tenant = $tenant;
+    }
+
+    public static function create(): self
+    {
+        $tenant = Tenant::fromRequest();
+        $db = DB::forTenant($tenant);
+        // ... создание сервисов
+
+        return new self(
+            new AuthService($userRepo),
+            $callService,
+            $configService,
+            $addressService,
+            $db,
+            $notificationsService,
+            $addressCacheService,
+            $tenant // 🌟 ПЕРЕДАЕМ ТЕНАНТА
+        );
+    }
+}
