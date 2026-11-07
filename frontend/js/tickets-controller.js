@@ -63,13 +63,22 @@ export class TicketsController {
     const isStale = () => this._mountId !== myMountId;
 
     if (!Array.isArray(globalTicketsArrayRef)) {
-        globalTicketsArrayRef = []; // Защита от null/undefined
+      globalTicketsArrayRef = []; // Защита от null/undefined
     }
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
     await this._loadPendingState();
     if (isStale()) return;
     dataTable.setAttribute("data-mode", this.dataType);
+    if (this.dataType === "open") {
+      await this._initFilters(); // <--- Инициализация городов и скрытия ремонта
+      if (isStale()) return;
+      await this._updateSyncButton();
+      if (isStale()) return;
+    } else {
+      const filtersBlock = document.getElementById("openOnlyFilters");
+      if (filtersBlock) filtersBlock.style.display = "none";
+    }
 
     this._initPeriodSelector(globalTicketsArrayRef);
 
@@ -160,8 +169,6 @@ export class TicketsController {
       clearInterval(this.refreshIntervalId);
       this.refreshIntervalId = null;
     }
-
- 
 
     if (!this._isSubscribedToAddresses) {
       window.addEventListener("addresses:updated", this._onAddressesUpdated);
@@ -303,8 +310,8 @@ export class TicketsController {
   }
 
   _renderTableFull(dataTable, globalTicketsArrayRef) {
-     if (!Array.isArray(globalTicketsArrayRef)) {
-        globalTicketsArrayRef = []; 
+    if (!Array.isArray(globalTicketsArrayRef)) {
+      globalTicketsArrayRef = [];
     }
     this._currentTicketsRef = globalTicketsArrayRef;
     let filteredData = [...globalTicketsArrayRef];
@@ -541,18 +548,17 @@ export class TicketsController {
   refreshFromMemory(ticketsArrayRef) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
-    
+
     if (!Array.isArray(ticketsArrayRef)) {
-        console.warn("[TicketsController] refreshFromMemory получил null.");
-        return;
-    } 
+      console.warn("[TicketsController] refreshFromMemory получил null.");
+      return;
+    }
 
     this._renderTableFull(dataTable, ticketsArrayRef);
     if (this.currentSortColumnId !== -1) {
       this._reApplyCurrentSort();
     }
   }
-
 
   _applySort(columnId, isAscending) {
     const dataTable = document.getElementById("dataTable");
@@ -752,54 +758,54 @@ export class TicketsController {
   _applyLocalFilters() {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
-  if (!this._currentTicketsRef) return; 
+    if (!this._currentTicketsRef) return;
 
     // Убрали пустой цикл, оставили только перерисовку
     this._renderTableFull(dataTable, this._currentTicketsRef);
   }
 
-     async _updateSyncButton() {
-        const [pending, failed] = await Promise.all([
-            offlineDB.getOutboxCount(),
-            offlineDB.getFailedCount()
-        ]);
-        const btn = document.getElementById("refreshBtn");
-        const badge = document.getElementById("syncBadge");
+  async _updateSyncButton() {
+    const [pending, failed] = await Promise.all([
+      offlineDB.getOutboxCount(),
+      offlineDB.getFailedCount(),
+    ]);
+    const btn = document.getElementById("refreshBtn");
+    const badge = document.getElementById("syncBadge");
 
-        if (!btn || !badge) return;
+    if (!btn || !badge) return;
 
-        // Если прямо сейчас идет фоновая синхронизация — блокируем кнопку
-        if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
-            btn.disabled = true;
-            btn.title = "Идет синхронизация...";
-            return;
-        }
-
-        btn.disabled = false;
-        const total = pending + failed;
-
-        // 1. Визуальная индикация (цвет и бейдж)
-        if (total > 0) {
-            const isError = failed > 0;
-            btn.style.color = isError ? "#ef4444" : "#f59e0b";
-            badge.textContent = total;
-            badge.style.display = "block";
-            badge.style.background = isError ? "#ef4444" : "#f59e0b";
-            btn.title = isError
-                ? `Ошибка синхронизации: ${failed}. Нажмите для обновления списка.`
-                : `Ожидает синхронизации: ${pending}. Нажмите для обновления списка.`;
-        } else {
-            btn.style.color = "var(--text-primary)";
-            badge.style.display = "none";
-            btn.title = "Перезагрузить данные";
-        }
-
-        // 2. Действие кнопки (ВСЕГДА ручное обновление данных)
-        btn.onclick = (e) => {
-            if (e) e.preventDefault();
-            this.unmount();
-            this.isLoaded = false;
-            this.mount(this._currentTicketsRef);
-        };
+    // Если прямо сейчас идет фоновая синхронизация — блокируем кнопку
+    if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
+      btn.disabled = true;
+      btn.title = "Идет синхронизация...";
+      return;
     }
+
+    btn.disabled = false;
+    const total = pending + failed;
+
+    // 1. Визуальная индикация (цвет и бейдж)
+    if (total > 0) {
+      const isError = failed > 0;
+      btn.style.color = isError ? "#ef4444" : "#f59e0b";
+      badge.textContent = total;
+      badge.style.display = "block";
+      badge.style.background = isError ? "#ef4444" : "#f59e0b";
+      btn.title = isError
+        ? `Ошибка синхронизации: ${failed}. Нажмите для обновления списка.`
+        : `Ожидает синхронизации: ${pending}. Нажмите для обновления списка.`;
+    } else {
+      btn.style.color = "var(--text-primary)";
+      badge.style.display = "none";
+      btn.title = "Перезагрузить данные";
+    }
+
+    // 2. Действие кнопки (ВСЕГДА ручное обновление данных)
+    btn.onclick = (e) => {
+      if (e) e.preventDefault();
+      this.unmount();
+      this.isLoaded = false;
+      this.mount(this._currentTicketsRef);
+    };
+  }
 }

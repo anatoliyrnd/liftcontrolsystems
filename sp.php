@@ -299,10 +299,49 @@ try {
     header('Content-Type: text/plain');
     echo "OK: " . ($result['message'] ?? 'Created');
 } catch (ApiException $e) {
+    $msg = $e->getMessage();
 
-    error_log('SPult ApiException: ' . $e->getMessage());
+    // Проверяем, это дубликат?
+    if (str_starts_with($msg, 'duplicate_detected:')) {
+        $jsonPart = substr($msg, strlen('duplicate_detected:'));
+        $duplicates = json_decode($jsonPart, true);
+
+        if (!empty($duplicates) && isset($duplicates[0]['ticket_id'])) {
+            $existingCallId = (int) $duplicates[0]['ticket_id'];
+
+            // Добавляем комментарий к существующей заявке
+            try {
+                $noteRepo = new NoteRepository($db);
+                $noteText = sprintf(
+                    "[СПульт %s] %s\nСтатусы: %s\nАдрес: %s",
+                    date('d.m.Y H:i'),
+                    $userSpult ?: 'Дубликат',
+                    'Дубликат - ' . $description,
+                    $fullAddress
+                );
+
+                $noteRepo->add($existingCallId, 0, $noteText);
+
+                error_log(sprintf(
+                    'SPult DUPLICATE: Updated existing ticket #%d with note',
+                    $existingCallId
+                ));
+
+                http_response_code(200);
+                header('Content-Type: text/plain');
+                echo "OK: Updated existing ticket #{$existingCallId}";
+                exit;
+            } catch (Throwable $noteError) {
+                error_log('SPult DUPLICATE NOTE ERROR: ' . $noteError->getMessage());
+                // Если не удалось добавить комментарий — возвращаем оригинальную ошибку
+            }
+        }
+    }
+
+    // Обычная ошибка
+    error_log('SPult ApiException: ' . $msg);
     http_response_code(400);
-    exit('Error: ' . $e->getMessage());
+    exit('Error: ' . $msg);
 } catch (Throwable $e) {
     error_log('SPult Fatal: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
     http_response_code(500);

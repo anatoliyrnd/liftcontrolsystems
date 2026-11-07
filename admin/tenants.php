@@ -29,6 +29,10 @@ $tenants = $registry->listAll();
             margin-bottom: 20px;
         }
 
+        .btn-edit {
+            background: #6f42c1;
+        }
+
         th,
         td {
             border: 1px solid #ccc;
@@ -45,6 +49,11 @@ $tenants = $registry->listAll();
             cursor: pointer;
         }
 
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
         .btn-danger {
             background: #dc3545;
         }
@@ -54,8 +63,20 @@ $tenants = $registry->listAll();
             color: #000;
         }
 
+        .btn-cleanup {
+            background: #17a2b8;
+        }
+
         .form-group {
             margin-bottom: 10px;
+        }
+
+        .legacy-badge {
+            background: #6c757d;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
         }
     </style>
 </head>
@@ -71,6 +92,7 @@ $tenants = $registry->listAll();
             <th>Поддомен</th>
             <th>Название</th>
             <th>БД</th>
+            <th>Legacy</th>
             <th>Статус</th>
             <th>Действия</th>
         </tr>
@@ -79,13 +101,30 @@ $tenants = $registry->listAll();
                 <td><?= htmlspecialchars($t['subdomain']) ?></td>
                 <td><?= htmlspecialchars($t['org_name']) ?></td>
                 <td><?= htmlspecialchars($t['db_name']) ?></td>
+                <td>
+                    <?php if (!empty($t['legacy_compat'])): ?>
+                        <span class="legacy-badge">Legacy</span>
+                    <?php else: ?>
+                        —
+                    <?php endif; ?>
+                </td>
                 <td><?= $t['is_active'] ? 'Активен' : 'Отключен' ?></td>
                 <td>
                     <form action="/admin/tenants_save.php" method="POST" style="display:inline;">
                         <input type="hidden" name="id" value="<?= $t['id'] ?>">
                         <input type="hidden" name="action" value="toggle">
-                        <button class="btn btn-warning" type="submit"><?= $t['is_active'] ? 'Выкл' : 'Вкл' ?></button>
+                        <a class="btn btn-edit" href="/admin/tenant_edit.php?id=<?= (int) $t['id'] ?>">Изменить</a>
+                        <button class="btn btn-warning" type="submit">
+                            <?= $t['is_active'] ? 'Выкл' : 'Вкл' ?>
+                        </button>
                     </form>
+
+                    <?php if (empty($t['legacy_compat']) && !empty($t['is_active'])): ?>
+                        <button class="btn btn-cleanup" data-tenant-id="<?= $t['id'] ?>"
+                            data-tenant-name="<?= htmlspecialchars($t['org_name']) ?>" onclick="cleanupTenant(this)">
+                            Очистка уведомлений
+                        </button>
+                    <?php endif; ?>
                 </td>
             </tr>
         <?php endforeach; ?>
@@ -104,6 +143,44 @@ $tenants = $registry->listAll();
         <div class="form-group"><input type="password" name="db_password" placeholder="Пароль БД" required></div>
         <button type="submit" class="btn">Добавить</button>
     </form>
+
+    <script>
+        function cleanupTenant(button) {
+            const tenantId = button.dataset.tenantId;
+            const tenantName = button.dataset.tenantName;
+
+            // Блокируем кнопку и меняем текст
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = 'Очистка...';
+
+            const formData = new FormData();
+            formData.append('id', tenantId);
+
+            fetch('/admin/cleanup_tenant.php', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(data.message || 'Очистка завершена успешно');
+                    } else {
+                        alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+                    }
+                })
+                .catch(error => {
+                    alert('Ошибка сети: ' + error.message);
+                })
+                .finally(() => {
+                    // Возвращаем кнопку через 60 секунд
+                    setTimeout(() => {
+                        button.disabled = false;
+                        button.textContent = originalText;
+                    }, 60000);
+                });
+        }
+    </script>
 </body>
 
 </html>

@@ -45,3 +45,8 @@ Thumbs.db
 #md/offline_protocol.md
 #md/sqlupdate.txt
 /config/
+cr/cleanup_current.php
+cr/cleanup_notifications_cron.php
+cr/cleanup_notifications.php
+cr/.htaccess
+cr/index.html

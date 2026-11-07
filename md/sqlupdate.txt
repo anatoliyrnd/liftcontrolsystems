@@ -304,3 +304,5 @@ INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`) VALUES
 ('staff', 1, UNIX_TIMESTAMP()),
 ('dicts', 1, UNIX_TIMESTAMP()),
 ('tickets', 1, UNIX_TIMESTAMP());
+-- на всякий случай
+ALTER TABLE lift_notifications ADD INDEX idx_created_at (created_at);
