@@ -15,18 +15,21 @@ export const staffStore = {
 
     const POSITIONS_MAP = BUSINESS?.POSITIONS || {};
 
-    // Бэкенд сам решает, кого прислать. Мы только маппим и добавляем ярлык.
     this.list = arr
       .filter((s) => s && s.id !== undefined && s.name)
       .map((s) => {
-        const userRole = String(s.role || s.position || "").toLowerCase();
+        //  Для отображения должности берем ТОЛЬКО position.
+        // Роль (role) оставляем для системы прав доступа, если она понадобится.
+        const userPosition = String(s.position || "").toLowerCase();
+        const userRole = String(s.role || "").toLowerCase();
+
         return {
           id: s.id,
           name: String(s.name),
           phone: s.phone ? String(s.phone).trim() : null,
-          role: userRole || null,
-          // 🔥 Если роль не найдена в словаре, пишем "Сотрудник"
-          positionLabel: POSITIONS_MAP[userRole] || "Сотрудник",
+          role: userRole || null, // 'dispatcher', 'mechanic' и т.д. (для прав)
+          position: userPosition || null, // 'foreman', 'mechanic' и т.д. (для UI)
+          positionLabel: POSITIONS_MAP[userPosition] || "Сотрудник",
         };
       });
   },
