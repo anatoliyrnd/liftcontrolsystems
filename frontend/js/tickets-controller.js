@@ -769,44 +769,48 @@ export class TicketsController {
       offlineDB.getOutboxCount(),
       offlineDB.getFailedCount(),
     ]);
-    const btn = document.getElementById("refreshBtn");
-    const badge = document.getElementById("syncBadge");
 
-    if (!btn || !badge) return;
-
-    // Если прямо сейчас идет фоновая синхронизация — блокируем кнопку
-    if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
-      btn.disabled = true;
-      btn.title = "Идет синхронизация...";
-      return;
-    }
-
-    btn.disabled = false;
     const total = pending + failed;
 
-    // 1. Визуальная индикация (цвет и бейдж)
-    if (total > 0) {
-      const isError = failed > 0;
-      btn.style.color = isError ? "#ef4444" : "#f59e0b";
-      badge.textContent = total;
-      badge.style.display = "block";
-      badge.style.background = isError ? "#ef4444" : "#f59e0b";
-      btn.title = isError
-        ? `Ошибка синхронизации: ${failed}. Нажмите для обновления списка.`
-        : `Ожидает синхронизации: ${pending}. Нажмите для обновления списка.`;
-    } else {
-      btn.style.color = "var(--text-primary)";
-      badge.style.display = "none";
-      btn.title =
-        "Все данные синхронизированы. Нажмите для принудительного обновления.";
+    // 1. Обновляем бейдж на облаке в шапке
+    const headerBadge = document.querySelector(".sync-indicator-badge");
+    const headerBtn = document.getElementById("syncIndicator");
+
+    if (headerBadge && headerBtn) {
+      if (total > 0) {
+        const isError = failed > 0;
+        headerBadge.textContent = total;
+        headerBadge.style.display = "block";
+        headerBadge.style.background = isError ? "#ef4444" : "#f59e0b";
+        headerBtn.title = isError
+          ? `Ошибка синхронизации: ${failed} действий`
+          : `Ожидает синхронизации: ${total} действий`;
+      } else {
+        headerBadge.style.display = "none";
+        headerBtn.title = "Все данные синхронизированы";
+      }
     }
 
-    // 2. Действие кнопки (ВСЕГДА ручное обновление данных)
-    btn.onclick = (e) => {
-      if (e) e.preventDefault();
-      this.unmount();
-      this.isLoaded = false;
-      this.mount(this._currentTicketsRef);
-    };
+    // 2. Настраиваем кнопку обновления над таблицей (без бейджа)
+    const tableBtn = document.getElementById("refreshBtn");
+    if (tableBtn) {
+      if (window.syncManagerInstance && window.syncManagerInstance.isSyncing) {
+        tableBtn.disabled = true;
+        tableBtn.title = "Идет синхронизация...";
+        return;
+      }
+
+      tableBtn.disabled = false;
+      tableBtn.style.color = "var(--text-primary)";
+      tableBtn.title = "Обновить список заявок";
+
+      // Действие кнопки (ручное обновление данных)
+      tableBtn.onclick = (e) => {
+        if (e) e.preventDefault();
+        this.unmount();
+        this.isLoaded = false;
+        this.mount(this._currentTicketsRef);
+      };
+    }
   }
 }
