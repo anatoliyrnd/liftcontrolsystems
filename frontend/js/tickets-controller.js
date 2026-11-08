@@ -797,7 +797,8 @@ export class TicketsController {
     } else {
       btn.style.color = "var(--text-primary)";
       badge.style.display = "none";
-      btn.title = "Перезагрузить данные";
+      btn.title =
+        "Все данные синхронизированы. Нажмите для принудительного обновления.";
     }
 
     // 2. Действие кнопки (ВСЕГДА ручное обновление данных)
