@@ -233,12 +233,16 @@ export class ApiService {
           return data;
         }
       }
+      window.dispatchEvent(new CustomEvent("app:network-success"));
       networkLed.reportSuccess();
       return data;
     } catch (err) {
       clearTimeout(timeoutId);
 
       if (err.name === "AbortError") {
+        if (timedOut) {
+          window.dispatchEvent(new CustomEvent("app:network-error"));
+        }
         networkLed.reportAborted();
         if (timedOut) {
           return {
@@ -253,6 +257,9 @@ export class ApiService {
       }
 
       networkLed.reportFailure();
+
+      window.dispatchEvent(new CustomEvent("app:network-error"));
+
       return {
         status: "error",
         code: "network_error",

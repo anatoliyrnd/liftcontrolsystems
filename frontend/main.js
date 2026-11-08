@@ -250,27 +250,29 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("sync:fetch_open_tickets", () => {
     if (openTicketsCtrl) openTicketsCtrl.refreshSilently(openTicketsArray);
   });
-/*   window.addEventListener("sync:fetch_closed_tickets", () => {
+  /*   window.addEventListener("sync:fetch_closed_tickets", () => {
     if (closedTicketsCtrl)
       closedTicketsCtrl.refreshSilently(closedTicketsArray);
   }); */
- window.addEventListener("sync:fetch_addresses", async () => {
-  console.log("[App] Получен сигнал об обновлении базы адресов.");
-  notify.info("Обновление справочника адресов. Пожалуйста, подождите...", { once: true });
-  
-  try {
-    const response = await api.post({ data: "loadAddress" }, null, "global");
-    if (response && response.status === "ok") {
-      const flatData = flattenAddresses(response);
-      await offlineDB.saveAddresses(flatData);
-      window.dispatchEvent(new CustomEvent("addresses:updated"));
-      notify.success(`Справочник адресов обновлен (${flatData.length} шт.)`);
+  window.addEventListener("sync:fetch_addresses", async () => {
+    console.log("[App] Получен сигнал об обновлении базы адресов.");
+    notify.info("Обновление справочника адресов. Пожалуйста, подождите...", {
+      once: true,
+    });
+
+    try {
+      const response = await api.post({ data: "loadAddress" }, null, "global");
+      if (response && response.status === "ok") {
+        const flatData = flattenAddresses(response);
+        await offlineDB.saveAddresses(flatData);
+        window.dispatchEvent(new CustomEvent("addresses:updated"));
+        notify.success(`Справочник адресов обновлен (${flatData.length} шт.)`);
+      }
+    } catch (err) {
+      console.error("[App] Ошибка фонового обновления адресов:", err);
+      notify.error("Не удалось обновить справочник адресов.");
     }
-  } catch (err) {
-    console.error("[App] Ошибка фонового обновления адресов:", err);
-    notify.error("Не удалось обновить справочник адресов.");
-  }
-});
+  });
   // 2. Подписки на события
   // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
   // (см. sync-manager._bindTriggers). Здесь их НЕ дублируем.
@@ -423,7 +425,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Иначе между двумя операциями массив пуст — параллельный
       // рендер (detailsCtrl.mount) увидит пустоту.
       const safeTickets = Array.isArray(newTickets) ? newTickets : [];
-        openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
+      openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
       if (window.location.hash === "#/" || window.location.hash === "") {
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       }
