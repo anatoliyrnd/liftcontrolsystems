@@ -98,7 +98,17 @@ export const BUSINESS = {
     6: "📱 SMS",
     7: "✉️ Email",
   },
-
+  // 🔥 Расшифровка позиций (ролей) сотрудников
+  POSITIONS: {
+    mechanic: "Механик",
+    foreman: "Прораб",
+    signalman: "Связист",
+    "electronic-engineer": "Инженер-наладчик",
+    director: "Директор",
+    dispatcher: "Диспетчер",
+    admin: "Администратор",
+    auditor: "Аудитор",
+  },
   /** Маппинг event_type серверных событий → тип тоста */
   EVENT_TOAST_TYPE: {
     ticket_closed: "success",

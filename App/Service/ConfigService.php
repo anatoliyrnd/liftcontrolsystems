@@ -28,7 +28,7 @@ final class ConfigService
 
         // Новый формат меню (v4.0)
         $menu = [];
-        
+
         if ($canAdd) {
             $menu[] = [
                 'id' => 'create',
@@ -39,7 +39,7 @@ final class ConfigService
                 'required_permission' => 'can_add_ticket'
             ];
         }
-        
+
         $menu[] = ['id' => 'open_tickets', 'title' => 'Открытые заявки', 'type' => 'nav-link', 'target_hash' => '#/', 'is_default' => true];
         $menu[] = ['id' => 'closed_tickets', 'title' => 'Закрытые заявки', 'type' => 'nav-link', 'target_hash' => '#/closed'];
 
@@ -100,15 +100,41 @@ final class ConfigService
         }
         return $result;
     }
+    /**
 
+     * Ожидаемые поля в объекте:
+     *   - id (int)
+     *   - name (string)
+     *   - phone (string|null)
+     *   - role (string)
+     *   - position
+     * Используемые фронтендом роли (для красивых ярлыков):
+     *   - 'mechanic'               -> "Механик"
+     *   - 'foreman'                -> "Прораб"
+     *   - 'signalman'              -> "Связист"
+     *   - 'electronic-engineer'    -> "Инженер-наладчик"
+     *   - 'director'               -> "Директор"
+     * 
+     * Если бэкенд пришлет роль, которой нет в словаре (например, 'driver'), 
+     * фронтенд просто выведет имя и подпись "Сотрудник".
+     */
     private function getStaffList(): array
     {
-        $rows = $this->db->fetchAll("SELECT user_id, user_name, user_phone FROM lift_users WHERE (user_level = 2 OR user_level = 0) AND user_block <> 1 ORDER BY user_name");
+        $rows = $this->db->fetchAll("
+        SELECT user_id, user_name, user_phone, user_role, user_position 
+        FROM lift_users 
+        WHERE (user_role = 'mechanic' OR user_role = 'engineer' OR user_position = 'foreman')
+          AND user_block <> 1
+        ORDER BY user_name
+    ");
+
         return array_map(function ($r) {
             return [
                 'id' => (int) $r['user_id'],
                 'name' => $r['user_name'],
-                'phone' => $r['user_phone'] ?: null
+                'phone' => $r['user_phone'] ?: null,
+                'role' => $r['user_role'] ?: null,
+                'position' => $r['user_position'] ?: null
             ];
         }, $rows);
     }
