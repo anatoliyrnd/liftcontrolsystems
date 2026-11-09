@@ -246,34 +246,36 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncTableSettingsFromStorage();
   syncIndicator.init();
   offlineBanner.init();
-  // Дельта-синхронизация от NotificationsPoller
+   // Дельта-синхронизация от NotificationsPoller
   window.addEventListener("sync:fetch_open_tickets", () => {
     if (openTicketsCtrl) openTicketsCtrl.refreshSilently(openTicketsArray);
   });
+
   /*   window.addEventListener("sync:fetch_closed_tickets", () => {
     if (closedTicketsCtrl)
       closedTicketsCtrl.refreshSilently(closedTicketsArray);
   }); */
+
+  // 🔥 ВЫНЕСЕНО НА ВЕРХНИЙ УРОВЕНЬ: Слушатель обновления сотрудников
+  window.addEventListener("sync:fetch_staff", async () => {
+    console.log("[App] Получен сигнал об обновлении справочника сотрудников.");
+    if (menuManager) await menuManager.initialize(); 
+  });
+
+  // 🔥 ВЫНЕСЕНО НА ВЕРХНИЙ УРОВЕНЬ: Слушатель обновления справочников
+  window.addEventListener("sync:fetch_dicts", async () => {
+    console.log("[App] Получен сигнал об обновлении справочников.");
+    if (menuManager) await menuManager.initialize(); 
+  });
+
+  // Слушатель обновления адресов
   window.addEventListener("sync:fetch_addresses", async () => {
     console.log("[App] Получен сигнал об обновлении базы адресов.");
     notify.info("Обновление справочника адресов. Пожалуйста, подождите...", {
       once: true,
     });
-window.addEventListener("sync:fetch_staff", async () => {
-    console.log("[App] Получен сигнал об обновлении справочника сотрудников.");
-    // Если у вас есть отдельный метод обновления — используйте его.
-    // Иначе переинициализируем меню, которое подтянет новые данные.
-    if (menuManager) await menuManager.initialize(); 
-  });
 
-  window.addEventListener("sync:fetch_dicts", async () => {
-    console.log("[App] Получен сигнал об обновлении справочников.");
-    if (menuManager) await menuManager.initialize(); 
-  });
- /*  Если menuManager.initialize() вызывает сильную перерисовку меню и мешает пользователю, 
- лучше добавить в MenuManager отдельный тихий метод refreshStores() и вызывать его).
- */    
-try {
+    try {
       const response = await api.post({ data: "loadAddress" }, null, "global");
       if (response && response.status === "ok") {
         const flatData = flattenAddresses(response);
