@@ -118,4 +118,15 @@ final class UserRepository
         $hash = hash('sha256', $rawToken);
         $this->db->execute("DELETE FROM lift_access_tokens WHERE token_hash = :hash", ['hash' => $hash]);
     }
+    /**
+     * Удалить Refresh-токен (при логауте)
+     */
+    public function deleteRefreshToken(string $rawToken): void
+    {
+        $hash = hash('sha256', $rawToken);
+        $this->db->execute(
+            "DELETE FROM lift_refresh_tokens WHERE token_hash = :hash",
+            ['hash' => $hash]
+        );
+    }
 }

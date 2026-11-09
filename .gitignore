@@ -50,3 +50,8 @@ cr/cleanup_notifications_cron.php
 cr/cleanup_notifications.php
 cr/.htaccess
 cr/index.html
+App.zip
+.gitignore
+App/AI-Optimized Dependency Map/deps.report.md
+App/AI-Optimized Dependency Map/deps.txt
+App/AI-Optimized Dependency Map/deps.index.json
