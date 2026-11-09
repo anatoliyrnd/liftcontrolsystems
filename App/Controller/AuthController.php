@@ -93,7 +93,7 @@ final class AuthController
         // Генерируем НОВЫЙ Access-токен
         $accessToken = bin2hex(random_bytes(32));
         $expires = time() + 7200; // 2 часа
-        $this->userRepo->updateApiToken((int) $user['user_id'], $accessToken, $expires, (string) $user['webgl_info_spa']);
+        //$this->userRepo->updateApiToken((int) $user['user_id'], $accessToken, $expires, (string) $user['webgl_info_spa']);
 
         // Генерируем НОВЫЙ Access-токен
         $accessToken = bin2hex(random_bytes(32));
