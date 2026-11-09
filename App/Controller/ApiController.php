@@ -106,20 +106,30 @@ final class ApiController
             'callnote'      => Response::ok($this->callService->callnote($user, $request->body)),
             'callnew'       => Response::ok($this->callService->callnew($user, $request->body)),
             'notifications' => Response::ok($this->getNotifications($request)),
-            'ticket'        => Response::ok(['data' => $this->getTicket($request)]),
+            'ticket' => Response::ok(['data' => $this->getTicket($request, $user)]),
             'syncCommands'  => Response::ok($this->handleSyncCommands($user, $request)),
             default         => throw new ApiException(ErrorCode::UnknownAction, 'Неизвестное действие: ' . $request->action)
         };
     }
 
-    private function getTicket(Request $request): ?array
+    /**
+     * Эндпоинт одной заявки (§12.2).
+     *
+     * Старая реализация перебирала списки open + close('365'):
+     * это тяжело при тысячах заявок и не находило закрытые старше года.
+     * Теперь — прямой запрос по ID через сервис и репозиторий.
+     *
+     * Особые случаи протокола:
+     * - call_id = 0, заявка не найдена или нет прав → data: null (не ошибка);
+     * - идентификаторы offline_* сюда не доходят: фронтенд читает их из offlineDB.
+     */
+    private function getTicket(Request $request, array $user): ?array
     {
         $callId = (int) ($request->input('call_id') ?? 0);
         if (!$callId) {
             return null;
         }
-        $user = $this->authService->validate($request->bearer);
-        return $this->callRepo->findByIdDetailed($callId, $user);
+        return $this->callService->ticketDetailed($callId, $user);
     }
 
     private function getNotifications(Request $request): array

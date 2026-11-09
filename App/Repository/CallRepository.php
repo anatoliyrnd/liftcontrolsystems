@@ -262,20 +262,41 @@ final class CallRepository
         return $result;
     }
     /**
-     * Поиск ВСЕХ активных дубликатов заявок на конкретном объекте (лифте) (§5)
-     * Возвращает список для формирования модального окна duplicate_detected на клиенте
+     * Поиск ВСЕХ активных дубликатов на объекте с учётом отдела (§5).
+     *
+     * БИЗНЕС-ПРАВИЛО (согласовано): дубликатом считается активная заявка
+     * на том же объекте (address_lift) И в том же отделе (call_department).
+     * Группа (call_group) в фильтр НЕ входит осознанно: группы могут
+     * переназначаться диспетчером, а отдел определяет зону обслуживания.
+     *
+     * Метод вызывается из CallService::callnew ровно ОДИН раз до создания
+     * заявки и используется в двух сценариях:
+     *   a) force_create = false и список непустой → бросаем duplicate_detected,
+     *      клиент показывает модалку с этим списком;
+     *   b) force_create = true → исключение не бросаем, но список запоминаем
+     *      для аудита (номера заявок попадут в историю после создания).
+     *
+     * ВАЖНО: выборка строго ДО INSERT. После создания новая заявка сама
+     * становится активной (call_status = 0) и попала бы в собственный
+     * список дубликатов, сделав аудит-пометку бессмысленной.
+     *
+     * Индекс idx_calls_active_object (address_lift, call_status) продолжает
+     * работать: отдел досеивается после индексного поиска.
+     *
      * @return array<int, array{call_id: int, call_details: string, call_date: int}>
      */
-    public function findActiveDuplicates(int $liftId): array
+    public function findActiveDuplicates(int $liftId, int $departmentId): array
     {
-        $sql = "SELECT call_id, call_details, call_date 
-                FROM lift_calls 
-                WHERE address_lift = :lift_id 
-                  AND call_status = 0 
+        $sql = "SELECT call_id, call_details, call_date
+                FROM lift_calls
+                WHERE address_lift = :lift_id
+                  AND call_department = :department_id
+                  AND call_status = 0
                 ORDER BY call_id DESC";
 
         return $this->db->fetchAll($sql, [
-            'lift_id' => $liftId
+            'lift_id'       => $liftId,
+            'department_id' => $departmentId,
         ]);
     }
 
@@ -365,15 +386,21 @@ final class CallRepository
             $fullHistoryLines[] = "[{$date}] {$source}{$row['history_info']}";
         }
 
-        // Формирование заметок
+        // Формирование заметок в единый контракт для открытых и закрытых.
+        // 🌟 is_offline (пункт 4): фронтенд рисует маркер ⏳ у комментариев,
+        // пришедших из офлайн-синхронизации.
+        // Для открытых заявок поле приходит из lift_notes (выборка n.*),
+        // для закрытых — из слепка call_full_note_history (ключ уже в JSON).
+        // ?? 0 страхует старые слепки, где ключа ещё нет.
         $noteArray = [];
         foreach ($notes as $note) {
             $noteArray[] = [
-                'id' => (int)$note['note_id'],
-                'user' => $note['user_name'] ?? 'Система',
-                'body' => $note['note_body'],
-                'date' => (int)$note['note_post_date'],
-                'type' => (int)$note['note_type'],
+                'id'         => (int)$note['note_id'],
+                'user'       => $note['user_name'] ?? 'Система',
+                'body'       => $note['note_body'],
+                'date'       => (int)$note['note_post_date'],
+                'type'       => (int)$note['note_type'],
+                'is_offline' => (int)($note['is_offline'] ?? 0),
             ];
         }
 

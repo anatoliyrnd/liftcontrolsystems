@@ -24,7 +24,26 @@ class CallService
 
     public function open(array $user): array { return $this->callRepo->listOpen($user); }
     public function close(array $user, string|int|null $period): array { return $this->callRepo->listClosed($user, $period); }
-
+    /**
+     * Карточка заявки прямым запросом (§12.2).
+     *
+     * Зачем транзит через сервис, а не прямой вызов из контроллера:
+     * - сохраняется слоистость controller → service → repository;
+     * - контроллеру не нужна новая зависимость CallRepository;
+     * - IDE перестаёт ругаться на неиспользуемый findByIdDetailed:
+     *   цепочка вызовов становится getTicket → ticketDetailed → findByIdDetailed.
+     *
+     * Вся тяжёлая работа (прямой SQL, права, заметки, история, can_*)
+     * живёт в репозитории; сервис лишь пропускает вызов.
+     *
+     * @param int   $callId Номер заявки из запроса
+     * @param array $user   Авторизованный пользователь (для проверки прав)
+     * @return array|null Контракт заявки по §12.2 или null (не найдена / нет прав)
+     */
+    public function ticketDetailed(int $callId, array $user): ?array
+    {
+        return $this->callRepo->findByIdDetailed($callId, $user);
+    }
     /**
      * Создание новой заявки с явным указанием источника и полной валидацией (§4.2, §7)
      */
@@ -65,21 +84,31 @@ class CallService
         $groupId = (int) ($data['group_id'] ?? 9);
         $forceCreate = (bool) ($data['force_create'] ?? false);
 
-        // 🛡️ ИСПРАВЛЕНО: Вызов канонического findActiveDuplicates во множественном числе (§5)
-        if (!$forceCreate) {
-            $activeDuplicates = $this->callRepo->findActiveDuplicates($addr['lift']);
-            if (!empty($activeDuplicates)) {
-                $errorData = [];
-                foreach ($activeDuplicates as $dup) {
-                    $errorData[] = [
-                        'ticket_id' => (int)$dup['call_id'],
-                        'details'   => $dup['call_details'],
-                        'date'      => (int)$dup['call_date']
-                    ];
-                }
-                throw new ApiException(ErrorCode::InvalidInput, 'duplicate_detected:' . json_encode($errorData, JSON_UNESCAPED_UNICODE));
+        // 🛡️ ДУБЛИКАТЫ (§5, правило «объект + отдел»).
+        // Список снимается ОДИН раз и ДО создания заявки — он нужен сразу
+        // для двух веток: и для отказа с модалкой, и для аудита force_create.
+        $activeDuplicates = $this->callRepo->findActiveDuplicates($addr['lift'], $depId);
+
+        // Ветка отказа: дубликаты есть, принудительного подтверждения нет.
+        // Сообщение исключения несёт JSON-список: ApiController распознаёт
+        // префикс 'duplicate_detected:' и собирает ответ с existing_tickets,
+        // по которому клиент рисует модалку.
+        if (!$forceCreate && !empty($activeDuplicates)) {
+            $errorData = [];
+            foreach ($activeDuplicates as $dup) {
+                $errorData[] = [
+                    'ticket_id' => (int)$dup['call_id'],
+                    'details'   => $dup['call_details'],
+                    'date'      => (int)$dup['call_date'],
+                ];
             }
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'duplicate_detected:' . json_encode($errorData, JSON_UNESCAPED_UNICODE)
+            );
         }
+        // Ветка force_create: исключение НЕ бросаем, $activeDuplicates
+        // сохраняем для аудита после создания (см. блок после create).
 
         // 🔄 Подготовка автокоррекций оффлайна
         $now = time();
@@ -153,7 +182,35 @@ class CallService
         if (!$addr['vis']) {
             $this->historyRepo->add($callId, "объект выведен из обслуживания на момент синхронизации", $authorId, $source);
         }
-
+        // 🛡️ АУДИТ ПРИНУДИТЕЛЬНОГО ДУБЛИКАТА (пункт 2 плана).
+        // Пишется только когда диспетчер осознанно подтвердил создание
+        // через модалку дубликата (force_create = true). Список снят ДО
+        // создания, поэтому содержит только «чужие» заявки.
+        if ($forceCreate) {
+            if (!empty($activeDuplicates)) {
+                // Склеиваем номера в читаемую строку: «№34, №32».
+                $numbers = implode(', ', array_map(
+                    static fn (array $dup): string => '№' . (int)$dup['call_id'],
+                    $activeDuplicates
+                ));
+                $this->historyRepo->add(
+                    $callId,
+                    "Принудительное создание дубликата (подтверждено диспетчером {$authorName}). Возможный дубликат к заявке(ам) {$numbers}",
+                    $authorId,
+                    $source
+                );
+            } else {
+                // Легальная гонка: пока пачка шла до сервера (или пока была
+                // открыта модалка), дубликат закрыл другой пользователь.
+                // Заявка создаётся как обычная, но факт подтверждения фиксируем.
+                $this->historyRepo->add(
+                    $callId,
+                    "Принудительное создание дубликата (подтверждено диспетчером {$authorName}). Активных дубликатов на момент создания не было",
+                    $authorId,
+                    $source
+                );
+            }
+        }
         // 🛡️ ИСПРАВЛЕНО: Теперь оффлайн-комментарии гарантированно получают флаг is_offline=1 (§2.10)
         if (!empty($data['comments'])) {
             $noteId = $this->noteRepo->add($callId, $authorId, trim((string)$data['comments']));
@@ -163,6 +220,16 @@ class CallService
         }
 
         $this->cacheService->invalidateTickets();
+        // 🔔 ВОЗВРАТ УВЕДОМЛЕНИЙ (фикс регрессии: в v5.2-версии сервиса
+        // вызовы NotificationsService исчезли из всех четырёх методов).
+        // Если офлайн-заявка пришла сразу закрытой (solution + closed_at),
+        // шлём событие ЗАКРЫТИЯ, а не создания: иначе диспетчеры получат
+        // тост «новая заявка» о фактически завершённой работе.
+        if ($callStatus === 1) {
+            $this->notificationsService->ticketClosed($callId, $solution, (string)$closeName, $authorId);
+        } else {
+            $this->notificationsService->ticketCreated($callId, $addr['full_address'], $authorName, $authorId);
+        }
         return ['status' => 'ok', 'call_id' => $callId, 'message' => 'Заявка успешно создана.'];
     }
 
@@ -217,6 +284,10 @@ class CallService
             $this->historyRepo->add($callId, "Отредактирована пользователем {$authorName}", $authorId, $source);
             $this->cacheService->invalidateTickets();
         }
+// 🔔 Событие редактирования шлём ТОЛЬКО при фактических
+        // изменениях: пустое редактирование не должно спамить
+        // тостами и Telegram остальным пользователям.
+        $this->notificationsService->ticketEdited($callId, $authorName, $authorId);
 
         return ['message' => "Изменения по заявке №{$callId} сохранены."];
     }
@@ -256,6 +327,8 @@ class CallService
 
         $this->historyRepo->add($callId, "Закрыта пользователем {$authorName}. Решение: {$solution}", $authorId, $source);
         $this->cacheService->invalidateTickets();
+        // 🔔 Событие закрытия: тосты другим пользователям + Telegram.
+        $this->notificationsService->ticketClosed($callId, $solution, $authorName, $authorId);
 
         return ['message' => "Заявка №{$callId} успешно закрыта."];
     }
@@ -287,6 +360,8 @@ class CallService
 
         $this->historyRepo->add($callId, "Добавлена заметка от {$authorName}: {$note}", $authorId, $source);
         $this->cacheService->invalidateTickets();
+        // 🔔 Событие нового комментария.
+        $this->notificationsService->ticketNote($callId, $authorName, $authorId);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
     }
