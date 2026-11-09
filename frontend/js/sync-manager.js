@@ -256,9 +256,21 @@ export class SyncManager {
         
         if (remaining >= pending.length) {
             console.warn('[SyncManager] Очередь не уменьшилась. Принудительно очищаем проблемные команды.');
-            // Если сервер сказал, что команда уже обработана, но она висит в базе — удаляем её к чертям
-            const stuckUuids = response.data.results.map(r => r.command_uuid);
-            await offlineDB.deleteOutboxCommands(stuckUuids);
+            
+            // Безопасно извлекаем массив результатов. 
+            // Если response.data нет (например, replay кэша), берем из корня response.
+            const payload = response.data || response;
+            const resultsArray = Array.isArray(payload.results) ? payload.results : [];
+            
+            // Если сервер вернул результаты — чистим по ним. 
+            // Если нет — чистим по текущей пачке pending (чтобы избежать вечного цикла).
+            const stuckUuids = resultsArray.length > 0
+                ? resultsArray.map(r => r.command_uuid).filter(Boolean)
+                : pending.map(p => p.command_uuid).filter(Boolean);
+                
+            if (stuckUuids.length > 0) {
+                await offlineDB.deleteOutboxCommands(stuckUuids);
+            }
             break;
         }
       } catch (err) {

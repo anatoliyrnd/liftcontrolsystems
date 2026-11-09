@@ -259,8 +259,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     notify.info("Обновление справочника адресов. Пожалуйста, подождите...", {
       once: true,
     });
+window.addEventListener("sync:fetch_staff", async () => {
+    console.log("[App] Получен сигнал об обновлении справочника сотрудников.");
+    // Если у вас есть отдельный метод обновления — используйте его.
+    // Иначе переинициализируем меню, которое подтянет новые данные.
+    if (menuManager) await menuManager.initialize(); 
+  });
 
-    try {
+  window.addEventListener("sync:fetch_dicts", async () => {
+    console.log("[App] Получен сигнал об обновлении справочников.");
+    if (menuManager) await menuManager.initialize(); 
+  });
+ /*  Если menuManager.initialize() вызывает сильную перерисовку меню и мешает пользователю, 
+ лучше добавить в MenuManager отдельный тихий метод refreshStores() и вызывать его).
+ */    
+try {
       const response = await api.post({ data: "loadAddress" }, null, "global");
       if (response && response.status === "ok") {
         const flatData = flattenAddresses(response);

@@ -115,20 +115,11 @@ final class ApiController
     private function getTicket(Request $request): ?array
     {
         $callId = (int) ($request->input('call_id') ?? 0);
-        if (!$callId) return null;
-
+        if (!$callId) {
+            return null;
+        }
         $user = $this->authService->validate($request->bearer);
-        $openTickets = $this->callService->open($user);
-        foreach ($openTickets as $ticket) {
-            if ((int) ($ticket['id'] ?? 0) === $callId) return $ticket;
-        }
-
-        $closedTickets = $this->callService->close($user, '365');
-        foreach ($closedTickets as $ticket) {
-            if ((int) ($ticket['id'] ?? 0) === $callId) return $ticket;
-        }
-
-        return null;
+        return $this->callRepo->findByIdDetailed($callId, $user);
     }
 
     private function getNotifications(Request $request): array

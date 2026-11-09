@@ -301,4 +301,138 @@ final class CallRepository
             ['json_history' => $jsonHistory, 'id' => $callId]
         );
     }
+    /**
+     * Получить заявку по ID с полной историей и правами доступа (§12.2)
+     */
+    public function findByIdDetailed(int $callId, array $user): ?array
+    {
+        // Прямой запрос по ID без ограничений по дате
+        $sql = "SELECT c.*,
+        COALESCE((t.type_report = 0), 0) AS is_emergency,
+        u1.user_name AS staff_name, u1.user_phone AS staff_phone,
+        u2.user_name AS staff_name2, u2.user_phone AS staff_phone2,
+        u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
+        d.type_name AS department,
+        r.type_name AS request,
+        g.type_name AS group_name
+    FROM lift_calls c
+    LEFT JOIN lift_users u1 ON c.call_staff = u1.user_id
+    LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
+    LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
+    LEFT JOIN lift_types d ON c.call_department = d.type_id
+    LEFT JOIN lift_types r ON c.call_request = r.type_id
+    LEFT JOIN lift_types g ON c.call_group = g.type_id
+    LEFT JOIN lift_types t ON t.type_id = c.call_department AND t.type = 1
+    WHERE c.call_id = :id";
+
+        $call = $this->db->fetchOne($sql, ['id' => $callId]);
+        if (!$call) {
+            return null;
+        }
+
+        // Проверка прав доступа
+        $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
+        if (!$readAll) {
+            $assigned = [(int)$call['call_staff'], (int)$call['call_staff2'], (int)$call['call_staff3']];
+            if (!in_array((int)$user['id'], $assigned)) {
+                return null; // Нет прав
+            }
+        }
+
+        // Загрузка заметок
+        $notes = [];
+        if ((int)$call['call_status'] === 0) {
+            // Открытая — читаем из lift_notes
+            $notes = $this->getNotesForCalls([$callId])[$callId] ?? [];
+        } else {
+            // Закрытая — читаем из call_full_note_history
+            $jsonNotes = $call['call_full_note_history'] ?? '{}';
+            $decoded = json_decode($jsonNotes, true);
+            if (is_array($decoded)) {
+                $notes = array_values($decoded); // Преобразуем в массив
+            }
+        }
+
+        // Загрузка текстовой истории
+        $historyRows = $this->db->fetchAll(
+            "SELECT history_info, history_date, source FROM lift_history WHERE call_id = :id ORDER BY history_date ASC",
+            ['id' => $callId]
+        );
+        $fullHistoryLines = [];
+        foreach ($historyRows as $row) {
+            $date = date('d.m.Y H:i', (int)$row['history_date']);
+            $source = $row['source'] === 'offline_sync' ? '[Офлайн] ' : '';
+            $fullHistoryLines[] = "[{$date}] {$source}{$row['history_info']}";
+        }
+
+        // Формирование заметок
+        $noteArray = [];
+        foreach ($notes as $note) {
+            $noteArray[] = [
+                'id' => (int)$note['note_id'],
+                'user' => $note['user_name'] ?? 'Система',
+                'body' => $note['note_body'],
+                'date' => (int)$note['note_post_date'],
+                'type' => (int)$note['note_type'],
+            ];
+        }
+
+        // Вычисление прав
+        $isOpen = (int)$call['call_status'] === 0;
+        $isAssigned = in_array((int)$user['id'], [(int)$call['call_staff'], (int)$call['call_staff2'], (int)$call['call_staff3']]);
+        $canEdit = $isOpen && ($readAll || $isAssigned);
+        $canClose = $isOpen && ($user['role'] === 'administrator' || $user['role'] === 'dispatcher' || $user['role'] === 'engineer' || $isAssigned);
+        $canComment = $isOpen;
+
+        return [
+            'call_id' => (int)$call['call_id'],
+            'call_number' => (string)$call['call_id'],
+            'type' => $isOpen ? 'open' : 'close',
+            'fullAddress' => $call['call_adres'],
+            'city_id' => (int)$call['address_city'],
+            'street_id' => (int)$call['address_street'],
+            'home_id' => (int)$call['address_home'],
+            'object_id' => (int)$call['address_lift'],
+            'details' => $call['call_details'],
+            'date' => (int)$call['call_date'],
+            'repair_time' => (int)$call['expected_repair_time'],
+            'department' => $call['department'],
+            'department_id' => (string)$call['call_department'],
+            'group' => $call['group_name'],
+            'group_id' => (string)$call['call_group'],
+            'elevator_group_id' => null,
+            'elevator_group_name' => null,
+            'request' => $call['request'],
+            'request_id' => (string)$call['call_request'],
+            'alert_level' => (int)($call['alert_level'] ?? 1),
+            'is_emergency' => (bool)($call['is_emergency'] ?? false),
+            'other' => count($noteArray) > 0 ? 'Есть заметки (' . count($noteArray) . ')' : '—',
+            'note_num' => count($noteArray),
+            'staff_id' => $call['call_staff'] ? (int)$call['call_staff'] : null,
+            'staff_name' => $call['staff_name'],
+            'staff_phone' => $call['staff_phone'] ?? null,
+            'notify_status' => $call['call_staff_status'] !== null ? (int)$call['call_staff_status'] : null,
+            'notify_date' => $call['call_staff_date'] ? (int)$call['call_staff_date'] : null,
+            'staff_id2' => $call['call_staff2'] ? (int)$call['call_staff2'] : null,
+            'staff_name2' => $call['staff_name2'],
+            'staff_phone2' => $call['staff_phone2'] ?? null,
+            'notify_status2' => $call['call_staff_status2'] !== null ? (int)$call['call_staff_status2'] : null,
+            'notify_date2' => $call['call_staff_date2'] ? (int)$call['call_staff_date2'] : null,
+            'staff_id3' => $call['call_staff3'] ? (int)$call['call_staff3'] : null,
+            'staff_name3' => $call['staff_name3'],
+            'staff_phone3' => $call['staff_phone3'] ?? null,
+            'notify_status3' => $call['call_staff_status3'] !== null ? (int)$call['call_staff_status3'] : null,
+            'notify_date3' => $call['call_staff_date3'] ? (int)$call['call_staff_date3'] : null,
+            'solution' => !$isOpen ? $call['call_solution'] : '—',
+            'close_name' => !$isOpen ? $call['call_last_name'] : '—',
+            'close_date' => !$isOpen ? (int)$call['call_date2'] : null,
+            'full_history' => implode("\n", $fullHistoryLines),
+            'note' => $noteArray, // Массив, не объект
+            'can_edit' => $canEdit,
+            'can_close' => $canClose,
+            'can_comment' => $canComment,
+            'closureallowed' => 0,
+        ];
+    }
+
 }

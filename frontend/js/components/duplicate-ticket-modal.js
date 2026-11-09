@@ -53,16 +53,36 @@ class DuplicateTicketModal {
       ? `${record.offline_author_name}`
       : "другим пользователем";
 
-    const listHtml = existingTickets
+        const listHtml = existingTickets
       .map((t) => {
-        const d = t.details ? ` — ${this._escape(t.details)}` : "";
+        // 1. Достаем ID (сервер отдает ticket_id)
+        const ticketId = t.ticket_id ?? t.call_id ?? "—";
+        
+        // 2. Форматируем дату
         const dateStr = t.date
           ? new Date(t.date * 1000).toLocaleString("ru")
           : "";
-        return `<li style="margin-bottom:6px;font-size:13px;">
-                <b>№${this._escape(String(t.ticket_id ?? t.call_id ?? "—"))}</b>
-                ${dateStr ? `<br><span style="color:var(--text-secondary);font-size:11px;">${this._escape(dateStr)}</span>` : ""}
-            </li>`;
+          
+        // 3. Достаем адрес (на случай, если сервер его присылает)
+        const addressStr = t.address || t.fullAddress;
+        const addressHtml = addressStr 
+            ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">📍 ${this._escape(addressStr)}</div>` 
+            : "";
+            
+        // 4. Достаем описание (details)
+        const detailsHtml = t.details 
+            ? `<div style="margin-top:6px; font-size:13px; font-weight:500;">${this._escape(t.details)}</div>` 
+            : "";
+
+        // 5. Собираем карточку
+        return `<li style="margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid rgba(0,0,0,0.1);">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <b style="font-size:14px; color:var(--text-primary);">№${this._escape(String(ticketId))}</b>
+                        <span style="color:var(--text-secondary); font-size:11px;">${this._escape(dateStr)}</span>
+                    </div>
+                    ${addressHtml}
+                    ${detailsHtml}
+                </li>`;
       })
       .join("");
 

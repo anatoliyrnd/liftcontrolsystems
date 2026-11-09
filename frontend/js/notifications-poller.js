@@ -72,36 +72,54 @@ export class NotificationsPoller {
       if (!response || typeof response !== "object") return;
       if (response._authLost === true) return;
 
-      // 🚨 ОБРАБОТКА ВЕРСИЙ (ДЕЛЬТА-СИНХРОНИЗАЦИЯ) 🚨
+          // 🚨 ОБРАБОТКА ВЕРСИЙ (ДЕЛЬТА-СИНХРОНИЗАЦИЯ) 🚨
       if (response.versions) {
         const serverVersions = response.versions;
-        let shouldFetchOpen = false;
-        let shouldFetchAddresses = false;
+        
+        // 1. Нормализуем ключи (бэкенд отдает tickets, фронт ждет open_tickets)
+        const vTickets = Number(serverVersions.tickets ?? serverVersions.open_tickets ?? 0);
+        const vStaff = Number(serverVersions.staff ?? 0);
+        const vDicts = Number(serverVersions.dicts ?? 0);
+        const vAddresses = Number(serverVersions.addresses ?? 0);
 
-        // Открытые заявки
-        if ((serverVersions.open_tickets || 0) > (localVersions.open_tickets || 0)) {
-          shouldFetchOpen = true;
+        const lTickets = Number(localVersions.open_tickets ?? 0);
+        const lStaff = Number(localVersions.staff ?? 0);
+        const lDicts = Number(localVersions.dicts ?? 0);
+        const lAddresses = Number(localVersions.addresses ?? 0);
+
+        // 2. Используем Set, чтобы избежать двойных перезагрузок за один тик
+        const eventsToDispatch = new Set();
+
+        if (vTickets > lTickets) eventsToDispatch.add("sync:fetch_open_tickets");
+        if (vStaff > lStaff) eventsToDispatch.add("sync:fetch_staff");
+        if (vDicts > lDicts) eventsToDispatch.add("sync:fetch_dicts");
+        if (vAddresses > lAddresses) eventsToDispatch.add("sync:fetch_addresses");
+
+        // 3. Сохраняем нормализованные версии (чтобы tickets всегда сохранялся как open_tickets)
+        this._saveVersions({
+          open_tickets: vTickets,
+          staff: vStaff,
+          dicts: vDicts,
+          addresses: vAddresses
+        });
+
+        // 4. Обрабатываем массив outdated (добавляем в тот же Set)
+        if (Array.isArray(response.outdated)) {
+            if (response.outdated.includes("open_tickets") || response.outdated.includes("tickets")) {
+                eventsToDispatch.add("sync:fetch_open_tickets");
+            }
+            if (response.outdated.includes("staff")) eventsToDispatch.add("sync:fetch_staff");
+            if (response.outdated.includes("dicts")) eventsToDispatch.add("sync:fetch_dicts");
+            if (response.outdated.includes("addresses")) eventsToDispatch.add("sync:fetch_addresses");
         }
 
-        // Адреса
-        if ((serverVersions.addresses || 0) > (localVersions.addresses || 0)) {
-          shouldFetchAddresses = true;
-        }
-
-        // Сохраняем новые версии
-        this._saveVersions(serverVersions);
-
-        // Кидаем события
+        // 5. Кидаем уникальные события (только если не идет фоновая синхронизация)
         if (!window.syncManagerInstance?.isSyncing) {
-          if (shouldFetchOpen) {
-            window.dispatchEvent(new CustomEvent("sync:fetch_open_tickets"));
-          }
-          if (shouldFetchAddresses) {
-            window.dispatchEvent(new CustomEvent("sync:fetch_addresses"));
-          }
+          eventsToDispatch.forEach(eventName => {
+            window.dispatchEvent(new CustomEvent(eventName));
+          });
         }
       }
-
       const events = Array.isArray(response.notifications) ? response.notifications : [];
       
       await withIdbWriteLock(async () => {
@@ -109,9 +127,9 @@ export class NotificationsPoller {
         if (!isNaN(newLastId) && newLastId > sinceId) {
           this._saveLastId(newLastId);
         }
-        if (Array.isArray(response.outdated) && response.outdated.length > 0) {
+      /*   if (Array.isArray(response.outdated) && response.outdated.length > 0) {
           await this._refreshStores(response.outdated);
-        }
+        } */
       });
 
       if (response.force_reload === true) {
@@ -162,12 +180,14 @@ export class NotificationsPoller {
     } catch (e) {}
   }
 
-  _loadVersions() {
+ _loadVersions() {
     try {
       const raw = localStorage.getItem(SYNC.VERSIONS_STORAGE_KEY);
       if (!raw) return { staff: 0, dicts: 0, addresses: 0, open_tickets: 0 };
       const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" ? parsed : { staff: 0, dicts: 0, addresses: 0, open_tickets: 0 };
+      return parsed && typeof parsed === "object" 
+        ? { staff: 0, dicts: 0, addresses: 0, open_tickets: 0, ...parsed } 
+        : { staff: 0, dicts: 0, addresses: 0, open_tickets: 0 };
     } catch (e) {
       return { staff: 0, dicts: 0, addresses: 0, open_tickets: 0 };
     }
@@ -179,7 +199,7 @@ export class NotificationsPoller {
     } catch (e) {}
   }
     async _refreshStores(outdatedArray) {
-    if (!outdatedArray || !outdatedArray.length) return;
+   /*  if (!outdatedArray || !outdatedArray.length) return;
     
     // Примерная логика: если в outdated есть 'open_tickets', стучимся в Main.js
     if (outdatedArray.includes("open_tickets")) {
@@ -187,6 +207,6 @@ export class NotificationsPoller {
     }
     if (outdatedArray.includes("addresses")) {
         window.dispatchEvent(new CustomEvent("sync:fetch_addresses"));
-    }
+    } */
   }
 }
