@@ -16,6 +16,7 @@ export function renderCardLayout({
   isOpen,
   canEdit,
   canClose,
+   canComment,
   hasPendingEdit,
   hasPendingComment,
   statusLabel,
@@ -193,7 +194,7 @@ export function renderCardLayout({
             <div id="notesContainerDOM" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 5px; margin-bottom: 8px; min-height: 0;"></div>
 
             ${
-              !isClosed
+              !isClosed && canComment 
                 ? `
             <div id="noteComposer" style="border-top: 1px dashed var(--border-color); padding-top: 10px; flex-shrink: 0; display: flex; flex-direction: column;"></div>
             `

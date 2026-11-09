@@ -247,7 +247,27 @@ export class DetailsController {
   get ticket() {
     return this.state.getDisplayTicket(staffStore.list);
   }
+  /**
+   * Извлекает заметки по контракту.
+   * Для открытых — t.note (массив).
+   * Для закрытых — раскодированный t.call_full_note_history.
+   */
+  _getNotes(ticket) {
+    if (!ticket) return [];
 
+    // Если есть заметки в стандартном поле (для открытых)
+    if (ticket.note) {
+      if (Array.isArray(ticket.note) && ticket.note.length > 0) return ticket.note;
+      if (typeof ticket.note === "object" && Object.keys(ticket.note).length > 0) return ticket.note;
+    }
+
+    // Если note пуст, а сервер прислал раскодированный слепок (для закрытых)
+    if (ticket.call_full_note_history) {
+      return ticket.call_full_note_history;
+    }
+
+    return [];
+  }
   /**
    * Обновить элемент в combinedTicketsArray, чтобы журнал при возврате
    * показал актуальные данные без ожидания polling.
@@ -292,18 +312,14 @@ export class DetailsController {
     const isClosed = t.type === "close" || !!pendingClose;
     const isOpen = !isClosed;
 
-    const isAssigned = userStore.isAssignedTo(t, userStore.userId);
-    const canEdit =
-      isOpen &&
-      !isOffline &&
-      !pendingClose &&
-      userStore.can("add_details", { isAssigned });
-    const canClose =
-      isOpen &&
-      !isOffline &&
-      !pendingClose &&
-      (userStore.can("close_ticket", { isAssigned }) ||
-        Number(t.closureallowed) === 1);
+    // 🔥 СЕРВЕРНЫЕ ПРАВА
+    const canEdit = isOpen && !isOffline && !pendingClose && 
+      (t.can_edit !== undefined ? t.can_edit : userStore.can("add_details", { isAssigned }));
+      
+    const canClose = isOpen && !isOffline && !pendingClose && 
+      (t.can_close !== undefined ? t.can_close : (userStore.can("close_ticket", { isAssigned }) || Number(t.closureallowed) === 1));
+
+    const canComment = t.can_comment !== undefined ? t.can_comment : true;
 
     const pendingList = this.state.pendingCommands || [];
     const hasPendingEdit = pendingList.some(
@@ -357,12 +373,12 @@ export class DetailsController {
     const notesContainer = document.getElementById("notesContainerDOM");
     const notesBadge = document.getElementById("notesCountBadge");
     if (notesContainer && notesBadge) {
-        renderNotesList(notesContainer, notesBadge, t.note || []);
+        renderNotesList(notesContainer, notesBadge, this._getNotes(t));
     }
 
     // Инициализируем композер только если он есть в DOM (т.е. заявка открыта)
-    const noteComposerEl = document.getElementById("noteComposer");
-    if (noteComposerEl) {
+      const noteComposerEl = document.getElementById("noteComposer");
+    if (noteComposerEl && canComment) { // <--- ПРОВЕРКА ПРАВ
         this.notesComposer = createNotesComposer(
           noteComposerEl,
           { onSubmit: () => this._onAddNote() },
