@@ -1,0 +1,16 @@
+┌──────────────────────────────────────────────────────────────────┐
+│ HOST (tenant VPS / shared)                                       │
+│                                                                  │
+│  ┌──────────────┐        ┌──────────────────────────────────┐    │
+│  │ Apache/PHP   │───────▶│ MySQL (bind 127.0.0.1 or socket) │    │
+│  │              │        │                                  │    │
+│  │ Registry PDO │────────▶  zamotaev_liftcs_org             │    │
+│  │ DB::forTenant│────────▶  <tenant_db>                     │    │
+│  └──────────────┘        └──────────────────────────────────┘    │
+│                                                                  │
+│  External access to MySQL: CLOSED (firewall / bind / skip-grant) │
+└──────────────────────────────────────────────────────────────────┘
+                ▲
+                │ HTTPS (443) only — apache → PHP
+                │
+        Internet / API clients

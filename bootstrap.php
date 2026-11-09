@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
-
+if (!defined('APP_ENTRY_POINT')) {
+    http_response_code(404);
+    exit;
+}
 // 1. Жесткая загрузка ключа шифрования (чтобы Crypto не падал при ленивой загрузке)
 require_once __DIR__ . '/config/admin.php';
 
