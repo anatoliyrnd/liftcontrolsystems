@@ -311,7 +311,7 @@ export class DetailsController {
     const pendingClose = t._pendingClose || null;
     const isClosed = t.type === "close" || !!pendingClose;
     const isOpen = !isClosed;
-
+    const isAssigned = userStore.isAssignedTo(t, userStore.userId);
     // 🔥 СЕРВЕРНЫЕ ПРАВА
     const canEdit = isOpen && !isOffline && !pendingClose && 
       (t.can_edit !== undefined ? t.can_edit : userStore.can("add_details", { isAssigned }));
@@ -356,6 +356,7 @@ export class DetailsController {
       isOpen,
       canEdit,
       canClose,
+      canComment,
       hasPendingEdit,
       hasPendingComment,
       statusLabel,
@@ -372,13 +373,15 @@ export class DetailsController {
     
     const notesContainer = document.getElementById("notesContainerDOM");
     const notesBadge = document.getElementById("notesCountBadge");
-    if (notesContainer && notesBadge) {
-        renderNotesList(notesContainer, notesBadge, this._getNotes(t));
+   if (notesContainer && notesBadge) {
+        // 🔥 ИСПОЛЬЗУЕМ t.note НАПРЯМУЮ (без _getNotes)
+        renderNotesList(notesContainer, notesBadge, t.note || []);
     }
 
-    // Инициализируем композер только если он есть в DOM (т.е. заявка открыта)
-      const noteComposerEl = document.getElementById("noteComposer");
-    if (noteComposerEl && canComment) { // <--- ПРОВЕРКА ПРАВ
+
+  // Инициализируем композер только если он есть в DOM и есть права
+    const noteComposerEl = document.getElementById("noteComposer");
+    if (noteComposerEl && canComment) {
         this.notesComposer = createNotesComposer(
           noteComposerEl,
           { onSubmit: () => this._onAddNote() },
@@ -949,7 +952,7 @@ export class DetailsController {
         renderNotesList(
           document.getElementById("notesContainerDOM"),
           document.getElementById("notesCountBadge"),
-          this.ticket.note,
+          this.ticket.note || [],
         );
       } else {
         const msg =
@@ -988,12 +991,13 @@ export class DetailsController {
       // Не _renderCard: при mode='edit'/'close' полная перерисовка
       // сбросит открытую форму, оставив mode/pendingChanges.
       // Достаточно обновить список заметок.
-      this.notesComposer.reset();
-      renderNotesList(
-        document.getElementById("notesContainerDOM"),
-        document.getElementById("notesCountBadge"),
-        this.ticket.note || [],
-      );
+       this.notesComposer.reset();
+        // 🔥 Добавлена защита на случай, если note === null
+        renderNotesList(
+          document.getElementById("notesContainerDOM"),
+          document.getElementById("notesCountBadge"),
+          this.ticket.note || [],
+        );
     } catch (err) {
       console.error("[DetailsController] Offline note save error:", err);
       notify.error("Не удалось сохранить комментарий локально.");

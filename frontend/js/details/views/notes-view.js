@@ -1,17 +1,13 @@
 import { createValidatedTextarea } from "../../components/validated-textarea.js";
 import { formatTs } from "../../utils/date-utils.js";
-
+import { escapeHtml } from "../../utils/escape-html.js"; 
 /**
  * Рендер списка комментариев.
  */
 export function renderNotesList(containerDOM, countBadge, notesData) {
   if (!containerDOM) return;
 
-  const notesList = Array.isArray(notesData)
-    ? notesData
-    : notesData && typeof notesData === "object"
-      ? Object.values(notesData)
-      : [];
+  const notesList = Array.isArray(notesData) ? notesData : [];
 
   if (countBadge) countBadge.textContent = notesList.length;
 
@@ -40,7 +36,13 @@ export function renderNotesList(containerDOM, countBadge, notesData) {
 
     const userSpan = document.createElement("span");
     userSpan.style.cssText = "font-size: 12px; font-weight: 700;";
-    userSpan.textContent = "👤 " + (note.user || "Сотрудник не указан");
+    
+    // 🔥 ДОБАВЛЯЕМ МАРКЕР ОФЛАЙН-КОММЕНТАРИЯ (⏳)
+    const offlineMarker = (note.is_offline === 1 || note.is_offline === true) 
+      ? ' <span title="Ожидает синхронизации" style="font-size: 10px; color: #f59e0b;">⏳</span>' 
+      : '';
+      
+    userSpan.innerHTML = "👤 " + escapeHtml(note.user || "Сотрудник не указан") + offlineMarker;
 
     const dateSpan = document.createElement("span");
     dateSpan.style.cssText =
