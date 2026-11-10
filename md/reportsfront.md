@@ -136,6 +136,7 @@
 ```json
 { 
   "action": "reports_stats", 
+   "format": "xlsx" | "pdf", // 🔥 ДОБАВЛЕНО: выбор пользователя
   "date_from": 1699000000, 
   "date_to": 1699000000, 
   "date_type": "created" | "closed", 
