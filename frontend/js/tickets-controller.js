@@ -559,7 +559,57 @@ export class TicketsController {
       this._reApplyCurrentSort();
     }
   }
+  async refreshSilently(globalTicketsArrayRef) {
+    if (this._isPolling) return;
+    this._isPolling = true;
+    try {
+      const fresh = await this._loadDataFromServer(true);
+      if (!fresh) return;
 
+      let offlineTickets = [];
+      if (this.dataType === "open") {
+        const outbox = await offlineDB.getAllPending();
+        offlineTickets = outbox
+          .filter(
+            (o) => o.command_type === "CreateTicket" && o.status === "pending",
+          )
+          .map((o) => {
+            const createdAt = Number(o.created_at);
+            const dateInSeconds =
+              createdAt > 9999999999 ? Math.floor(createdAt / 1000) : createdAt;
+            return {
+              ...o.payload,
+              id: o.offline_uuid || o.command_uuid,
+              type: "open",
+              isOffline: true,
+              address: o.payload.fullAddress || o.payload.address,
+              date: dateInSeconds,
+            };
+          });
+      }
+
+      if (!Array.isArray(globalTicketsArrayRef)) return;
+
+      // Атомарная замена
+      globalTicketsArrayRef.splice(
+        0,
+        globalTicketsArrayRef.length,
+        ...offlineTickets,
+        ...fresh,
+      );
+      await offlineDB.saveTickets(this.dataType, fresh);
+
+      const dataTable = document.getElementById("dataTable");
+      if (dataTable) {
+        this._renderTableFull(dataTable, globalTicketsArrayRef);
+        if (this.currentSortColumnId !== -1) this._reApplyCurrentSort();
+      }
+    } catch (e) {
+      console.error(`[TicketsController] refreshSilently failed:`, e);
+    } finally {
+      this._isPolling = false;
+    }
+  }
   _applySort(columnId, isAscending) {
     const dataTable = document.getElementById("dataTable");
     if (!dataTable) return;
