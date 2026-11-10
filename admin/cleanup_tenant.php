@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-
+define('APP_ENTRY_POINT', true);
 /**
  * Endpoint для очистки ОДНОГО тенанта из админки (AJAX).
  *

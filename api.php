@@ -1,7 +1,7 @@
 <?php
 
 declare(strict_types=1);
-
+define('APP_ENTRY_POINT', true);
 require_once __DIR__ . '/bootstrap.php';
 
 use App\Http\{Request, Response, ErrorCode, Cors};
