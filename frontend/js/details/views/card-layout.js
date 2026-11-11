@@ -16,7 +16,7 @@ export function renderCardLayout({
   isOpen,
   canEdit,
   canClose,
-   canComment,
+  canComment,
   hasPendingEdit,
   hasPendingComment,
   statusLabel,
@@ -177,6 +177,7 @@ export function renderCardLayout({
             </div> <!-- КОНЕЦ ticketScrollArea -->
 
             <div class="ticket-actions-footer">
+            <button class="menu-item" id="refreshTicketBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">🔄 Обновить</button>
                 <button class="menu-item" id="backBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">← Вернуться в журнал</button>
                 ${!isOffline && isOpen && canEdit ? `<button class="menu-item" id="editBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">✏️ Редактировать</button>` : ""}
                 ${!isOffline && canClose ? `<button class="menu-item" id="closeBtn" style="border: 2px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 600;">🔒 Закрыть заявку</button>` : ""}
@@ -194,7 +195,7 @@ export function renderCardLayout({
             <div id="notesContainerDOM" style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 5px; margin-bottom: 8px; min-height: 0;"></div>
 
             ${
-              !isClosed && canComment 
+              !isClosed && canComment
                 ? `
             <div id="noteComposer" style="border-top: 1px dashed var(--border-color); padding-top: 10px; flex-shrink: 0; display: flex; flex-direction: column;"></div>
             `

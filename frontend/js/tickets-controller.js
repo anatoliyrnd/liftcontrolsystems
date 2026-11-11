@@ -21,6 +21,7 @@ export class TicketsController {
     this.selectedDays =
       localStorage.getItem("tablePeriod_" + this.dataType) || "1";
     this.rowsCache = [];
+    this._isActive = false;
 
     // ВОССТАНАВЛИВАЕМ СОРТИРОВКУ ИЗ LOCALSTORAGE
     const savedSortId = localStorage.getItem(
@@ -61,7 +62,7 @@ export class TicketsController {
     // unmount снова подписывался на addresses:updated и ставил setInterval.
     const myMountId = ++this._mountId;
     const isStale = () => this._mountId !== myMountId;
-
+    this._isActive = true;
     if (!Array.isArray(globalTicketsArrayRef)) {
       globalTicketsArrayRef = []; // Защита от null/undefined
     }
@@ -71,14 +72,14 @@ export class TicketsController {
     if (isStale()) return;
     dataTable.setAttribute("data-mode", this.dataType);
     if (this.dataType === "open") {
-      await this._initFilters(); // <--- Инициализация городов и скрытия ремонта
-      if (isStale()) return;
-      await this._updateSyncButton();
+      await this._initFilters();
       if (isStale()) return;
     } else {
       const filtersBlock = document.getElementById("openOnlyFilters");
       if (filtersBlock) filtersBlock.style.display = "none";
     }
+    await this._updateSyncButton();
+    if (isStale()) return;
 
     this._initPeriodSelector(globalTicketsArrayRef);
 
@@ -181,7 +182,12 @@ export class TicketsController {
     // Если mount сейчас в await — после возврата он увидит устаревшее
     // поколение и не будет трогать DOM/подписки.
     this._mountId++;
-
+    const backdrop = document.getElementById("cityFilterBackdrop");
+    if (backdrop) {
+      backdrop.onclick = null;
+      backdrop.remove();
+    }
+    this._isActive = false;
     if (this.refreshIntervalId) {
       clearInterval(this.refreshIntervalId);
       this.refreshIntervalId = null;
@@ -561,14 +567,17 @@ export class TicketsController {
   }
   async refreshSilently(globalTicketsArrayRef) {
     if (this._isPolling) return;
+    const myMountId = this._mountId;
+    const isStale = () => this._mountId !== myMountId;
     this._isPolling = true;
     try {
       const fresh = await this._loadDataFromServer(true);
-      if (!fresh) return;
+      if (!fresh || isStale()) return;
 
       let offlineTickets = [];
       if (this.dataType === "open") {
         const outbox = await offlineDB.getAllPending();
+        if (isStale()) return;
         offlineTickets = outbox
           .filter(
             (o) => o.command_type === "CreateTicket" && o.status === "pending",
@@ -590,7 +599,6 @@ export class TicketsController {
 
       if (!Array.isArray(globalTicketsArrayRef)) return;
 
-      // Атомарная замена
       globalTicketsArrayRef.splice(
         0,
         globalTicketsArrayRef.length,
@@ -598,6 +606,7 @@ export class TicketsController {
         ...fresh,
       );
       await offlineDB.saveTickets(this.dataType, fresh);
+      if (isStale()) return;
 
       const dataTable = document.getElementById("dataTable");
       if (dataTable) {
@@ -657,11 +666,13 @@ export class TicketsController {
       backdrop.id = "cityFilterBackdrop";
       backdrop.className = "filter-backdrop";
       document.body.appendChild(backdrop);
-      backdrop.onclick = () => {
-        cityDropdown.style.display = "none";
-        backdrop.style.display = "none";
-      };
     }
+    // Всегда перепривязываем — иначе после возврата на главную замыкание
+    // смотрит на удалённый cityDropdown и кнопка «не закрывает» дропдаун.
+    backdrop.onclick = () => {
+      cityDropdown.style.display = "none";
+      backdrop.style.display = "none";
+    };
 
     cityBtn.onclick = (e) => {
       e.stopPropagation();

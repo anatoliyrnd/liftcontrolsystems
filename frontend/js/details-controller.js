@@ -63,7 +63,11 @@ export class DetailsController {
     let ticket = isOfflineId
       ? null
       : combinedTicketsArray.find((t) => String(t.id) === String(ticketId));
-
+    // Закрытая заявка: не доверяем объекту из списка — всегда fetchById.
+    // В списке closed могут быть неполные данные (без note / full_history).
+    if (ticket && ticket.type === "close") {
+      ticket = null;
+    }
     if (!ticket) {
       const result = await ticketRepository.fetchById(this.api, ticketId);
 
@@ -117,7 +121,7 @@ export class DetailsController {
     this.state.setServerTicket(normalizedTicket, cmds);
 
     this._renderCard(container);
-   /*  // Подписка на внешнее обновление карточки (от NotificationsPoller)
+    /*  // Подписка на внешнее обновление карточки (от NotificationsPoller)
     this._onExternalUpdate = () => {
       if (this.state.mode === "view" && this.ticket) {
         this._refreshTicketAfterSave(false);
@@ -252,7 +256,7 @@ export class DetailsController {
    * Для открытых — t.note (массив).
    * Для закрытых — раскодированный t.call_full_note_history.
    */
-  _getNotes(ticket) {
+  /*  _getNotes(ticket) {
     if (!ticket) return [];
 
     // Если есть заметки в стандартном поле (для открытых)
@@ -267,7 +271,7 @@ export class DetailsController {
     }
 
     return [];
-  }
+  } */
   /**
    * Обновить элемент в combinedTicketsArray, чтобы журнал при возврате
    * показал актуальные данные без ожидания polling.
@@ -313,11 +317,22 @@ export class DetailsController {
     const isOpen = !isClosed;
     const isAssigned = userStore.isAssignedTo(t, userStore.userId);
     // 🔥 СЕРВЕРНЫЕ ПРАВА
-    const canEdit = isOpen && !isOffline && !pendingClose && 
-      (t.can_edit !== undefined ? t.can_edit : userStore.can("add_details", { isAssigned }));
-      
-    const canClose = isOpen && !isOffline && !pendingClose && 
-      (t.can_close !== undefined ? t.can_close : (userStore.can("close_ticket", { isAssigned }) || Number(t.closureallowed) === 1));
+    const canEdit =
+      isOpen &&
+      !isOffline &&
+      !pendingClose &&
+      (t.can_edit !== undefined
+        ? t.can_edit
+        : userStore.can("add_details", { isAssigned }));
+
+    const canClose =
+      isOpen &&
+      !isOffline &&
+      !pendingClose &&
+      (t.can_close !== undefined
+        ? t.can_close
+        : userStore.can("close_ticket", { isAssigned }) ||
+          Number(t.closureallowed) === 1);
 
     const canComment = t.can_comment !== undefined ? t.can_comment : true;
 
@@ -369,25 +384,23 @@ export class DetailsController {
     });
 
     // Инициализация вложенных компонентов
-      this._renderStaffSlots();
-    
+    this._renderStaffSlots();
+
     const notesContainer = document.getElementById("notesContainerDOM");
     const notesBadge = document.getElementById("notesCountBadge");
-   if (notesContainer && notesBadge) {
-        // 🔥 ИСПОЛЬЗУЕМ t.note НАПРЯМУЮ (без _getNotes)
-        renderNotesList(notesContainer, notesBadge, t.note || []);
+    if (notesContainer && notesBadge) {
+      // 🔥 ИСПОЛЬЗУЕМ t.note НАПРЯМУЮ (без _getNotes)
+      renderNotesList(notesContainer, notesBadge, t.note || []);
     }
 
-
-  // Инициализируем композер только если он есть в DOM и есть права
+    // Инициализируем композер только если он есть в DOM и есть права
     const noteComposerEl = document.getElementById("noteComposer");
     if (noteComposerEl && canComment) {
-        this.notesComposer = createNotesComposer(
-          noteComposerEl,
-          { onSubmit: () => this._onAddNote() },
-        );
+      this.notesComposer = createNotesComposer(noteComposerEl, {
+        onSubmit: () => this._onAddNote(),
+      });
     }
-    
+
     this._bindEvents();
   }
   _renderStaffSlots() {
@@ -461,7 +474,9 @@ export class DetailsController {
 
   _bindEvents() {
     const $ = (id) => document.getElementById(id);
-
+    const refreshBtn = $("refreshTicketBtn");
+    if (refreshBtn)
+      refreshBtn.onclick = () => this._refreshTicketAfterSave(false);
     $("backBtn").onclick = () =>
       this.router.navigate(this.ticket.type === "close" ? "#/closed" : "#/");
 
@@ -991,13 +1006,13 @@ export class DetailsController {
       // Не _renderCard: при mode='edit'/'close' полная перерисовка
       // сбросит открытую форму, оставив mode/pendingChanges.
       // Достаточно обновить список заметок.
-       this.notesComposer.reset();
-        // 🔥 Добавлена защита на случай, если note === null
-        renderNotesList(
-          document.getElementById("notesContainerDOM"),
-          document.getElementById("notesCountBadge"),
-          this.ticket.note || [],
-        );
+      this.notesComposer.reset();
+      // 🔥 Добавлена защита на случай, если note === null
+      renderNotesList(
+        document.getElementById("notesContainerDOM"),
+        document.getElementById("notesCountBadge"),
+        this.ticket.note || [],
+      );
     } catch (err) {
       console.error("[DetailsController] Offline note save error:", err);
       notify.error("Не удалось сохранить комментарий локально.");
@@ -1177,7 +1192,7 @@ export class DetailsController {
       this.notesComposer.destroy();
       this.notesComposer = null;
     }
-/*     if (this._onExternalUpdate) {
+    /*     if (this._onExternalUpdate) {
       window.removeEventListener(
         "sync:refresh_current_ticket",
         this._onExternalUpdate,

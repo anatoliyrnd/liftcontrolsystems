@@ -306,3 +306,171 @@ INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`) VALUES
 ('tickets', 1, UNIX_TIMESTAMP());
 -- на всякий случай
 ALTER TABLE lift_notifications ADD INDEX idx_created_at (created_at);
+
+-- ============================================================================
+-- Lift-Control-Systems: аддитивная миграция
+-- Версия: 1.0  |  Дата: 12.11.2026
+-- Только ADD / CREATE / INSERT новых строк. Существующие данные не меняются.
+-- Идемпотентно: повторный запуск безопасен.
+-- Запускать на КАЖДОЙ тенантской БД.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 1. ФИО: раздельные поля (правки, N-6)
+-- user_name остаётся отображаемым полным именем и пересобирается при сохранении.
+-- user_firstname — только имя; для незаполненных записей фронт падает back на user_name.
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_users`
+  ADD COLUMN IF NOT EXISTS `user_surname`    VARCHAR(100) NULL DEFAULT NULL COMMENT 'Фамилия' AFTER `user_name`,
+  ADD COLUMN IF NOT EXISTS `user_firstname`  VARCHAR(100) NULL DEFAULT NULL COMMENT 'Имя' AFTER `user_surname`,
+  ADD COLUMN IF NOT EXISTS `user_patronymic` VARCHAR(100) NULL DEFAULT NULL COMMENT 'Отчество' AFTER `user_firstname`;
+
+-- ----------------------------------------------------------------------------
+-- 2. Аудит закрытия: ID закрывшего (правки, §15 п.4 v5.4)
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_calls`
+  ADD COLUMN IF NOT EXISTS `closed_by_id` INT(11) NULL DEFAULT NULL
+    COMMENT 'ID закрывшего; заполняется при офлайн-закрытии' AFTER `call_last_name`;
+
+-- ----------------------------------------------------------------------------
+-- 3. Признак «срок назначен сервером по умолчанию» (правки, §4.1.1 v5.4)
+-- Позволяет UI показать «срок не назначен» вместо ложной просрочки.
+-- Существующие строки получают 0 = срок задан явно.
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_calls`
+  ADD COLUMN IF NOT EXISTS `repair_time_is_default` TINYINT(1) NOT NULL DEFAULT 0
+    COMMENT '1 = expected_repair_time выставлен сервером, требует уточнения диспетчером';
+
+-- ----------------------------------------------------------------------------
+-- 4. Страховка полей, которые использует код (могли быть добавлены ранее)
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_calls`
+  ADD COLUMN IF NOT EXISTS `offline_uuid` VARCHAR(64) NULL DEFAULT NULL
+    COMMENT 'UUID офлайн-заявки, идемпотентность CreateTicket',
+  ADD COLUMN IF NOT EXISTS `alert_level` TINYINT(1) NOT NULL DEFAULT 1
+    COMMENT 'Уровень тревоги 1-3',
+  ADD COLUMN IF NOT EXISTS `elevator_group_id` INT(11) NULL DEFAULT 1
+    COMMENT 'Группа лифтов на момент создания (задел)',
+  ADD COLUMN IF NOT EXISTS `address_not_verified` TINYINT(1) NOT NULL DEFAULT 0
+    COMMENT '1 = адрес не прошёл валидацию при офлайн-создании';
+
+-- ----------------------------------------------------------------------------
+-- 5. Настройки интерфейса per-user (правки, N-18 / волна 3)
+-- column_settings: {"open":{"order":[],"hidden":[]},"close":{...},"report":{...}}
+-- Ширины, сортировка, период, фильтры — только локально на клиенте.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `lift_user_settings` (
+  `user_id`         INT(11)  NOT NULL,
+  `column_settings` LONGTEXT NULL COMMENT 'JSON: порядок и видимость колонок по scope',
+  `updated_at`      INT(11)  NOT NULL DEFAULT 0,
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Персональные настройки интерфейса';
+
+-- ----------------------------------------------------------------------------
+-- 6. Ключ организации (правки, N-18)
+-- Значение пустое = ключ не задан, администратор вводит через UI.
+-- ----------------------------------------------------------------------------
+INSERT INTO `lift_options` (`option_name`, `option_value`, `name`, `comment`, `type`)
+SELECT 'org_key', '', 'Ключ организации',
+       'Секрет для получения списка диспетчеров на странице входа', 'text'
+WHERE NOT EXISTS (SELECT 1 FROM `lift_options` WHERE `option_name` = 'org_key');
+
+-- ----------------------------------------------------------------------------
+-- 7. Refresh-токены: страховка структуры и индексов
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `lift_refresh_tokens` (
+  `id`                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`            INT(11)      NOT NULL,
+  `token_hash`         VARCHAR(64)  NOT NULL,
+  `device_fingerprint` TEXT         NULL,
+  `expires_at`         DATETIME     NOT NULL,
+  `user_ip`            VARCHAR(45)  NULL,
+  `user_agent`         VARCHAR(255) NULL,
+  `created_at`         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_refresh_hash` (`token_hash`),
+  KEY `idx_refresh_user` (`user_id`),
+  KEY `idx_refresh_expires` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Refresh-токены, TTL 30 дней';
+
+ALTER TABLE `lift_refresh_tokens`
+  ADD INDEX IF NOT EXISTS `idx_refresh_expires` (`expires_at`),
+  ADD INDEX IF NOT EXISTS `idx_refresh_user` (`user_id`);
+
+ALTER TABLE `lift_access_tokens`
+  ADD INDEX IF NOT EXISTS `idx_expires` (`expires_at`),
+  ADD INDEX IF NOT EXISTS `idx_user_id` (`user_id`);
+
+-- ----------------------------------------------------------------------------
+-- 8. Индексы под правки
+-- offline_uuid: обычный индекс сейчас; UNIQUE — после проверки дублей (см. §4)
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_calls`
+  ADD INDEX IF NOT EXISTS `idx_calls_offline_uuid` (`offline_uuid`);
+
+ALTER TABLE `offline_command_log`
+  ADD INDEX IF NOT EXISTS `idx_cmd_created` (`created_at`);
+
+ALTER TABLE `offline_sync_log`
+  ADD INDEX IF NOT EXISTS `idx_sync_created` (`created_at`);
+
+ALTER TABLE `offline_actions_archive`
+  ADD INDEX IF NOT EXISTS `idx_archive_created` (`created_at`);
+
+-- ----------------------------------------------------------------------------
+-- 9. Версии слоёв: два новых ключа (правки, B-4)
+-- Строка 'tickets' остаётся неиспользуемой — не удаляем, чтобы сохранить откат.
+-- ----------------------------------------------------------------------------
+INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`)
+SELECT 'open_tickets', 1, UNIX_TIMESTAMP()
+WHERE NOT EXISTS (SELECT 1 FROM `lift_dict_versions` WHERE `dict_name` = 'open_tickets');
+
+INSERT INTO `lift_dict_versions` (`dict_name`, `version`, `updated_at`)
+SELECT 'closed_tickets', 1, UNIX_TIMESTAMP()
+WHERE NOT EXISTS (SELECT 1 FROM `lift_dict_versions` WHERE `dict_name` = 'closed_tickets');
+
+-- ----------------------------------------------------------------------------
+-- 10. Задел под отчёты: индексы и аудит выгрузки
+-- Добавить сейчас безопасно, чтобы не запускать второй скрипт.
+-- ----------------------------------------------------------------------------
+ALTER TABLE `lift_calls`
+  ADD INDEX IF NOT EXISTS `idx_calls_status_date`  (`call_status`, `call_date`),
+  ADD INDEX IF NOT EXISTS `idx_calls_status_close` (`call_status`, `call_date2`),
+  ADD INDEX IF NOT EXISTS `idx_calls_close_date`   (`call_date2`),
+  ADD INDEX IF NOT EXISTS `idx_calls_city`         (`address_city`),
+  ADD INDEX IF NOT EXISTS `idx_calls_dept_status`  (`call_department`, `call_status`);
+
+CREATE TABLE IF NOT EXISTS `audit_log` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT(11)     NOT NULL,
+  `action`     VARCHAR(64) NOT NULL COMMENT 'например report.export',
+  `params`     LONGTEXT    NULL COMMENT 'JSON параметров действия',
+  `created_at` INT(11)     NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_audit_user_action` (`user_id`, `action`),
+  KEY `idx_audit_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Аудит действий пользователя';
+
+-- ============================================================================
+-- Конец скрипта. Проверка результата:
+--   SELECT dict_name, version FROM lift_dict_versions;
+--   SHOW COLUMNS FROM lift_users LIKE 'user_%name';
+--   SHOW COLUMNS FROM lift_calls LIKE '%repair_time%';
+--   SHOW INDEX FROM lift_calls;
+-- ============================================================================
+
+-- ============================================================================
+-- Дополнение к аддитивной миграции 1.0
+-- Основание: проверка дублей offline_uuid вернула 0 строк
+-- ============================================================================
+
+-- Заменяем обычный индекс на UNIQUE (изменение только индекса, не данных)
+ALTER TABLE `lift_calls` DROP INDEX IF EXISTS `idx_calls_offline_uuid`;
+ALTER TABLE `lift_calls` ADD UNIQUE KEY IF NOT EXISTS `uq_calls_offline_uuid` (`offline_uuid`);
+
+-- Строку 'tickets' в lift_dict_versions НЕ удаляем (решение п.8).
+-- Сиды open_tickets / closed_tickets из скрипта 1.0 — штатная часть развёртывания БД.
+-- EVENT cleanup_offline_tables НЕ удаляем (решение п.4), остаётся неактивным.

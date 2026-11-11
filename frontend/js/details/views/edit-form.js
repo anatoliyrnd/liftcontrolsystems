@@ -88,10 +88,12 @@ export function createEditForm({ ticket, draft, permissions, onChange }) {
   ];
 
   if (!navigator.onLine) {
-    ["deptDisplay", "reqDisplay", "groupDisplay"].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.title = "🔒 Редактирование доступно только онлайн";
-    });
+    ["deptDisplay", "reqDisplay", "groupDisplay", "repairTimeDisplay"].forEach(
+      (id) => {
+        const el = document.getElementById(id);
+        if (el) el.title = "🔒 Редактирование доступно только онлайн";
+      },
+    );
   } else {
     dictRules.forEach((rule) => {
       if (!rule.can) return;
@@ -120,20 +122,20 @@ export function createEditForm({ ticket, draft, permissions, onChange }) {
   }
 
   // --- Дата ремонта ---
-  if (permissions.canSetRepair) {
+  if (permissions.canSetRepair && navigator.onLine) {
     const block = document.getElementById("repairTimeEditBlock");
     if (block) {
       block.style.display = "block";
       repairPicker = createRepairTimePicker({
-        initialValue: ticket.repair_time,
-        onChange: (value) => {
-          draft.repair_time = value;
-          onChange();
-        },
+        /* ... */
       });
       block.innerHTML = "";
       block.appendChild(repairPicker.element);
     }
+  } else {
+    // Офлайн: срок ремонта редактировать нельзя.
+    const block = document.getElementById("repairTimeEditBlock");
+    if (block) block.style.display = "none";
   }
 
   return {

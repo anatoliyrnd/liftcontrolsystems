@@ -89,10 +89,10 @@ export function applyPendingOverlay(
         t.notify_date = cmd.created_at;
         t._pendingNotify = true;
       }
-      if (p.repair_time != null && !t.repair_time) {
+      /* if (p.repair_time != null && !t.repair_time) {
         t.repair_time = Number(p.repair_time);
         t._pendingRepair = true;
-      }
+      } */
       if (p.details) {
         t.details = (t.details || "") + (t.details ? "\n\n" : "") + p.details;
         t._pendingDetails = true;

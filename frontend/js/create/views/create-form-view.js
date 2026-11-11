@@ -135,15 +135,22 @@ export function createCreateFormView({ onChange }) {
 
     const repairSlot = document.getElementById("repairTimeSlot");
     if (repairSlot && !repairPicker) {
-      repairPicker = createRepairTimePicker({
-        initialValue: null,
-        onChange: () => {
-          _updateSaveBtnState();
-          onChange();
-        },
-      });
-      repairSlot.innerHTML = "";
-      repairSlot.appendChild(repairPicker.element);
+      if (navigator.onLine) {
+        repairPicker = createRepairTimePicker({
+          initialValue: null,
+          onChange: () => {
+            _updateSaveBtnState();
+            onChange();
+          },
+        });
+        repairSlot.innerHTML = "";
+        repairSlot.appendChild(repairPicker.element);
+        repairSlot.style.display = "";
+      } else {
+        // Офлайн: срок ремонта назначить нельзя — скрываем picker целиком.
+        repairSlot.innerHTML = "";
+        repairSlot.style.display = "none";
+      }
     }
 
     const slots = [
@@ -226,7 +233,9 @@ export function createCreateFormView({ onChange }) {
         group_id: groupSelect?.getValue() || null,
         request_id: reqSelect?.getValue() || null,
         department_id: deptSelect?.getValue() || null,
-        repair_time: repairPicker?.getTimestamp() || null,
+        repair_time: navigator.onLine
+          ? repairPicker?.getTimestamp() || null
+          : null,
         details: details,
         staff_id: staffId,
       };
@@ -239,7 +248,7 @@ export function createCreateFormView({ onChange }) {
           ok: false,
           msg: "Заполните обязательные поля: выберите адрес и введите описание проблемы.",
         };
-      if (repairPicker && !repairPicker.isValid())
+      if (navigator.onLine && repairPicker && !repairPicker.isValid())
         return { ok: false, msg: "Дата ремонта указана некорректно." };
       if (
         !deptSelect?.isValid() ||
