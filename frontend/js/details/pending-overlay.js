@@ -1,5 +1,20 @@
+/**
+ * Наложение офлайн-команд (outbox) на серверный тикет.
+ * Чистая функция: не мутирует вход, не делает await, не ходит в сторы.
+ *
+ * Оверлей _pendingRepair удалён (п. 1.7): срок ремонта офлайн не задаётся,
+ * сервер назначает его сам при синхронизации (API_syncCommands §4.1.1).
+ * Оверлеи staff / notify / details / close / comment сохранены.
+ */
+
 const OFFLINE_COMMENT_HEADER = "⏳ [Офлайн-комментарии]";
-const OFFLINE_COMMENT_LINE_RE = /^\[([^,]+),\s*([^\]]+)\]:\s*(.*)$/;
+const OFFLINE_COMMENT_LINE_RE = /^\[([^,]+),\s*([^\]]+)]:\s*(.*)$/;
+
+function toSeconds(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n > 9999999999 ? Math.floor(n / 1000) : n;
+}
 
 function parseRuDateTime(s) {
   const m = String(s || "")
@@ -31,7 +46,6 @@ function parseOfflineComments(commentsStr) {
         body: m[3].trim(),
       });
     } else {
-      // fallback: не распарсили — показываем как есть
       out.push({ user: "Офлайн", date: null, body: line });
     }
   }
@@ -39,24 +53,18 @@ function parseOfflineComments(commentsStr) {
 }
 
 /**
- * Чистая функция наложения офлайн-команд (outbox) на серверный тикет.
- *
- * Не мутирует входные данные. Возвращает новый объект.
- * Не делает await. Не обращается к глобальным сторам (staffStore передается аргументом).
- *
- * @param {Object} serverTicket - заявка с сервера
- * @param {Array} pendingCommands - массив команд из outbox
- * @param {Array} staffList - справочник механиков [{id, name}] для подстановки имен
- * @returns {Object} новый тикет с наложенным оверлеем
+ * @param {Object} serverTicket
+ * @param {Array}  pendingCommands
+ * @param {Array}  staffList [{id, name}]
+ * @returns {Object|null}
  */
 export function applyPendingOverlay(
   serverTicket,
-  pendingCommands,
+  pendingCommands = [],
   staffList = [],
 ) {
   if (!serverTicket) return null;
 
-  // 1. Создаем копию тикета, чтобы не мутировать оригинал (важно для combinedTicketsArray)
   const t = {
     ...serverTicket,
     note: Array.isArray(serverTicket.note)
@@ -66,19 +74,18 @@ export function applyPendingOverlay(
         : [],
   };
 
-  // Хелпер для поиска имени механика
   const getStaffName = (id) => {
     const staff = staffList.find((s) => String(s.id) === String(id));
     return staff ? staff.name : null;
   };
 
-  // 2. Применяем команды
-  for (const cmd of pendingCommands) {
-    if (cmd.status !== "pending") continue;
+  for (const cmd of pendingCommands || []) {
+    if (!cmd || cmd.status !== "pending") continue;
     const p = cmd.payload || {};
+    const createdAt = toSeconds(cmd.created_at);
 
     if (cmd.command_type === "EditTicket") {
-      // Применяем только если поле пустое (Soft Merge логика)
+      // Soft Merge: применяем только если поле пустое.
       if (p.staff_id != null && !t.staff_id) {
         t.staff_id = Number(p.staff_id);
         t.staff_name = getStaffName(p.staff_id);
@@ -86,13 +93,9 @@ export function applyPendingOverlay(
       }
       if (p.notify_status != null && !t.notify_status) {
         t.notify_status = Number(p.notify_status);
-        t.notify_date = cmd.created_at;
+        t.notify_date = createdAt;
         t._pendingNotify = true;
       }
-      /* if (p.repair_time != null && !t.repair_time) {
-        t.repair_time = Number(p.repair_time);
-        t._pendingRepair = true;
-      } */
       if (p.details) {
         t.details = (t.details || "") + (t.details ? "\n\n" : "") + p.details;
         t._pendingDetails = true;
@@ -102,22 +105,23 @@ export function applyPendingOverlay(
         id: "pending_" + cmd.command_uuid,
         user: cmd.offline_author_name || "Вы",
         body: p.text || "",
-        date: cmd.created_at,
+        date: createdAt,
         type: 0,
+        is_offline: 1,
         _pending: true,
       });
       t.note_num = (t.note_num || 0) + 1;
     } else if (cmd.command_type === "CloseTicket") {
       t._pendingClose = {
         solution: p.solution || "",
-        close_date: cmd.created_at,
+        close_date: toSeconds(p.closed_at) ?? createdAt,
         close_name: cmd.offline_author_name || "—",
         command_uuid: cmd.command_uuid,
       };
     }
   }
-  // #8: офлайн-заявка — разворачиваем поля payload в отображаемые
-  // note / _pendingClose (payload.comments/solution/closed_at/closed_by_name).
+
+  // Офлайн-заявка: разворачиваем payload в отображаемые note / pendingClose.
   if (t.isOffline) {
     if (t.comments) {
       const parsed = parseOfflineComments(t.comments);
@@ -128,18 +132,24 @@ export function applyPendingOverlay(
           body: n.body,
           date: n.date,
           type: 0,
+          is_offline: 1,
           _pending: true,
         });
       }
       t.note_num = (t.note_num || 0) + parsed.length;
     }
+
     if (t.solution) {
       t._pendingClose = {
         solution: t.solution,
-        close_date: t.closed_at || null,
+        close_date: toSeconds(t.closed_at),
         close_name: t.closed_by_name || "—",
       };
     }
+
+    // Срок офлайн не задаётся никогда.
+    t.repair_time = null;
   }
+
   return t;
 }

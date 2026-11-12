@@ -1,7 +1,7 @@
 import { offlineDB } from "./offline-db.js";
 import { authStore } from "./auth-store.js";
 import { generateCommandUuid, generateOfflineUuid } from "./utils/uuid.js";
-import { formatTs } from "./utils/date-utils.js"; // Для форматирования даты в комментариях
+import { formatTs } from "./utils/date-utils.js";
 
 function nowTs() {
   return Math.floor(Date.now() / 1000);
@@ -14,6 +14,11 @@ function currentAuthor() {
     ? `${user.surname} ${user.name || ""}`.trim()
     : user.name;
   return { id: user.id ?? null, name: name || null };
+}
+
+/** Очередь изменилась — шапка и флаг beforeunload должны пересчитаться. */
+function notifyQueueChanged() {
+  window.dispatchEvent(new Event("refreshSyncState"));
 }
 
 function baseCommand(type, payload, extra = {}) {
@@ -34,26 +39,72 @@ function baseCommand(type, payload, extra = {}) {
   };
 }
 
-// Вспомогательный метод: найти CreateTicket по offline_uuid и обновить его
+// --- Совместимость с idb-обёрткой и «голым» IDBDatabase ---
+function asPromise(requestOrPromise) {
+  if (requestOrPromise && typeof requestOrPromise.then === "function") {
+    return requestOrPromise;
+  }
+  return new Promise((resolve, reject) => {
+    requestOrPromise.onsuccess = () => resolve(requestOrPromise.result);
+    requestOrPromise.onerror = () => reject(requestOrPromise.error);
+  });
+}
+
+function transactionDone(tx) {
+  if (tx.done && typeof tx.done.then === "function") return tx.done;
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Transaction aborted"));
+  });
+}
+
+/**
+ * Сворачивание правок офлайн-заявки в CreateTicket (Вариант А, §9.1).
+ *
+ * Чтение по индексу и запись — в ОДНОЙ readwrite-транзакции: два быстрых
+ * комментария не перетирают друг друга. updateFn обязан быть синхронным,
+ * иначе транзакция закроется до записи.
+ *
+ * Срок ремонта не сливается никогда — сервер назначает его сам (§4.1.1).
+ * Возвращается ОБНОВЛЁННАЯ запись, а не исходная.
+ */
 async function mergeIntoOfflineCreate(offlineUuid, updateFn) {
   const db = await offlineDB.dbPromise;
   const tx = db.transaction("outbox", "readwrite");
+  const done = transactionDone(tx);
   const store = tx.objectStore("outbox");
-  const index = store.index("offline_uuid");
 
-  const cmds = await index.getAll(IDBKeyRange.only(offlineUuid));
-  const cmd = cmds.find((c) => c.command_type === "CreateTicket");
+  let cmds;
+  try {
+    const index = store.index("offline_uuid");
+    cmds = await asPromise(index.getAll(IDBKeyRange.only(offlineUuid)));
+  } catch (e) {
+    // Индекса нет (старая схема) — деградируем на полное чтение в той же tx.
+    cmds = await asPromise(store.getAll());
+    cmds = cmds.filter((c) => c.offline_uuid === offlineUuid);
+  }
+
+  const cmd = cmds.find(
+    (c) => c.command_type === "CreateTicket" && c.status === "pending",
+  );
+
   if (!cmd) {
-    await tx.done;
+    await done;
     return null;
   }
 
   const updatedPayload = { ...cmd.payload };
+  // Страховка: срок не должен протечь в payload ни из старых записей.
+  delete updatedPayload.repair_time;
   updateFn(updatedPayload);
-  await store.put({ ...cmd, payload: updatedPayload });
-  await tx.done;
-  return cmd;
+
+  const updated = { ...cmd, payload: updatedPayload };
+  await asPromise(store.put(updated));
+  await done;
+  return updated;
 }
+
 export const outboxQueue = {
   async enqueueCreate(payload) {
     const author = currentAuthor();
@@ -61,21 +112,24 @@ export const outboxQueue = {
       ...payload,
       offline_author_id: payload.offline_author_id ?? author.id,
       offline_author_name: payload.offline_author_name ?? author.name,
-      opened_at: payload.opened_at ?? nowTs(), // v5.2 Требование!
+      opened_at: payload.opened_at ?? nowTs(),
     };
-    const offlineUuid = generateOfflineUuid();
+    // Клиент офлайн срок не задаёт.
+    delete enriched.repair_time;
+
     const cmd = baseCommand("CreateTicket", enriched, {
       ticket_id: null,
-      offline_uuid: offlineUuid,
+      offline_uuid: generateOfflineUuid(),
     });
-    return offlineDB.addOutboxCommand(cmd);
+    const result = await offlineDB.addOutboxCommand(cmd);
+    notifyQueueChanged();
+    return result;
   },
 
   async enqueueEdit(ticketId, patch, opts = {}) {
     const isOffline = String(ticketId).startsWith("offline_");
     const offlineUuid = isOffline ? ticketId : opts.offline_uuid;
 
-    // Если заявка офлайн — сливаем правки в CreateTicket
     if (offlineUuid) {
       const merged = await mergeIntoOfflineCreate(offlineUuid, (payload) => {
         if (patch.details) {
@@ -84,12 +138,13 @@ export const outboxQueue = {
         if (patch.staff_id != null) payload.staff_id = patch.staff_id;
         if (patch.notify_status != null)
           payload.notify_status = patch.notify_status;
-        //  if (patch.repair_time != null) payload.repair_time = patch.repair_time;
       });
-      if (merged) return merged;
+      if (merged) {
+        notifyQueueChanged();
+        return merged;
+      }
     }
 
-    // Иначе — обычная команда EditTicket
     const payload = {};
     if (typeof patch.details === "string" && patch.details.trim() !== "") {
       payload.details = patch.details.trim();
@@ -97,79 +152,73 @@ export const outboxQueue = {
     if (patch.staff_id != null) payload.staff_id = patch.staff_id;
     if (patch.notify_status != null)
       payload.notify_status = patch.notify_status;
-    //if (patch.repair_time != null) payload.repair_time = patch.repair_time;
 
     const cmd = baseCommand("EditTicket", payload, {
       ticket_id: isOffline ? null : ticketId,
       offline_uuid: offlineUuid,
     });
-    return offlineDB.addOutboxCommand(cmd);
+    const result = await offlineDB.addOutboxCommand(cmd);
+    notifyQueueChanged();
+    return result;
   },
 
   async enqueueClose(ticketId, solution, opts = {}) {
     const isOffline = String(ticketId).startsWith("offline_");
     const offlineUuid = isOffline ? ticketId : opts.offline_uuid;
     const author = currentAuthor();
+    const trimmed = String(solution || "").trim();
 
-    // Если заявка офлайн — сливаем в CreateTicket
     if (offlineUuid) {
       const merged = await mergeIntoOfflineCreate(offlineUuid, (payload) => {
-        payload.solution = String(solution || "").trim();
+        payload.solution = trimmed;
         payload.closed_at = nowTs();
         payload.closed_by_name = author.name || "—";
         payload.closed_by_id = author.id;
       });
-      if (merged) return merged;
+      if (merged) {
+        notifyQueueChanged();
+        return merged;
+      }
     }
 
-    // Иначе — обычная команда CloseTicket
     const cmd = baseCommand(
       "CloseTicket",
-      {
-        solution: String(solution || "").trim(),
-        closed_at: nowTs(),
-      },
-      {
-        ticket_id: isOffline ? null : ticketId,
-        offline_uuid: offlineUuid,
-      },
+      { solution: trimmed, closed_at: nowTs() },
+      { ticket_id: isOffline ? null : ticketId, offline_uuid: offlineUuid },
     );
-    return offlineDB.addOutboxCommand(cmd);
+    const result = await offlineDB.addOutboxCommand(cmd);
+    notifyQueueChanged();
+    return result;
   },
 
   async enqueueComment(ticketId, text, opts = {}) {
     const isOffline = String(ticketId).startsWith("offline_");
     const offlineUuid = isOffline ? ticketId : opts.offline_uuid;
     const author = currentAuthor();
+    const body = String(text || "").trim();
 
-    // Если заявка офлайн — сливаем в CreateTicket.comments
     if (offlineUuid) {
       const dateStr = formatTs(nowTs()).replace("@", " ");
-      const line = `[${author.name || "Сотрудник"}, ${dateStr}]: ${text}`;
-
+      const line = `[${author.name || "Сотрудник"}, ${dateStr}]: ${body}`;
       const merged = await mergeIntoOfflineCreate(offlineUuid, (payload) => {
-        if (!payload.comments) {
-          payload.comments = `⏳ [Офлайн-комментарии]\n${line}`;
-        } else {
-          payload.comments += `\n${line}`;
-        }
+        payload.comments = payload.comments
+          ? payload.comments + "\n" + line
+          : `⏳ [Офлайн-комментарии]\n${line}`;
       });
-      if (merged) return merged;
+      if (merged) {
+        notifyQueueChanged();
+        return merged;
+      }
     }
 
-    // Иначе — обычная команда AddComment
     const cmd = baseCommand(
       "AddComment",
-      {
-        text: String(text || "").trim(),
-        created_at: nowTs(),
-      },
-      {
-        ticket_id: isOffline ? null : ticketId,
-        offline_uuid: offlineUuid,
-      },
+      { text: body, created_at: nowTs() },
+      { ticket_id: isOffline ? null : ticketId, offline_uuid: offlineUuid },
     );
-    return offlineDB.addOutboxCommand(cmd);
+    const result = await offlineDB.addOutboxCommand(cmd);
+    notifyQueueChanged();
+    return result;
   },
 
   async getPendingBatch(limit = 20) {
@@ -203,37 +252,47 @@ export const outboxQueue = {
   },
 
   async remove(commandUuids) {
-    return offlineDB.deleteOutboxCommands(commandUuids);
+    const result = await offlineDB.deleteOutboxCommands(commandUuids);
+    notifyQueueChanged();
+    return result;
   },
 
   async markFailed(commandUuid, reason) {
-    return offlineDB.updateOutboxCommand(commandUuid, {
+    const result = await offlineDB.updateOutboxCommand(commandUuid, {
       status: "failed",
       last_error: String(reason || "unknown"),
     });
+    notifyQueueChanged();
+    return result;
   },
 
   async markRetry(commandUuid, reason, nextRetryAt) {
     const all = await offlineDB.getAllPending();
     const record = all.find((c) => c.command_uuid === commandUuid);
     const retryCount = (record?.retry_count ?? 0) + 1;
-    return offlineDB.updateOutboxCommand(commandUuid, {
+    const result = await offlineDB.updateOutboxCommand(commandUuid, {
       retry_count: retryCount,
       next_retry_at: nextRetryAt || 0,
       last_error: String(reason || "unknown"),
       status: "pending",
     });
+    notifyQueueChanged();
+    return result;
   },
 
   async resetToPending(commandUuid) {
-    return offlineDB.updateOutboxCommand(commandUuid, {
+    const result = await offlineDB.updateOutboxCommand(commandUuid, {
       status: "pending",
       next_retry_at: 0,
     });
+    notifyQueueChanged();
+    return result;
   },
 
   async clear() {
-    return offlineDB.clearOutbox();
+    const result = await offlineDB.clearOutbox();
+    notifyQueueChanged();
+    return result;
   },
 
   async getCounts() {

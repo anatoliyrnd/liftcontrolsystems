@@ -7,21 +7,30 @@ import {
   destroyVoiceInput,
 } from "../../components/voiceInput.js";
 import { staffStore } from "../../staff-store.js";
-import { VALIDATION, UI } from "../../config.js";
-import { notify } from "../../components/notify.js";
-import { logHistoryAction } from "../../history-logger.js";
+import { VALIDATION } from "../../config.js";
 
 const CAPS_REGEX = VALIDATION.CAPS_REGEX;
+const DRAFT_KEY = "create_draft";
 
+/**
+ * Форма создания заявки.
+ *
+ * Офлайн (п. 1.3): picker срока не создаётся, слот скрыт, ключ repair_time
+ * отсутствует в payload целиком — сервер назначит срок при синхронизации
+ * (API_syncCommands §4.1.1). Видимость пересчитывается по online / offline,
+ * а не только на mount.
+ *
+ * Не трогаем офлайн: ответственный, отдел, тип, группа — доступны всегда.
+ */
 export function createCreateFormView({ onChange }) {
   let addressPicker = null;
   let staffSelect = null;
   let repairPicker = null;
-  let deptSelect = null;
-  let reqSelect = null;
-  let groupSelect = null;
   let draftTimer = null;
   let isLocked = false;
+  let destroyed = false;
+
+  const dictRefs = { group: null, dept: null, req: null };
 
   const formDetails = document.getElementById("formDetails");
   const formContainer = document.querySelector(".create-form-wrapper");
@@ -35,34 +44,40 @@ export function createCreateFormView({ onChange }) {
       details,
       address,
       staffId: staffSelect?.getValue(),
-      dept: deptSelect?.getValue(),
-      req: reqSelect?.getValue(),
-      grp: groupSelect?.getValue(),
-      repair: repairPicker?.getTimestamp(),
+      dept: dictRefs.dept?.getValue(),
+      req: dictRefs.req?.getValue(),
+      grp: dictRefs.group?.getValue(),
+      repair: navigator.onLine ? repairPicker?.getTimestamp() : null,
     };
-    sessionStorage.setItem("create_draft", JSON.stringify(draft));
+    try {
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    } catch (e) {
+      console.warn("[CreateFormView] Не удалось сохранить черновик:", e);
+    }
   }
 
   function _checkDraft() {
-    const raw = sessionStorage.getItem("create_draft");
+    const raw = sessionStorage.getItem(DRAFT_KEY);
     if (!raw) return;
+    let draft;
     try {
-      const draft = JSON.parse(raw);
-      if (
-        confirm("Найден несохраненный черновик заявки. Восстановить данные?")
-      ) {
-        if (draft.details && formDetails) formDetails.value = draft.details;
-        if (draft.address) addressPicker?.setValue(draft.address);
-        if (draft.dept) deptSelect?.setValue(draft.dept);
-        if (draft.req) reqSelect?.setValue(draft.req);
-        if (draft.grp) groupSelect?.setValue(draft.grp);
-        if (draft.staffId) staffSelect?.setValue(draft.staffId);
-        if (draft.repair) repairPicker?.setValue(draft.repair);
-      } else {
-        sessionStorage.removeItem("create_draft");
-      }
+      draft = JSON.parse(raw);
     } catch (e) {
-      console.error("[CreateFormView] Draft restore error:", e);
+      sessionStorage.removeItem(DRAFT_KEY);
+      return;
+    }
+
+    if (confirm("Найден несохраненный черновик заявки. Восстановить данные?")) {
+      if (draft.details && formDetails) formDetails.value = draft.details;
+      if (draft.address) addressPicker?.setValue(draft.address);
+      if (draft.dept) dictRefs.dept?.setValue(draft.dept);
+      if (draft.req) dictRefs.req?.setValue(draft.req);
+      if (draft.grp) dictRefs.group?.setValue(draft.grp);
+      if (draft.staffId) staffSelect?.setValue(draft.staffId);
+      if (draft.repair && navigator.onLine)
+        repairPicker?.setValue(draft.repair);
+    } else {
+      sessionStorage.removeItem(DRAFT_KEY);
     }
   }
 
@@ -71,17 +86,60 @@ export function createCreateFormView({ onChange }) {
     const btn = document.getElementById("saveTicketBtn");
     if (!btn) return;
 
-    const hasCaps = formDetails && CAPS_REGEX.test(formDetails.value);
+    const hasCaps = formDetails ? CAPS_REGEX.test(formDetails.value) : false;
     const allFilled =
-      addressPicker?.isValid() &&
-      deptSelect?.isValid() &&
-      reqSelect?.isValid() &&
-      groupSelect?.isValid() &&
+      !!addressPicker?.isValid() &&
+      !!dictRefs.dept?.isValid() &&
+      !!dictRefs.req?.isValid() &&
+      !!dictRefs.group?.isValid() &&
       !hasCaps;
 
     btn.disabled = !allFilled;
     btn.style.opacity = allFilled ? "1" : "0.5";
     btn.style.cursor = allFilled ? "pointer" : "not-allowed";
+  }
+
+  // --- Срок ремонта: создание и снятие по состоянию сети ---
+  function _destroyRepairPicker() {
+    if (repairPicker) {
+      repairPicker.destroy();
+      repairPicker = null;
+    }
+    const slot = document.getElementById("repairTimeSlot");
+    if (slot) {
+      slot.innerHTML = "";
+      slot.style.display = "none";
+    }
+  }
+
+  function _buildRepairPicker() {
+    if (repairPicker) return;
+    const slot = document.getElementById("repairTimeSlot");
+    if (!slot) return;
+
+    repairPicker = createRepairTimePicker({
+      initialValue: null,
+      onChange: () => {
+        _updateSaveBtnState();
+        onChange();
+      },
+    });
+    slot.innerHTML = "";
+    slot.appendChild(repairPicker.element);
+    slot.style.display = "";
+
+    // Бизнес-правило «Застревание»: 40 минут от текущего момента.
+    if (dictRefs.group?.getValue() === "4" && !repairPicker.getTimestamp()) {
+      repairPicker.setValue(Math.floor(Date.now() / 1000) + 40 * 60);
+    }
+  }
+
+  function _syncRepairPicker() {
+    if (destroyed) return;
+    if (navigator.onLine) _buildRepairPicker();
+    else _destroyRepairPicker();
+    _updateSaveBtnState();
+    onChange();
   }
 
   function mount(prefilledAddress) {
@@ -133,71 +191,51 @@ export function createCreateFormView({ onChange }) {
       staffSlot.appendChild(staffSelect.element);
     }
 
-    const repairSlot = document.getElementById("repairTimeSlot");
-    if (repairSlot && !repairPicker) {
-      if (navigator.onLine) {
-        repairPicker = createRepairTimePicker({
-          initialValue: null,
-          onChange: () => {
-            _updateSaveBtnState();
-            onChange();
-          },
-        });
-        repairSlot.innerHTML = "";
-        repairSlot.appendChild(repairPicker.element);
-        repairSlot.style.display = "";
-      } else {
-        // Офлайн: срок ремонта назначить нельзя — скрываем picker целиком.
-        repairSlot.innerHTML = "";
-        repairSlot.style.display = "none";
-      }
-    }
-
     const slots = [
       {
         id: "createGroupSlot",
         key: "group",
-        ref: "groupSelect",
+        ref: "group",
         placeholder: "— выберите группу —",
       },
       {
         id: "createDeptSlot",
         key: "department",
-        ref: "deptSelect",
+        ref: "dept",
         placeholder: "— выберите отдел —",
       },
       {
         id: "createReqSlot",
         key: "request",
-        ref: "reqSelect",
+        ref: "req",
         placeholder: "— выберите тип —",
       },
     ];
 
-    slots.forEach((s) => {
+    for (const s of slots) {
       const container = document.getElementById(s.id);
-      if (container && !this[s.ref]) {
-        const comp = createDictSelect({
-          key: s.key,
-          placeholder: s.placeholder,
-          required: true,
-          onChange: (value) => {
-            _updateSaveBtnState();
-            onChange();
-            // Бизнес-логика "Застревания"
-            if (s.key === "group" && value === "4" && repairPicker) {
-              const fortyMinsLater = Math.floor(Date.now() / 1000) + 40 * 60;
-              repairPicker.setValue(fortyMinsLater);
-            }
-          },
-        });
-        container.innerHTML = "";
-        container.appendChild(comp.element);
-        if (s.ref === "groupSelect") groupSelect = comp;
-        if (s.ref === "deptSelect") deptSelect = comp;
-        if (s.ref === "reqSelect") reqSelect = comp;
-      }
-    });
+      if (!container || dictRefs[s.ref]) continue;
+
+      const comp = createDictSelect({
+        key: s.key,
+        placeholder: s.placeholder,
+        required: true,
+        onChange: (value) => {
+          _updateSaveBtnState();
+          onChange();
+          if (s.key === "group" && value === "4" && repairPicker) {
+            repairPicker.setValue(Math.floor(Date.now() / 1000) + 40 * 60);
+          }
+        },
+      });
+      container.innerHTML = "";
+      container.appendChild(comp.element);
+      dictRefs[s.ref] = comp;
+    }
+
+    window.addEventListener("online", _syncRepairPicker);
+    window.addEventListener("offline", _syncRepairPicker);
+    _syncRepairPicker();
 
     _checkDraft();
     _updateSaveBtnState();
@@ -220,87 +258,104 @@ export function createCreateFormView({ onChange }) {
 
   return {
     mount,
+
     getPayload: () => {
-      const addressData = addressPicker?.getValue();
+      const addressData = addressPicker?.getValue() || {};
       const details = formDetails?.value.trim() || "";
-      const staffId = staffSelect?.getValue() || null;
-      return {
-        city_id: addressData.city_id,
-        street_id: addressData.street_id,
-        home_id: addressData.home_id,
-        object_id: addressData.object_id,
-        fullAddress: addressData.address,
-        group_id: groupSelect?.getValue() || null,
-        request_id: reqSelect?.getValue() || null,
-        department_id: deptSelect?.getValue() || null,
-        repair_time: navigator.onLine
-          ? repairPicker?.getTimestamp() || null
-          : null,
-        details: details,
-        staff_id: staffId,
+
+      const payload = {
+        city_id: addressData.city_id ?? null,
+        street_id: addressData.street_id ?? null,
+        home_id: addressData.home_id ?? null,
+        object_id: addressData.object_id ?? null,
+        fullAddress: addressData.address || "",
+        group_id: dictRefs.group?.getValue() || null,
+        request_id: dictRefs.req?.getValue() || null,
+        department_id: dictRefs.dept?.getValue() || null,
+        details,
+        staff_id: staffSelect?.getValue() || null,
       };
+
+      // Офлайн ключ не добавляем вовсе — не null, а отсутствие поля.
+      if (navigator.onLine) {
+        payload.repair_time = repairPicker?.getTimestamp() || null;
+      }
+      return payload;
     },
+
     isValid: () => {
       const addressData = addressPicker?.getValue();
       const details = formDetails?.value.trim() || "";
-      if (!addressData || !details)
+
+      if (!addressData || !details) {
         return {
           ok: false,
           msg: "Заполните обязательные поля: выберите адрес и введите описание проблемы.",
         };
-      if (navigator.onLine && repairPicker && !repairPicker.isValid())
+      }
+      if (navigator.onLine && repairPicker && !repairPicker.isValid()) {
         return { ok: false, msg: "Дата ремонта указана некорректно." };
+      }
       if (
-        !deptSelect?.isValid() ||
-        !reqSelect?.isValid() ||
-        !groupSelect?.isValid()
-      )
+        !dictRefs.dept?.isValid() ||
+        !dictRefs.req?.isValid() ||
+        !dictRefs.group?.isValid()
+      ) {
         return {
           ok: false,
           msg: "Пожалуйста, выберите отдел, тип запроса и группу.",
         };
+      }
       return { ok: true };
     },
+
     lock: () => {
       isLocked = true;
       formContainer?.classList.add("create-form-locked");
     },
+
     unlock: () => {
       isLocked = false;
       formContainer?.classList.remove("create-form-locked");
       _updateSaveBtnState();
     },
+
     reset: () => {
-      sessionStorage.removeItem("create_draft");
+      sessionStorage.removeItem(DRAFT_KEY);
       if (formDetails) formDetails.value = "";
-
-      if (typeof addressPicker?.reset === "function") addressPicker.reset();
-      if (typeof staffSelect?.reset === "function") staffSelect.reset();
-      if (typeof deptSelect?.reset === "function") deptSelect.reset();
-      if (typeof reqSelect?.reset === "function") reqSelect.reset();
-      if (typeof groupSelect?.reset === "function") groupSelect.reset();
-      if (typeof repairPicker?.reset === "function") repairPicker.reset();
-
+      addressPicker?.reset?.();
+      staffSelect?.reset?.();
+      dictRefs.dept?.reset?.();
+      dictRefs.req?.reset?.();
+      dictRefs.group?.reset?.();
+      repairPicker?.reset?.();
+      const capsWarn = document.getElementById("capsWarnFormDetails");
+      if (capsWarn) capsWarn.style.display = "none";
       _updateSaveBtnState();
     },
+
     destroy: () => {
+      destroyed = true;
+      window.removeEventListener("online", _syncRepairPicker);
+      window.removeEventListener("offline", _syncRepairPicker);
+
       if (draftTimer) clearTimeout(draftTimer);
       destroyVoiceInput();
-      if (formContainer) formContainer.oninput = null;
+      if (formContainer) {
+        formContainer.oninput = null;
+        formContainer.onkeydown = null;
+      }
       if (formDetails) formDetails.oninput = null;
+
       addressPicker?.destroy();
       staffSelect?.destroy();
       repairPicker?.destroy();
-      deptSelect?.destroy();
-      reqSelect?.destroy();
-      groupSelect?.destroy();
-      addressPicker =
-        staffSelect =
-        repairPicker =
-        deptSelect =
-        reqSelect =
-        groupSelect =
-          null;
+      dictRefs.dept?.destroy();
+      dictRefs.req?.destroy();
+      dictRefs.group?.destroy();
+
+      addressPicker = staffSelect = repairPicker = null;
+      dictRefs.dept = dictRefs.req = dictRefs.group = null;
     },
   };
 }
