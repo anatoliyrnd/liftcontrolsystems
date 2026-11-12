@@ -20,6 +20,7 @@ use App\Service\{
 
 final class ApiController
 {
+
     private AuthService $authService;
     private CallService $callService;
     private ConfigService $configService;

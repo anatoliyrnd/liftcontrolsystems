@@ -120,21 +120,37 @@ final class ConfigService
      */
     private function getStaffList(): array
     {
+        // В список ответственных попадают механики, прорабы, связисты
+        // и электронищики. Диспетчеры — нет.
+        // Вторая ветка — страховка для записей без user_position.
         $rows = $this->db->fetchAll("
-        SELECT user_id, user_name, user_phone, user_role, user_position 
-        FROM lift_users 
-        WHERE (user_role = 'mechanic' OR user_role = 'engineer' OR user_position = 'foreman')
-          AND user_block <> 1
-        ORDER BY user_name
-    ");
+            SELECT user_id, user_name, user_phone, user_role, user_position
+            FROM lift_users
+            WHERE user_block <> 1
+              AND (
+                    user_position IN ('mechanic','foreman','signalman','electronic-engineer')
+                    OR (
+                         (user_position IS NULL OR user_position = '')
+                         AND user_role IN ('mechanic','engineer')
+                    )
+                  )
+            ORDER BY user_name
+        ");
 
-        return array_map(function ($r) {
+        return array_map(static function (array $r): array {
+            $position = (string) ($r['user_position'] ?? '');
+            if ($position === '') {
+                // Без позиции UI показал бы «Сотрудник» вместо «Механик».
+                $position = in_array($r['user_role'], ['mechanic', 'engineer'], true)
+                    ? 'mechanic'
+                    : '';
+            }
             return [
-                'id' => (int) $r['user_id'],
-                'name' => $r['user_name'],
-                'phone' => $r['user_phone'] ?: null,
-                'role' => $r['user_role'] ?: null,
-                'position' => $r['user_position'] ?: null
+                'id'       => (int) $r['user_id'],
+                'name'     => $r['user_name'],
+                'phone'    => $r['user_phone'] ?: null,
+                'role'     => $r['user_role'] ?: null,
+                'position' => $position !== '' ? $position : null,
             ];
         }, $rows);
     }

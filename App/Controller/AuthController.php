@@ -12,6 +12,7 @@ use App\Support\Logger;
 
 final class AuthController
 {
+    private const int REFRESH_TTL = 30 * 86400; // 30 дней
     private AuthService $authService;
     private UserRepository $userRepo;
 
@@ -42,39 +43,40 @@ final class AuthController
 
     private function handleLogin(Request $request): Response
     {
-        $login = (string) ($request->input('name') ?? '');
+        $login    = (string) ($request->input('name') ?? '');
         $password = (string) ($request->input('pname') ?? '');
-        $webgl = (string) ($request->input('webGL') ?? '');
-        $userId = $request->input('user_id');
+        $webgl    = (string) ($request->input('webGL') ?? '');
+        $userId   = $request->input('user_id');
 
-        if ($password === '')
+        if ($password === '') {
             throw new ApiException(ErrorCode::InvalidInput, 'Пароль обязателен');
+        }
 
-        $result = $this->authService->login($userId ? (int) $userId : null, $login, $password, $webgl);
+        $result = $this->authService->login(
+            $userId ? (int) $userId : null, $login, $password, $webgl
+        );
+        $uid = (int) $result['user']['id'];
 
-        // Генерируем Refresh Token и ставим Cookie
         $refreshToken = bin2hex(random_bytes(32));
-        $this->userRepo->saveRefreshToken((int) $result['user']['id'], $refreshToken, $webgl);
-
+        $this->userRepo->saveRefreshToken($uid, $refreshToken, $webgl);
         setcookie('lift_refresh', $refreshToken, [
-            'expires' => time() + (30 * 86400),
-            'path' => '/',
-            'secure' => true,
+            'expires'  => time() + self::REFRESH_TTL,
+            'path'     => '/',
+            'secure'   => true,
             'httponly' => true,
-            'samesite' => 'Strict'
+            'samesite' => 'Strict',
         ]);
 
-        // Генерируем НОВЫЙ Access-токен
+        // Единственная генерация access и единственная запись в БД.
         $accessToken = bin2hex(random_bytes(32));
-        $expires = time() + 7200; // 2 часа
+        $expires = time() + AuthService::ACCESS_TTL;
+        $this->userRepo->saveAccessToken($uid, $accessToken, $expires);
 
-        // Сохраняем в новую таблицу для ТЕКУЩЕГО устройства
-        $this->userRepo->saveAccessToken((int) $result['user']['id'], $accessToken, $expires);
-
+        // user уже отформатирован в login() — повторный validate() не нужен.
         return Response::ok([
             'access_token' => $accessToken,
-            'expires_at' => $expires,
-            'user' => $this->authService->validate($accessToken)
+            'expires_at'   => $expires,
+            'user'         => $result['user'],
         ]);
     }
 
@@ -90,32 +92,39 @@ final class AuthController
             throw new ApiException(ErrorCode::TokenExpired, 'Сессия истекла, войдите заново');
         }
 
-        // Генерируем НОВЫЙ Access-токен
         $accessToken = bin2hex(random_bytes(32));
-        $expires = time() + 7200; // 2 часа
-        //$this->userRepo->updateApiToken((int) $user['user_id'], $accessToken, $expires, (string) $user['webgl_info_spa']);
-
-        // Генерируем НОВЫЙ Access-токен
-        $accessToken = bin2hex(random_bytes(32));
-        $expires = time() + 7200; // 2 часа
-
-        // Сохраняем в новую таблицу для ТЕКУЩЕГО устройства
+        $expires = time() + AuthService::ACCESS_TTL;
         $this->userRepo->saveAccessToken((int) $user['user_id'], $accessToken, $expires);
 
         return Response::ok([
             'access_token' => $accessToken,
-            'expires_at' => $expires,
-            'user' => $this->authService->validate($accessToken)
+            'expires_at'   => $expires,
+            'user'         => $this->authService->validate($accessToken),
         ]);
     }
 
     private function handleLogout(Request $request): Response
     {
+        // Отзываем access текущего устройства: иначе токен живёт до 2 часов
+        // после выхода. Метод deleteAccessToken уже есть в репозитории.
+        if ($request->bearer) {
+            $this->userRepo->deleteAccessToken($request->bearer);
+        }
+
         $refreshToken = $_COOKIE['lift_refresh'] ?? '';
         if ($refreshToken) {
             $this->userRepo->deleteRefreshToken($refreshToken);
-            setcookie('lift_refresh', '', time() - 3600, '/');
         }
+
+        // Параметры удаления зеркалят установку.
+        setcookie('lift_refresh', '', [
+            'expires'  => time() - 3600,
+            'path'     => '/',
+            'secure'   => true,
+            'httponly' => true,
+            'samesite' => 'Strict',
+        ]);
+
         return Response::ok(['message' => 'Вы вышли из системы']);
     }
 
