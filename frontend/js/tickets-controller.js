@@ -791,56 +791,28 @@ export class TicketsController {
     if (this.currentSortColumnId !== -1) this._reApplyCurrentSort();
   }
 
-  async _updateSyncButton() {
-    let pending = 0;
-    let failed = 0;
-    try {
-      [pending, failed] = await Promise.all([
-        offlineDB.getOutboxCount(),
-        offlineDB.getFailedCount(),
-      ]);
-    } catch (e) {
-      console.warn("[TicketsController] Счётчики очереди недоступны:", e);
-    }
-    const total = pending + failed;
+ async _updateSyncButton() {
+  // 1.11: кнопка таблицы принадлежит только активному экрану.
+  // Шапка (syncIndicator) обновляется одноимённым модулем на refreshSyncState —
+  // здесь её не трогаем, чтобы не было двух источников истины.
+  const tableBtn = document.getElementById("refreshBtn");
+  if (!tableBtn || !this._isActive) return;
 
-    const headerBadge = document.querySelector(".sync-indicator-badge");
-    const headerBtn = document.getElementById("syncIndicator");
-    if (headerBadge && headerBtn) {
-      if (total > 0) {
-        const isError = failed > 0;
-        headerBadge.textContent = String(total);
-        headerBadge.style.display = "block";
-        headerBadge.style.background = isError ? "#ef4444" : "#f59e0b";
-        headerBtn.title = isError
-          ? `Ошибка синхронизации: ${failed} действий`
-          : `Ожидает синхронизации: ${total} действий`;
-      } else {
-        headerBadge.style.display = "none";
-        headerBtn.title = "Все данные синхронизированы";
-      }
-    }
-
-    // 1.11: кнопка таблицы принадлежит только активному экрану.
-    const tableBtn = document.getElementById("refreshBtn");
-    if (!tableBtn || !this._isActive) return;
-
-    if (window.syncManagerInstance?.isSyncing) {
-      tableBtn.disabled = true;
-      tableBtn.title = "Идет синхронизация...";
-      return;
-    }
-
-    tableBtn.disabled = false;
-    tableBtn.style.color = "var(--text-primary)";
-    tableBtn.title = "Обновить список заявок";
-    tableBtn.onclick = (e) => {
-      if (e) e.preventDefault();
-      // Ссылку захватываем ДО unmount — он зануляет _currentTicketsRef.
-      const ref = this._currentTicketsRef;
-      this.unmount();
-      this.isLoaded = false;
-      this.mount(ref);
-    };
+  if (window.syncManagerInstance?.isSyncing) {
+    tableBtn.disabled = true;
+    tableBtn.title = "Идет синхронизация...";
+    return;
   }
+
+  tableBtn.disabled = false;
+  tableBtn.style.color = "var(--text-primary)";
+  tableBtn.title = "Обновить список заявок";
+  tableBtn.onclick = (e) => {
+    if (e) e.preventDefault();
+    const ref = this._currentTicketsRef;
+    this.unmount();
+    this.isLoaded = false;
+    this.mount(ref);
+  };
+}
 }
