@@ -8,7 +8,7 @@
  */
 
 const OFFLINE_COMMENT_HEADER = "⏳ [Офлайн-комментарии]";
-const OFFLINE_COMMENT_LINE_RE = /^\[([^,]+),\s*([^\]]+)]:\s*(.*)$/;
+const OFFLINE_COMMENT_LINE_RE = /^\[([^,]+),\s*([^\]]+)\]:\s*(.*)$/;
 
 function toSeconds(value) {
   const n = Number(value);
