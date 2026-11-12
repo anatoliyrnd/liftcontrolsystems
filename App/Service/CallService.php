@@ -277,6 +277,23 @@ class CallService
             $fields['call_staff_status'] = (int) $data['notify_status'];
             $fields['call_staff_date'] = $fields['call_staff_status'] !== 0 ? time() : 0;
         }
+        // Слоты 2 и 3. Колонки nullable, но 0 и NULL одинаково повятся как null
+// в formatList/findByIdDetailed, поэтому пишем 0 при снятии — единообразно
+// с первым слотом.
+        foreach ([2, 3] as $i) {
+            $colStaff  = "call_staff{$i}";
+            $colStatus = "call_staff_status{$i}";
+            $colDate   = "call_staff_date{$i}";
+
+            if (array_key_exists("staff_id{$i}", $data) && $canUpdate($colStaff)) {
+                $fields[$colStaff] = (int) $data["staff_id{$i}"];
+            }
+            if (array_key_exists("notify_status{$i}", $data) && $canUpdate($colStatus)) {
+                $fields[$colStatus] = (int) $data["notify_status{$i}"];
+                // Дату уведомления ставит сервер, клиентское notify_date игнорируем.
+                $fields[$colDate] = $fields[$colStatus] !== 0 ? time() : 0;
+            }
+        }
         if (array_key_exists('repair_time', $data) && $canUpdate('expected_repair_time')) $fields['expected_repair_time'] = (int) $data['repair_time'];
 
         if (!empty($fields)) {
