@@ -1,14 +1,21 @@
 /**
- * Контроллер экрана #/queue.
- * Показывает все pending + failed команды (любых авторов).
- * - «Синхронизировать» — triggerSync event.
- * - «Удалить» (только для failed) — outboxQueue.remove.
- * - live-update по refreshSyncState.
+ * Контроллер экрана #/queue (API_syncCommands.md v5.4, ТЗ волна 2 §13.1).
+ *
+ * Четыре группы в порядке FIFO:
+ *   pending            — «Удалить»
+ *   needs_confirmation — «Создать дубликат» (модалка), «Удалить»
+ *   failed             — «Повторить», «Удалить»
+ *   rejected           — «Создать заново онлайн», «Удалить»
+ *
+ * «Удалить» есть на каждой записи любого статуса (п. 2.17).
+ * «Синхронизировать» — сбрасывает ручной режим через triggerSync → syncNow.
  */
-import { offlineDB } from "./offline-db.js";
+import { offlineDB, OUTBOX_STATUS } from "./offline-db.js";
 import { outboxQueue } from "./outbox-queue.js";
 import { notify } from "./components/notify.js";
 import { formatTs } from "./utils/date-utils.js";
+import { appState } from "./app-state.js";
+import { logHistoryAction } from "./history-logger.js";
 
 const TYPE_LABEL = {
   CreateTicket: "Создание",
@@ -18,11 +25,26 @@ const TYPE_LABEL = {
   AcceptTicket: "Принятие",
 };
 
+const GROUP_TITLE = {
+  [OUTBOX_STATUS.PENDING]: "Ожидает",
+  [OUTBOX_STATUS.NEEDS_CONFIRMATION]: "Требует подтверждения",
+  [OUTBOX_STATUS.FAILED]: "Ошибка",
+  [OUTBOX_STATUS.REJECTED]: "Отклонено",
+};
+
+const GROUP_ORDER = [
+  OUTBOX_STATUS.PENDING,
+  OUTBOX_STATUS.NEEDS_CONFIRMATION,
+  OUTBOX_STATUS.FAILED,
+  OUTBOX_STATUS.REJECTED,
+];
+
 export class QueueController {
   constructor(api, router) {
     this.api = api;
     this.router = router;
     this._refreshHandler = null;
+    this._syncingSyncBtn = null;
   }
 
   async mount() {
@@ -31,17 +53,16 @@ export class QueueController {
     const syncBtn = $("queueSyncBtn");
     const backBtn = $("queueBackBtn");
     if (backBtn) backBtn.onclick = () => this.router.navigate("#/");
+
     if (syncBtn) {
       syncBtn.onclick = () => {
-        syncBtn.disabled = true;
-        syncBtn.textContent = "Синхронизация...";
+        // triggerSync без detail → SyncManager._onTriggerSync → syncNow():
+        // кнопка сбрасывает ручной режим и счётчик failedRuns (п. 2.10).
         window.dispatchEvent(new Event("triggerSync"));
-        setTimeout(() => {
-          syncBtn.disabled = false;
-          syncBtn.textContent = "Синхронизировать";
-        }, 3000);
+        this._setSyncBtnState(true);
       };
     }
+    this._syncingSyncBtn = syncBtn;
 
     this._refreshHandler = () => this._render();
     window.addEventListener("refreshSyncState", this._refreshHandler);
@@ -54,6 +75,19 @@ export class QueueController {
       window.removeEventListener("refreshSyncState", this._refreshHandler);
       this._refreshHandler = null;
     }
+    this._syncingSyncBtn = null;
+  }
+
+  _setSyncBtnState(syncing) {
+    const btn = this._syncingSyncBtn;
+    if (!btn) return;
+    if (syncing) {
+      btn.disabled = true;
+      btn.textContent = "Синхронизация...";
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Синхронизировать";
+    }
   }
 
   async _render() {
@@ -63,89 +97,218 @@ export class QueueController {
     const summary = $("queueSummary");
     if (!tbody) return;
 
-    const all = await offlineDB.getAllPending();
-    const list = all
-      .filter((c) => c.status === "pending" || c.status === "failed")
-      .sort((a, b) => a.created_at - b.created_at);
+    // Счётчик кнопки — по фактическому isSyncing SyncManager.
+    this._setSyncBtnState(window.syncManagerInstance?.isSyncing === true);
 
-    const pendingCount = list.filter((c) => c.status === "pending").length;
-    const failedCount = list.filter((c) => c.status === "failed").length;
+    let groups;
+    try {
+      groups = await offlineDB.getOutboxGrouped();
+    } catch (e) {
+      console.warn("[QueueController] Очередь недоступна:", e);
+      return;
+    }
+
+    const counts = {
+      pending: groups[OUTBOX_STATUS.PENDING]?.length || 0,
+      needs_confirmation: groups[OUTBOX_STATUS.NEEDS_CONFIRMATION]?.length || 0,
+      failed: groups[OUTBOX_STATUS.FAILED]?.length || 0,
+      rejected: groups[OUTBOX_STATUS.REJECTED]?.length || 0,
+    };
+    const total = counts.pending + counts.needs_confirmation + counts.failed + counts.rejected;
 
     if (summary) {
       summary.textContent =
-        list.length === 0
+        total === 0
           ? ""
-          : `Всего: ${list.length} · Ожидает: ${pendingCount} · Ошибок: ${failedCount}`;
+          : `Всего: ${total} · Ожидает: ${counts.pending} · Подтвердить: ${counts.needs_confirmation} · Ошибок: ${counts.failed} · Отклонено: ${counts.rejected}`;
     }
 
     tbody.innerHTML = "";
 
-    if (list.length === 0) {
+    if (total === 0) {
       if (empty) empty.style.display = "block";
       return;
     }
     if (empty) empty.style.display = "none";
 
-    list.forEach((cmd, idx) => {
-      const row = document.createElement("tr");
-      if (cmd.status === "failed")
-        row.style.background = "rgba(239,68,68,0.08)";
+    let rowIndex = 0;
+    for (const status of GROUP_ORDER) {
+      const list = groups[status] || [];
+      if (list.length === 0) continue;
 
-      const objectRef =
-        cmd.ticket_id != null
-          ? `№${cmd.ticket_id}`
-          : cmd.offline_uuid
-            ? cmd.offline_uuid.slice(0, 16) + "…"
-            : "—";
+      // Заголовок группы
+      const header = document.createElement("tr");
+      header.className = "queue-group-header";
+      header.innerHTML = `<td colspan="8" style="background: var(--bg-primary); font-weight: 700; padding: 8px;">${this._esc(GROUP_TITLE[status])} (${list.length})</td>`;
+      tbody.appendChild(header);
 
-      const preview = this._preview(cmd);
+      for (const cmd of list) {
+        rowIndex++;
+        tbody.appendChild(this._renderRow(cmd, rowIndex, status));
+      }
+    }
 
-      row.innerHTML = `
-                <td>${idx + 1}</td>
-                <td>${this._esc(TYPE_LABEL[cmd.command_type] || cmd.command_type)}</td>
-                <td>${this._esc(cmd.offline_author_name || "—")}</td>
-                <td>${this._esc(objectRef)}</td>
-                <td title="${this._esc(preview)}" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;">
-                    ${this._esc(preview)}
-                </td>
-                <td style="color:${cmd.status === "failed" ? "#ef4444" : "#f59e0b"};font-weight:600;">
-                    ${cmd.status === "failed" ? "Ошибка" : "Ожидает"}
-                </td>
-                <td>${formatTs(cmd.created_at)}</td>
-                 <td>
-                    <button class="queue-delete-btn" data-uuid="${this._esc(cmd.command_uuid)}" title="Удалить из очереди">×</button>
-                </td>
-            `;
+    this._bindActions(tbody);
+  }
 
-      tbody.appendChild(row);
+  _renderRow(cmd, idx, status) {
+    const row = document.createElement("tr");
+
+    if (status === OUTBOX_STATUS.FAILED) {
+      row.style.background = "rgba(239,68,68,0.08)";
+    } else if (status === OUTBOX_STATUS.NEEDS_CONFIRMATION) {
+      row.style.background = "rgba(249,115,22,0.08)";
+    } else if (status === OUTBOX_STATUS.REJECTED) {
+      row.style.background = "rgba(100,116,139,0.08)";
+    }
+
+    const objectRef =
+      cmd.ticket_id != null
+        ? `№${cmd.ticket_id}`
+        : cmd.offline_uuid
+          ? cmd.offline_uuid.slice(0, 16) + "…"
+          : "—";
+
+    const preview = this._preview(cmd);
+    const statusCell = this._statusCell(cmd, status);
+    const actions = this._actionsHtml(cmd, status);
+
+    row.innerHTML = `
+      <td>${idx}</td>
+      <td>${this._esc(TYPE_LABEL[cmd.command_type] || cmd.command_type)}</td>
+      <td>${this._esc(cmd.offline_author_name || "—")}</td>
+      <td>${this._esc(objectRef)}</td>
+      <td title="${this._esc(preview)}" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;">${this._esc(preview)}</td>
+      <td>${statusCell}</td>
+      <td>${formatTs(cmd.created_at)}</td>
+      <td style="white-space:nowrap;">
+        ${actions}
+        <button class="queue-delete-btn" data-uuid="${this._esc(cmd.command_uuid)}" data-action="delete" title="Удалить из очереди" style="margin-left:4px;padding:2px 8px;border-radius:4px;border:1px solid #ef4444;background:transparent;color:#ef4444;cursor:pointer;">×</button>
+      </td>
+    `;
+    return row;
+  }
+
+  _statusCell(cmd, status) {
+    if (status === OUTBOX_STATUS.PENDING) {
+      return `<span style="color:#f59e0b;font-weight:600;">Ожидает</span>`;
+    }
+    if (status === OUTBOX_STATUS.FAILED) {
+      const err = cmd.last_error || "error";
+      const cnt = Number(cmd.retry_count) || 0;
+      return `<span style="color:#ef4444;font-weight:600;" title="${this._esc(err)}">Ошибка${cnt ? ` (${cnt})` : ""}</span>`;
+    }
+    if (status === OUTBOX_STATUS.NEEDS_CONFIRMATION) {
+      const n = Array.isArray(cmd.existing_tickets) ? cmd.existing_tickets.length : 0;
+      return `<span style="color:#f97316;font-weight:600;">Дубликат${n ? ` (${n})` : ""}</span>`;
+    }
+    if (status === OUTBOX_STATUS.REJECTED) {
+      const reason = cmd.reason || cmd.last_error || "отклонено";
+      return `<span style="color:#64748b;font-weight:600;" title="${this._esc(reason)}">Отклонено</span>`;
+    }
+    return "";
+  }
+
+  _actionsHtml(cmd, status) {
+    const uuid = this._esc(cmd.command_uuid);
+    if (status === OUTBOX_STATUS.NEEDS_CONFIRMATION) {
+      return `<button class="queue-action-btn" data-uuid="${uuid}" data-action="confirm" style="padding:2px 8px;border-radius:4px;border:1px solid #f97316;background:transparent;color:#f97316;cursor:pointer;">Создать дубликат</button>`;
+    }
+    if (status === OUTBOX_STATUS.FAILED) {
+      return `<button class="queue-action-btn" data-uuid="${uuid}" data-action="retry" style="padding:2px 8px;border-radius:4px;border:1px solid #6366f1;background:transparent;color:#6366f1;cursor:pointer;">Повторить</button>`;
+    }
+    if (status === OUTBOX_STATUS.REJECTED && cmd.command_type === "CreateTicket") {
+      return `<button class="queue-action-btn" data-uuid="${uuid}" data-action="recreate" style="padding:2px 8px;border-radius:4px;border:1px solid #22c55e;background:transparent;color:#22c55e;cursor:pointer;">Создать заново</button>`;
+    }
+    return "";
+  }
+
+  _bindActions(tbody) {
+    tbody.querySelectorAll(".queue-delete-btn, .queue-action-btn").forEach((btn) => {
+      btn.onclick = () => this._handleAction(btn.dataset.uuid, btn.dataset.action);
     });
+  }
 
-    tbody.querySelectorAll(".queue-delete-btn").forEach((btn) => {
-      btn.onclick = async () => {
-        const uuid = btn.dataset.uuid;
-        if (!uuid) return;
-        if (
-          !confirm(
-            "Удалить действие из очереди? Оно не будет синхронизировано.",
-          )
-        )
-          return;
-        await outboxQueue.remove([uuid]);
-        notify.info("Действие удалено из очереди.");
-        // Сообщаем шапке (и другим контроллерам) пересчитать бейдж
-        window.dispatchEvent(new Event("refreshSyncState"));
-        await this._render();
+  async _handleAction(uuid, action) {
+    if (!uuid || !action) return;
+    const sm = window.syncManagerInstance;
+
+    // --- Удаление любой записи (п. 2.17) ---
+    if (action === "delete") {
+      if (!confirm("Удалить действие из очереди? Оно не будет синхронизировано.")) return;
+      await outboxQueue.remove([uuid]);
+      logHistoryAction("Действие удалено из очереди.");
+      notify.info("Действие удалено из очереди.");
+      window.dispatchEvent(new Event("refreshSyncState"));
+      return;
+    }
+
+    // --- Создать дубликат (п. 2.20: модалка из очереди) ---
+    if (action === "confirm") {
+      if (!sm?.confirmDuplicate) {
+        notify.error("Синхронизация недоступна. Обновите страницу.");
+        return;
+      }
+      try {
+        await sm.confirmDuplicate(uuid);
+      } catch (e) {
+        console.error("[QueueController] confirmDuplicate error:", e);
+        notify.error("Не удалось подтвердить дубликат.");
+      }
+      return;
+    }
+
+    // --- Повторить failed (п. 2.18) ---
+    if (action === "retry") {
+      if (!sm?.retryFailed) {
+        notify.error("Синхронизация недоступна. Обновите страницу.");
+        return;
+      }
+      try {
+        await sm.retryFailed(uuid);
+        notify.info("Действие возвращено в очередь.");
+      } catch (e) {
+        console.error("[QueueController] retryFailed error:", e);
+        notify.error("Не удалось вернуть действие в очередь.");
+      }
+      return;
+    }
+
+    // --- Создать заново онлайн из rejected (п. 2.18) ---
+    if (action === "recreate") {
+      const all = await offlineDB.getAllCommands();
+      const cmd = all.find((c) => c.command_uuid === uuid);
+      if (!cmd || cmd.command_type !== "CreateTicket") {
+        notify.warning("Восстановить можно только отклонённую заявку.");
+        return;
+      }
+      const p = cmd.payload || {};
+      appState.pendingCreateAddress = {
+        from_ticket_id: null,
+        address: p.fullAddress || p.address || "",
+        city_id: p.city_id ?? null,
+        street_id: p.street_id ?? null,
+        home_id: p.home_id ?? null,
+        object_id: p.object_id ?? null,
       };
-    });
+      // Удаляем отклонённую запись: пользователь создаёт заново в онлайне.
+      await outboxQueue.remove([uuid]);
+      logHistoryAction("Отклонённая заявка открыта для создания заново.");
+      notify.info(
+        "Открыта форма создания. Заполните поля и сохраните онлайн.",
+        { once: true },
+      );
+      this.router.navigate("#/create");
+      return;
+    }
   }
 
   _preview(cmd) {
     const p = cmd.payload || {};
-    if (cmd.command_type === "CreateTicket") return p.fullAddress || "—";
+    if (cmd.command_type === "CreateTicket") return p.fullAddress || p.address || "—";
     if (cmd.command_type === "EditTicket") {
       if (p.details) return p.details;
       if (p.staff_id != null) return "Назначить ответственного";
-      if (p.repair_time != null) return "Изменить время ремонта";
       if (p.notify_status != null) return "Изменить статус уведомления";
       return "—";
     }

@@ -23,7 +23,7 @@ export function queuePageTemplate() {
                             <th>Фрагмент</th>
                             <th style="width:120px;">Статус</th>
                             <th style="width:170px;">Создано</th>
-                            <th style="width:60px;"></th>
+                            <th style="width:180px;"></th>
                         </tr>
                     </thead>
                     <tbody></tbody>
