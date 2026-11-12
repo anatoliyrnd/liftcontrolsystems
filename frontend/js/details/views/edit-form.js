@@ -127,7 +127,11 @@ export function createEditForm({ ticket, draft, permissions, onChange }) {
     if (block) {
       block.style.display = "block";
       repairPicker = createRepairTimePicker({
-        /* ... */
+        initialValue: ticket.repair_time,
+        onChange: (value) => {
+          draft.repair_time = value;
+          onChange();
+        },
       });
       block.innerHTML = "";
       block.appendChild(repairPicker.element);
@@ -137,7 +141,6 @@ export function createEditForm({ ticket, draft, permissions, onChange }) {
     const block = document.getElementById("repairTimeEditBlock");
     if (block) block.style.display = "none";
   }
-
   return {
     isValid: () => {
       if (newDetailsInput && CAPS_REGEX.test(newDetailsInput.value))

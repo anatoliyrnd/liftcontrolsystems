@@ -24,24 +24,25 @@
 export function normalizeTicketFields(ticket) {
   if (!ticket) return ticket;
 
-  if (ticket.staff_id != null && ticket.staff_id !== "")
-    ticket.staff_id = Number(ticket.staff_id) || null;
-  else ticket.staff_id = null;
-  if (ticket.staff_id2 != null && ticket.staff_id2 !== "")
-    ticket.staff_id2 = Number(ticket.staff_id2) || null;
-  else ticket.staff_id2 = null;
-  if (ticket.staff_id3 != null && ticket.staff_id3 !== "")
-    ticket.staff_id3 = Number(ticket.staff_id3) || null;
-  else ticket.staff_id3 = null;
+  const toIdOrNull = (v) => {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n !== 0 ? n : null;
+  };
+  const toStatus = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
 
-  ticket.notify_status = Number(ticket.notify_status) || 0;
-  ticket.notify_status2 = Number(ticket.notify_status2) || 0;
-  ticket.notify_status3 = Number(ticket.notify_status3) || 0;
+  ticket.staff_id = toIdOrNull(ticket.staff_id);
+  ticket.staff_id2 = toIdOrNull(ticket.staff_id2);
+  ticket.staff_id3 = toIdOrNull(ticket.staff_id3);
 
-  ticket.repair_time =
-    ticket.repair_time != null && ticket.repair_time !== ""
-      ? Number(ticket.repair_time) || null
-      : null;
+  ticket.notify_status = toStatus(ticket.notify_status);
+  ticket.notify_status2 = toStatus(ticket.notify_status2);
+  ticket.notify_status3 = toStatus(ticket.notify_status3);
+
+  ticket.repair_time = toIdOrNull(ticket.repair_time);
 
   return ticket;
 }

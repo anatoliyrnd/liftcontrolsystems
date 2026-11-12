@@ -1046,15 +1046,6 @@ export class DetailsController {
         );
       }
     }
-    if (this.state.draft.repair_time != null) {
-      if (!this.ticket.repair_time) {
-        patch.repair_time = this.state.draft.repair_time;
-      } else {
-        notify.warning(
-          "Время ремонта уже установлено — изменение не будет синхронизировано офлайн.",
-        );
-      }
-    }
 
     if (Object.keys(patch).length === 0) {
       notify.warning(

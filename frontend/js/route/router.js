@@ -45,19 +45,28 @@ export class Router {
    */
   _handleRoute() {
     let currentHash = window.location.hash || "#/";
+    const isAuthenticated = this.authCheck();
+
+    // Редиректы — до onBeforeNavigate: маршрут не меняется, DOM не перерисовывается.
+    if (!isAuthenticated && currentHash !== "#/login") {
+      this.navigate("#/login");
+      return;
+    }
+    if (isAuthenticated && currentHash === "#/login") {
+      this.navigate("#/");
+      return;
+    }
 
     let param = null;
     if (currentHash.startsWith("#/ticket/")) {
       param = currentHash.replace("#/ticket/", "");
       currentHash = "#/ticket";
 
-      // Валидация param: только цифры или offline_<digits>_<8 alnum>.
+      // 1.2: валидация param — только цифры или offline_<digits>_<8 alnum>.
       // Иначе 404 без запроса к сети.
       const isValidParam =
         /^\d+$/.test(param) || /^offline_\d+_[a-z0-9]{8}$/.test(param);
       if (!isValidParam) {
-        // Прогоняем onBeforeNavigate, чтобы старый контроллер размонтировался,
-        // затем рисуем 404 без вызова mountFn и без сетевого запроса.
         if (typeof this._onBeforeNavigate === "function") {
           try {
             this._onBeforeNavigate();
@@ -66,12 +75,33 @@ export class Router {
           }
         }
         this.appContainer.innerHTML = `
+        <div class="container" style="text-align: center; padding: 4rem 0;">
+          <h2>Раздел не найден (404)</h2>
+          <a href="#/" style="color: var(--accent); font-size: 14px;">Вернуться в Открытые заявки</a>
+        </div>`;
+        return;
+      }
+    }
+
+    // Cleanup ДО innerHTML — unmount видит старый DOM.
+    if (typeof this._onBeforeNavigate === "function") {
+      try {
+        this._onBeforeNavigate();
+      } catch (e) {
+        console.error("[Router] onBeforeNavigate error:", e);
+      }
+    }
+
+    const route = this.routes[currentHash];
+    if (route) {
+      this.appContainer.innerHTML = route.templateFn(param);
+      route.mountFn(param);
+    } else {
+      this.appContainer.innerHTML = `
       <div class="container" style="text-align: center; padding: 4rem 0;">
         <h2>Раздел не найден (404)</h2>
         <a href="#/" style="color: var(--accent); font-size: 14px;">Вернуться в Открытые заявки</a>
       </div>`;
-        return;
-      }
     }
   }
 }

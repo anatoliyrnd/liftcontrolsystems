@@ -103,7 +103,11 @@ export function renderCardLayout({
                         </div>
                         <div class="info-group">
                             <label style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">🛠 Дата ремонта</label>
-                            <div id="repairTimeDisplay" style="font-size: 14px; margin-top: 2px;">${formatTs(t.repair_time)}</div>
+                          <div id="repairTimeDisplay" style="font-size: 14px; margin-top: 2px;">${
+                            isOffline
+                              ? "🛠 Дата ремонта: будет назначен при синхронизации"
+                              : formatTs(t.repair_time)
+                          }</div>
                             <div id="repairTimeEditBlock" style="display: none; margin-top: 6px;"></div>
                         </div>
                     </div>

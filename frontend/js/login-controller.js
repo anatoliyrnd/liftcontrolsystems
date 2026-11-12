@@ -21,7 +21,7 @@ export class LoginController {
     // Вызываем тихо (silent), не блокируя интерфейс.
     // Если бэкенд вернет ошибку (например, эндпоинт еще не сделан),
     // просто останется заглушка из HTML или кэша.
-    this.api
+    /*   this.api
       .post({ data: "tenant_info" }, null, "silent")
       .then((resp) => {
         if (resp && resp.status === "ok" && resp.org_name) {
@@ -32,7 +32,7 @@ export class LoginController {
       })
       .catch(() => {
         // Игнорируем ошибки сети, чтобы не спамить в консоль
-      });
+      }); */
     setTimeout(() => nameInput && nameInput.focus(), 50);
 
     // onsubmit привязывается СИНХРОННО, до любого await.

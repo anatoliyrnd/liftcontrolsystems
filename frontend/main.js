@@ -35,6 +35,7 @@ import { offlineBanner } from "./js/components/offline-banner.js";
 import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js";
 import { queuePageTemplate } from "./js/route/pages/queue.js";
 import { QueueController } from "./js/queue-controller.js";
+
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -55,68 +56,165 @@ let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
 let syncManager = null;
+
+// 1.23: ссылка на ThemeController — unmount вызывается при полном teardown.
+let themeCtrl = null;
+
+// Защита от повторной инициализации: auth:loggedin и стартовая ветка
+// вызывают initAuthorizedApp одновременно.
+let initAuthorizedPromise = null;
+let authorizedForUserId = null;
+
+const TENANT_CACHE_KEY = "lift_tenant_info";
+const TENANT_TTL = 5 * 60 * 1000;
+
 /**
  * Централизованная очистка перед каждым переходом.
- * Регистрируется в router.onBeforeNavigate — вызывается ДО замены DOM
- * (см. router._handleRoute). Это гарантирует, что unmount активных
- * контроллеров увидит старую разметку и корректно снимет классы/слушатели.
- *
- * Каждый unmount идемпотентен — повторный вызов безвреден.
- * try/catch на каждом — падение одного не блокирует остальные.
+ * Регистрируется в router.onBeforeNavigate — вызывается ДО замены DOM,
+ * поэтому unmount активных контроллеров видит старую разметку.
+ * Каждый unmount идемпотентен.
  */
 function leaveAll() {
-  try {
-    openTicketsCtrl.unmount();
-  } catch (e) {
-    console.warn("[leaveAll] openTicketsCtrl:", e);
-  }
-  try {
-    closedTicketsCtrl.unmount();
-  } catch (e) {
-    console.warn("[leaveAll] closedTicketsCtrl:", e);
-  }
-  try {
-    detailsCtrl.unmount();
-  } catch (e) {
-    console.warn("[leaveAll] detailsCtrl:", e);
-  }
-  try {
-    createCtrl.unmount();
-  } catch (e) {
-    console.warn("[leaveAll] createCtrl:", e);
-  }
-  try {
-    queueCtrl.unmount?.();
-  } catch (e) {
-    console.warn("[leaveAll] queueCtrl:", e);
-  }
-  try {
-    settingsCtrl.unmount?.();
-  } catch (e) {
-    console.warn("[leaveAll] settingsCtrl:", e);
-  }
-  try {
-    profileCtrl.unmount?.();
-  } catch (e) {
-    console.warn("[leaveAll] profileCtrl:", e);
-  }
-  try {
-    loginCtrl.unmount?.();
-  } catch (e) {
-    console.warn("[leaveAll] loginCtrl:", e);
+  const targets = [
+    ["openTicketsCtrl", openTicketsCtrl],
+    ["closedTicketsCtrl", closedTicketsCtrl],
+    ["detailsCtrl", detailsCtrl],
+    ["createCtrl", createCtrl],
+    ["queueCtrl", queueCtrl],
+    ["settingsCtrl", settingsCtrl],
+    ["profileCtrl", profileCtrl],
+    ["loginCtrl", loginCtrl],
+  ];
+  for (const [name, ctrl] of targets) {
+    try {
+      ctrl.unmount?.();
+    } catch (e) {
+      console.warn(`[leaveAll] ${name}:`, e);
+    }
   }
 }
 
-// Единая точка очистки при смене маршрута. Срабатывает до innerHTML,
-// поэтому unmount видит старый DOM.
 router.onBeforeNavigate(leaveAll);
+
+// --- 1.15: какой экран заявок сейчас активен ---
+function activeTicketsController() {
+  if (openTicketsCtrl._isActive) return openTicketsCtrl;
+  if (closedTicketsCtrl._isActive) return closedTicketsCtrl;
+  return null;
+}
+
+/**
+ * 1.11 + 1.21: шапка обновляется всегда, кнопка таблицы — только
+ * у активного контроллера (guard внутри _updateSyncButton).
+ */
+function refreshSyncUi() {
+  const ctrl = activeTicketsController() || openTicketsCtrl;
+  Promise.resolve(ctrl._updateSyncButton()).catch((e) =>
+    console.warn("[App] Не удалось обновить индикатор синхронизации:", e),
+  );
+  updateOutboxFlag();
+}
+
+/**
+ * 1.21: флаг непустой очереди для beforeunload.
+ * Повторный вызов во время чтения не плодит транзакции — ставим dirty
+ * и пересчитываем один раз после завершения.
+ * При ошибке чтения предыдущее значение сохраняем: неизвестность
+ * не должна ни пугать лишним диалогом, ни снимать предупреждение.
+ */
+let outboxFlagBusy = false;
+let outboxFlagDirty = false;
+window.__hasPendingOutbox = false;
+
+async function updateOutboxFlag() {
+  if (outboxFlagBusy) {
+    outboxFlagDirty = true;
+    return;
+  }
+  outboxFlagBusy = true;
+  try {
+    const [pending, failed] = await Promise.all([
+      offlineDB.getOutboxCount(),
+      offlineDB.getFailedCount(),
+    ]);
+    window.__hasPendingOutbox = pending + failed > 0;
+  } catch (e) {
+    console.warn("[App] Не удалось прочитать счётчики очереди:", e);
+  } finally {
+    outboxFlagBusy = false;
+    if (outboxFlagDirty) {
+      outboxFlagDirty = false;
+      updateOutboxFlag();
+    }
+  }
+}
+
+// 1.21: ровно одна регистрация, на верхнем уровне — не внутри runFailedCleanup.
+window.addEventListener("beforeunload", (e) => {
+  if (navigator.onLine || !authStore.hasAccess()) return;
+  if (!window.__hasPendingOutbox) return;
+  e.preventDefault();
+  e.returnValue = "";
+  return "";
+});
+
+// Момент потери связи — самый важный для предупреждения: пересчитываем флаг.
+window.addEventListener("online", updateOutboxFlag);
+window.addEventListener("offline", updateOutboxFlag);
+
+// --- 1.23: полный teardown приложения ---
+let tornDown = false;
+function teardownApp() {
+  if (tornDown) return;
+  tornDown = true;
+
+  leaveAll();
+
+  try {
+    themeCtrl?.unmount();
+  } catch (e) {
+    console.warn("[App] ThemeController.unmount:", e);
+  }
+  themeCtrl = null;
+
+  try {
+    notifPoller?.stop();
+  } catch (e) {
+    console.warn("[App] notifPoller.stop:", e);
+  }
+  notifPoller = null;
+
+  try {
+    inactivityTracker?.stopTracking();
+  } catch (e) {
+    console.warn("[App] inactivityTracker.stopTracking:", e);
+  }
+  inactivityTracker = null;
+}
+
+// bfcache: при persisted=true страница вернётся живой — рвать нельзя.
+window.addEventListener("pagehide", (e) => {
+  if (!e.persisted) teardownApp();
+});
+
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async function initAuthorizedApp() {
-  if (!menuManager) {
-    menuManager = new MenuManager(api, router, "dynamicMenu");
-  }
-  await menuManager.initialize();
-  initAppData();
+  const uid = authStore.getUser()?.id ?? null;
+  if (initAuthorizedPromise) return initAuthorizedPromise;
+  if (menuManager && authorizedForUserId === uid) return;
+
+  initAuthorizedPromise = (async () => {
+    if (!menuManager) {
+      menuManager = new MenuManager(api, router, "dynamicMenu");
+    }
+    await menuManager.initialize();
+    await initAppData();
+    authorizedForUserId = uid;
+  })().finally(() => {
+    initAuthorizedPromise = null;
+  });
+
+  return initAuthorizedPromise;
 }
 
 function syncAuthUI() {
@@ -131,16 +229,15 @@ function syncAuthUI() {
   if (isAuth && user) {
     if (historyWrapper) historyWrapper.style.display = "flex";
     if (userProfileWrapper) userProfileWrapper.style.display = "flex";
+
     if (navUserName) {
-      if (user.surname || user.name) {
-        const formattedName = user.surname
-          ? `${user.surname} ${user.name || ""}`.trim()
-          : user.name;
-        navUserName.textContent = formattedName || "Пользователь";
-      } else {
-        navUserName.textContent = "Пользователь";
-      }
+      const formattedName =
+        user.surname || user.name
+          ? `${user.surname || ""} ${user.name || ""}`.trim()
+          : "";
+      navUserName.textContent = formattedName || "Пользователь";
     }
+
     if (navUserAvatar) {
       const nameForAvatar = user.name || user.surname || "Пользователь";
       navUserAvatar.textContent = nameForAvatar.charAt(0).toUpperCase();
@@ -150,6 +247,7 @@ function syncAuthUI() {
       notifPoller = new NotificationsPoller(api);
       notifPoller.start();
     }
+
     if (!inactivityTracker) {
       inactivityTracker = new InactivityTracker(router, 30 * 60 * 1000);
       inactivityTracker.startTracking();
@@ -157,6 +255,7 @@ function syncAuthUI() {
   } else {
     if (historyWrapper) historyWrapper.style.display = "none";
     if (userProfileWrapper) userProfileWrapper.style.display = "none";
+
     if (notifPoller) {
       notifPoller.stop();
       notifPoller = null;
@@ -165,6 +264,7 @@ function syncAuthUI() {
       inactivityTracker.stopTracking();
       inactivityTracker = null;
     }
+
     const menu = document.getElementById("dynamicMenu");
     if (menu) menu.innerHTML = "";
   }
@@ -172,7 +272,7 @@ function syncAuthUI() {
 
 async function initAppData() {
   try {
-    let cities = await offlineDB.getCities();
+    const cities = await offlineDB.getCities();
     if (cities.length === 0) {
       const response = await api.post({ data: "loadAddress" }, null, "global");
       if (response && response.status === "ok") {
@@ -189,96 +289,102 @@ async function initAppData() {
     notify.error("Не удалось загрузить справочник адресов.", { once: true });
   }
 }
-// Функция для получения и обновления данных тенанта
+
+/**
+ * 1.18: единственный источник имени тенанта.
+ * Правильный экшен — get_tenant_info, значение — resp.data.org_name
+ * (API_PROTOCOL.md §18.3). Дублирующий блок в login-controller.js удалён.
+ */
 async function loadTenantInfo() {
-  const CACHE_KEY = "lift_tenant_info";
-  const TTL = 5 * 60 * 1000; // 5 минут
   const tenantEl = document.getElementById("navTenantName");
 
-  // 1. Мгновенно показываем из кэша
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (raw) {
-      const { data, ts } = JSON.parse(raw);
-      if (tenantEl && data.org_name) tenantEl.textContent = data.org_name;
-
-      // Если кэш свежий — на сервер не идем
-      if (Date.now() - ts < TTL) return;
+  const paint = (name) => {
+    if (tenantEl && name && String(name).trim()) {
+      tenantEl.textContent = String(name).trim();
     }
+  };
+
+  let cached = null;
+  try {
+    const raw = localStorage.getItem(TENANT_CACHE_KEY);
+    if (raw) cached = JSON.parse(raw);
   } catch (e) {
     console.warn("[App] Ошибка чтения кэша тенанта", e);
   }
 
-  // 2. Фоновое обновление (только если сеть есть)
+  // 1. Мгновенно показываем из кэша; легаси-ключ — только если кэша нет.
+  if (cached?.data?.org_name) {
+    paint(cached.data.org_name);
+  } else {
+    paint(localStorage.getItem("lift_org_name"));
+  }
+
+  if (cached?.ts && Date.now() - cached.ts < TENANT_TTL) return;
   if (!navigator.onLine) return;
 
+  // 2. Фоновое обновление
   try {
     const resp = await api.post({ action: "get_tenant_info" }, null, "public");
     if (resp && resp.status === "ok" && resp.data) {
-      if (tenantEl && resp.data.org_name)
-        tenantEl.textContent = resp.data.org_name;
+      const orgName = resp.data.org_name || "";
+      paint(orgName);
       localStorage.setItem(
-        CACHE_KEY,
+        TENANT_CACHE_KEY,
         JSON.stringify({ data: resp.data, ts: Date.now() }),
       );
-      // Для обратной совместимости (если где-то используется старый ключ)
-      localStorage.setItem("lift_org_name", resp.data.org_name || "");
+      // Обратная совместимость: пустое значение не пишем — иначе в шапке пробел.
+      if (orgName) localStorage.setItem("lift_org_name", orgName);
+      else localStorage.removeItem("lift_org_name");
     } else if (resp && resp.code === "tenant_not_found") {
       console.error("[App] Домен не привязан к организации");
-      // Тут можно показать заглушку на странице логина
     }
   } catch (err) {
     console.warn("[App] Не удалось фоновое обновление tenant_info:", err);
   }
 }
+
 // --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 document.addEventListener("DOMContentLoaded", async () => {
   // 1. Базовая инициализация
   loadTenantInfo();
-  const savedOrgName = localStorage.getItem("lift_org_name");
-  if (savedOrgName) {
-    const tenantEl = document.getElementById("navTenantName");
-    if (tenantEl) tenantEl.textContent = savedOrgName;
-  }
 
-  new ThemeController("themeToggle");
+  if (!themeCtrl) themeCtrl = new ThemeController("themeToggle");
+
   setNotifyRouter(router);
   syncTableSettingsFromStorage();
   syncIndicator.init();
   offlineBanner.init();
-  // Дельта-синхронизация от NotificationsPoller
-  window.addEventListener("sync:fetch_open_tickets", () => {
-    if (openTicketsCtrl) openTicketsCtrl.refreshSilently(openTicketsArray);
-  });
 
-  /*   window.addEventListener("sync:fetch_closed_tickets", () => {
-    if (closedTicketsCtrl)
-      closedTicketsCtrl.refreshSilently(closedTicketsArray);
-  }); */
-
-  // 🔥 ВЫНЕСЕНО НА ВЕРХНИЙ УРОВЕНЬ: Слушатель обновления сотрудников
+  // Справочник сотрудников
   window.addEventListener("sync:fetch_staff", async () => {
-    console.log("[App] Получен сигнал об обновлении справочника сотрудников.");
     if (menuManager) await menuManager.initialize();
   });
+
+  // Справочники отделов / типов / групп
+  window.addEventListener("sync:fetch_dicts", async () => {
+    if (menuManager) await menuManager.initialize();
+  });
+
+  // 1.15: обновление открытых — только если экран активен.
   window.addEventListener("sync:fetch_open_tickets", () => {
-    if (openTicketsCtrl && openTicketsCtrl._isActive) {
+    if (openTicketsCtrl._isActive) {
       openTicketsCtrl.refreshSilently(openTicketsArray);
     }
   });
-  // 🔥 ВЫНЕСЕНО НА ВЕРХНИЙ УРОВЕНЬ: Слушатель обновления справочников
-  window.addEventListener("sync:fetch_dicts", async () => {
-    console.log("[App] Получен сигнал об обновлении справочников.");
-    if (menuManager) await menuManager.initialize();
+
+  // 1.15: то же для закрытых. Ключ closed_tickets появится в волне 2 —
+  // до этого событие просто не приходит, обработчик безвреден.
+  window.addEventListener("sync:fetch_closed_tickets", () => {
+    if (closedTicketsCtrl._isActive) {
+      closedTicketsCtrl.refreshSilently(closedTicketsArray);
+    }
   });
 
-  // Слушатель обновления адресов
+  // Адресный справочник
   window.addEventListener("sync:fetch_addresses", async () => {
-    console.log("[App] Получен сигнал об обновлении базы адресов.");
     notify.info("Обновление справочника адресов. Пожалуйста, подождите...", {
       once: true,
     });
-
     try {
       const response = await api.post({ data: "loadAddress" }, null, "global");
       if (response && response.status === "ok") {
@@ -292,41 +398,39 @@ document.addEventListener("DOMContentLoaded", async () => {
       notify.error("Не удалось обновить справочник адресов.");
     }
   });
+
   // 2. Подписки на события
-  // ВНИМАНИЕ: triggerSync и online теперь обрабатываются ВНУТРИ SyncManager
-  // (см. sync-manager._bindTriggers). Здесь их НЕ дублируем.
-  window.addEventListener("refreshSyncState", () => {
-    if (openTicketsCtrl) openTicketsCtrl._updateSyncButton();
-  });
+  // triggerSync и online обрабатываются ВНУТРИ SyncManager (_bindTriggers).
+
+  // 1.11 + 1.21: активный контроллер + пересчёт флага очереди.
+  window.addEventListener("refreshSyncState", refreshSyncUi);
+
   window.addEventListener("auth:updated", () => {
     syncAuthUI();
   });
+
   window.addEventListener("auth:loggedin", async () => {
     syncAuthUI();
     await initAuthorizedApp();
+    updateOutboxFlag();
   });
+
   window.addEventListener(ApiService.AUTH_LOST_EVENT, (e) => {
     authStore.clear();
+    authorizedForUserId = null;
     syncAuthUI();
+
     const msg =
       e.detail?.reason === "device_mismatch"
         ? "Устройство изменилось, войдите заново"
         : "Сессия истекла, войдите заново";
+
     logHistoryAction(msg);
     notify.warning(msg);
     router.navigate("#/login");
     // Outbox НЕ очищаем — при следующем логине синхронизация продолжится.
   });
-  // 🚨 Защита от случайного обновления (F5) или закрытия вкладки в офлайне
-  window.addEventListener("beforeunload", (e) => {
-    // Если есть сеть, или пользователь не авторизован — не мешаем ему уходить
-    if (navigator.onLine || !authStore.hasAccess()) return;
 
-    // Если мы офлайн и авторизованы — предупреждаем о потере сессии
-    e.preventDefault();
-    e.returnValue = ""; // Стандартный триггер для показа диалога в браузере
-    return "";
-  });
   // 3. Аутентификация
   if (AUTH.BYPASS_AUTH) {
     authStore.setSession("mock-token", Date.now() + 86400000, {
@@ -348,12 +452,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   const userDropdown = document.getElementById("userDropdown");
   const userProfileWrapper = document.getElementById("userProfileWrapper");
 
-  if (userProfileBtn && userDropdown) {
+  if (userProfileBtn && userDropdown && userProfileWrapper) {
     userProfileBtn.onclick = (e) => {
       e.stopPropagation();
       userDropdown.classList.toggle("show");
       userProfileWrapper.classList.toggle("open");
     };
+
     document.addEventListener("click", (e) => {
       if (!userProfileWrapper.contains(e.target)) {
         userDropdown.classList.remove("show");
@@ -367,6 +472,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     logoutBtn.onclick = async () => {
       await api.logout();
       authStore.clear();
+      authorizedForUserId = null;
 
       openTicketsArray.splice(0, openTicketsArray.length);
       closedTicketsArray.splice(0, closedTicketsArray.length);
@@ -375,17 +481,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       logHistoryAction("Вы вышли из системы");
       notify.info("Вы вышли из системы");
       router.navigate("#/login");
-      // Outbox сохраняется — синхронизируется при следующем логине
-      // (в т.ч. другим диспетчером, с маркером авторства).
+      // Outbox сохраняется — синхронизируется при следующем логине.
+      // Тема не сбрасывается: ThemeController живёт до teardown приложения.
     };
   }
 
   const navLogo = document.getElementById("navLogo");
-
   if (navLogo) navLogo.addEventListener("click", () => router.navigate("#/"));
 
-  // 6. Роутинг
-  // leaveAll() больше не вызывается здесь — это делает router.onBeforeNavigate.
+  // 6. Роутинг. leaveAll() вызывает router.onBeforeNavigate.
   router.addRoute(
     "#/login",
     () => loginPageTemplate(),
@@ -426,6 +530,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     () => queuePageTemplate(),
     () => queueCtrl.mount(),
   );
+
   // 7. Сворачивание истории
   const historyWrapper = document.getElementById("historyWrapper");
   const historyTitle = document.getElementById("historyTitle");
@@ -441,13 +546,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     router,
     (newTickets) => {
       // Атомарная замена: синхронный splice вместо .length=0 + .push.
-      // Иначе между двумя операциями массив пуст — параллельный
-      // рендер (detailsCtrl.mount) увидит пустоту.
       const safeTickets = Array.isArray(newTickets) ? newTickets : [];
       openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
-      if (window.location.hash === "#/" || window.location.hash === "") {
+
+      // 1.15: рендерим только на активном экране открытых.
+      if (openTicketsCtrl._isActive) {
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       }
+      refreshSyncUi();
+      // Колбэк уходит целиком в волне 2 (п. 2.1).
     },
     {
       onDuplicateDetected: (record, existingTickets) =>
@@ -455,19 +562,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     },
   );
 
-  // Стартовая синхронизация — триггер «открытие SPA».
-  // Внутри SyncManager сработают: _cooldownUntil, navigator.onLine,
-  // Web Locks (мультитаб), проверка непустого outbox.
+  window.syncManagerInstance = syncManager;
+
+  // Стартовая синхронизация. Задержку 3 с и debounce вводит волна 2 (п. 2.11).
   if (navigator.onLine) {
     setTimeout(() => syncManager.startSync(), 1000);
   }
-  // Явно публикуем инстанс в window для внешних проверок
-  window.syncManagerInstance = syncManager;
+
   const runFailedCleanup = () => {
-    // Если SyncManager ещё не создан или сейчас синхронизирует —
-    // откладываем на 60 сек. При старте менеджер создаётся позже,
-    // поэтому первый вызов почти всегда попадает в retry.
-    // Это защищает от гонки read-write транзакций в IndexedDB.
+    // Если менеджер синхронизирует — откладываем, защищаясь от гонки
+    // read-write транзакций в IndexedDB.
     if (window.syncManagerInstance?.isSyncing) {
       setTimeout(runFailedCleanup, 60_000);
       return;
@@ -478,16 +582,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       .then((removed) => {
         if (removed > 0) {
           console.log(`[App] Очищено устаревших failed-команд: ${removed}`);
-          // Обновляем бейдж синхронизации в шапке, если он был красным
           window.dispatchEvent(new Event("refreshSyncState"));
         }
+        updateOutboxFlag();
       })
       .catch((err) => {
         console.warn("[App] Ошибка очистки failed-команд:", err);
+        updateOutboxFlag();
       });
   };
 
   runFailedCleanup();
+  updateOutboxFlag();
+
   // 9. Service Worker & PWA Auto-Update
   const updateSW = registerSW({
     onNeedRefresh() {
