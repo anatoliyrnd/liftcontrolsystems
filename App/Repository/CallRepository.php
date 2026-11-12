@@ -80,22 +80,21 @@ final class CallRepository
         $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
 
         $sql = "SELECT c.*,
-                       COALESCE((t.type_report = 0), 0) AS is_emergency,
-                       u1.user_name AS staff_name,
-                       u2.user_name AS staff_name2,
-                       u3.user_name AS staff_name3,
-                       d.type_name AS department,
-                       r.type_name AS request,
-                       g.type_name AS group_name
-                FROM lift_calls c
-                LEFT JOIN lift_users u1 ON c.call_staff = u1.user_id
-                LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
-                LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
-                LEFT JOIN lift_types d ON c.call_department = d.type_id
-                LEFT JOIN lift_types r ON c.call_request = r.type_id
-                LEFT JOIN lift_types g ON c.call_group = g.type_id
-                LEFT JOIN lift_types t ON t.type_id = c.call_department AND t.type = 1
-                WHERE c.call_status = 0 ";
+               COALESCE((d.type_report = 0), 0) AS is_emergency,
+               u1.user_name AS staff_name,  u1.user_phone AS staff_phone,
+               u2.user_name AS staff_name2, u2.user_phone AS staff_phone2,
+               u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
+               d.type_name AS department,
+               r.type_name AS request,
+               g.type_name AS group_name
+        FROM lift_calls c
+        LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
+        LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
+        LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
+        LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
+        LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
+        LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        WHERE c.call_status = 0 ";
 
         $params = [];
 
@@ -119,22 +118,21 @@ final class CallRepository
         $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
 
         $sql = "SELECT c.*,
-                       COALESCE((t.type_report = 0), 0) AS is_emergency,
-                       u1.user_name AS staff_name,
-                       u2.user_name AS staff_name2,
-                       u3.user_name AS staff_name3,
-                       d.type_name AS department,
-                       r.type_name AS request,
-                       g.type_name AS group_name
-                FROM lift_calls c
-                LEFT JOIN lift_users u1 ON c.call_staff = u1.user_id
-                LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
-                LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
-                LEFT JOIN lift_types d ON c.call_department = d.type_id
-                LEFT JOIN lift_types r ON c.call_request = r.type_id
-                LEFT JOIN lift_types g ON c.call_group = g.type_id
-                LEFT JOIN lift_types t ON t.type_id = c.call_department AND t.type = 1
-                WHERE c.call_status = 1 AND c.call_date2 >= :date_close ";
+               COALESCE((d.type_report = 0), 0) AS is_emergency,
+               u1.user_name AS staff_name,  u1.user_phone AS staff_phone,
+               u2.user_name AS staff_name2, u2.user_phone AS staff_phone2,
+               u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
+               d.type_name AS department,
+               r.type_name AS request,
+               g.type_name AS group_name
+        FROM lift_calls c
+        LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
+        LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
+        LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
+        LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
+        LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
+        LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        WHERE c.call_status = 1 AND c.call_date2 >= :date_close ";
 
         $params = ['date_close' => $dateClose];
 
@@ -202,33 +200,40 @@ final class CallRepository
      */
     private function formatList(array $calls, string $type): array
     {
-        if (empty($calls)) {
-            return [];
-        }
+        if (empty($calls)) return [];
 
-        $callIds = array_column($calls, 'call_id');
-        $notesGrouped = $this->getNotesForCalls($callIds);
+        // Для закрытых заметки уже сериализованы в слепок и удалены из lift_notes.
+        // Запрос к lift_notes нужен только для открытых.
+        $notesGrouped = $type === 'open'
+            ? $this->getNotesForCalls(array_column($calls, 'call_id'))
+            : [];
 
         $result = [];
         foreach ($calls as $c) {
-            $noteObj = [];
-            $num = 0;
+            $noteArray = [];
 
-            if (isset($notesGrouped[$c['call_id']])) {
-                foreach ($notesGrouped[$c['call_id']] as $note) {
-                    $num++;
-                    $noteObj[$num] = [
-                        'id' => (int) $note['note_id'],
-                        'user' => $note['user_name'] ?? 'Система',
-                        'body' => $note['note_body'],
-                        'date' => (int) $note['note_post_date'],
-                        'type' => (int) $note['note_type'],
+            if ($type === 'open') {
+                foreach ($notesGrouped[$c['call_id']] ?? [] as $note) {
+                    $noteArray[] = [
+                        'id'         => (int) $note['note_id'],
+                        'user'       => $note['user_name'] ?? 'Система',
+                        'body'       => $note['note_body'],
+                        'date'       => (int) $note['note_post_date'],
+                        'type'       => (int) $note['note_type'],
+                        'is_offline' => (int) ($note['is_offline'] ?? 0),
                     ];
                 }
+                $num = count($noteArray);
+            } else {
+                // Тело заметок в списке не отдаём — только счётчик из слепка.
+                $decoded = json_decode($c['call_full_note_history'] ?? '{}', true);
+                $num = is_array($decoded) ? count($decoded) : 0;
             }
 
             $result[] = [
                 'id' => (int) $c['call_id'],
+                'call_id'     => (int) $c['call_id'],          // ← B1.1
+                'call_number' => (string) $c['call_id'],       // ← B1.1
                 'type' => $type,
                 'fullAddress' => $c['call_adres'],
                 'city_id' => (int) $c['address_city'],
@@ -236,8 +241,20 @@ final class CallRepository
                 'home_id' => (int) $c['address_home'],
                 'object_id' => (int) $c['address_lift'],
                 'details' => $c['call_details'],
-                'staff_id' => $c['call_staff'] ? (int) $c['call_staff'] : null,
-                'staff_name' => $c['staff_name'],
+                'staff_id'   => $c['call_staff'] ? (int) $c['call_staff'] : null,
+                'staff_name' => $c['staff_name'] ?? null,
+                'staff_phone'    => $c['staff_phone'] ?? null,
+
+                'staff_id2'      => $c['call_staff2'] ? (int) $c['call_staff2'] : null,
+                'staff_name2'    => $c['staff_name2'] ?? null,
+                'staff_phone2'   => $c['staff_phone2'] ?? null,
+                'notify_status2' => $c['call_staff_status2'] !== null ? (int) $c['call_staff_status2'] : null,
+                'notify_date2'   => $c['call_staff_date2'] ? (int) $c['call_staff_date2'] : null,
+                'staff_id3'      => $c['call_staff3'] ? (int) $c['call_staff3'] : null,
+                'staff_name3'    => $c['staff_name3'] ?? null,
+                'staff_phone3'   => $c['staff_phone3'] ?? null,
+                'notify_status3' => $c['call_staff_status3'] !== null ? (int) $c['call_staff_status3'] : null,
+                'notify_date3'   => $c['call_staff_date3'] ? (int) $c['call_staff_date3'] : null,
                 'notify_status' => $c['call_staff_status'] !== null ? (int) $c['call_staff_status'] : null,
                 'notify_date' => $c['call_staff_date'] ? (int) $c['call_staff_date'] : null,
                 'department' => $c['department'],
@@ -255,7 +272,7 @@ final class CallRepository
                 'is_emergency' => (bool) ($c['is_emergency'] ?? false),
                 'other' => $num > 0 ? "Есть заметки ($num)" : '—',
                 'note_num' => $num,
-                'note' => (object) $noteObj,
+                'note' => $noteArray,
             ];
         }
 
@@ -329,22 +346,21 @@ final class CallRepository
     {
         // Прямой запрос по ID без ограничений по дате
         $sql = "SELECT c.*,
-        COALESCE((t.type_report = 0), 0) AS is_emergency,
-        u1.user_name AS staff_name, u1.user_phone AS staff_phone,
-        u2.user_name AS staff_name2, u2.user_phone AS staff_phone2,
-        u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
-        d.type_name AS department,
-        r.type_name AS request,
-        g.type_name AS group_name
-    FROM lift_calls c
-    LEFT JOIN lift_users u1 ON c.call_staff = u1.user_id
-    LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
-    LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
-    LEFT JOIN lift_types d ON c.call_department = d.type_id
-    LEFT JOIN lift_types r ON c.call_request = r.type_id
-    LEFT JOIN lift_types g ON c.call_group = g.type_id
-    LEFT JOIN lift_types t ON t.type_id = c.call_department AND t.type = 1
-    WHERE c.call_id = :id";
+               COALESCE((d.type_report = 0), 0) AS is_emergency,
+               u1.user_name AS staff_name,  u1.user_phone AS staff_phone,
+               u2.user_name AS staff_name2, u2.user_phone AS staff_phone2,
+               u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
+               d.type_name AS department,
+               r.type_name AS request,
+               g.type_name AS group_name
+        FROM lift_calls c
+        LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
+        LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
+        LEFT JOIN lift_users u3 ON c.call_staff3 = u3.user_id
+        LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
+        LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
+        LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        WHERE c.call_id = :id";
 
         $call = $this->db->fetchOne($sql, ['id' => $callId]);
         if (!$call) {
@@ -412,6 +428,7 @@ final class CallRepository
         $canComment = $isOpen;
 
         return [
+            'id'          => (int) $call['call_id'],   // ← B1.1
             'call_id' => (int)$call['call_id'],
             'call_number' => (string)$call['call_id'],
             'type' => $isOpen ? 'open' : 'close',

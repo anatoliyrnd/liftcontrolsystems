@@ -1,301 +1,71 @@
-# Architecture: Lift Control Systems Frontend
-
-## 1. Core Services & Infrastructure
-
-### ApiService (`api-service.js`)
-
-**Export:** `class ApiService`  
-**Description:** Центральный HTTP-клиент с управлением авторизацией и тегами запросов.
-
-- **Constructor:** `constructor(baseUrl?: string, options?: { local: boolean })`
-- **Static Properties:**
-  - `AUTH_LOST_EVENT: string`
-- **Methods:**
-  - `setToken(token: string): void`
-  - `abortTag(tag: string): void`
-  - `get(queryParams?: object, actionComment?: string, tag?: string): Promise<any>`
-  - `post(body?: object, actionComment?: string, tag?: string): Promise<any>`
-  - `login(name: string, password: string, autoLogin: boolean): Promise<any>`
-  - `loginById(userId: number, password: string, autoLogin: boolean): Promise<any>`
-  - `tryAutoLogin(): Promise<any>`
-  - `logout(): Promise<any>`
-
-**Dependencies:** `auth-store`, `config`
-
----
-
-### OfflineDB (`offline-db.js`)
-
-**Export:** `const offlineDB` (Singleton instance of `OfflineDB`)  
-**Description:** Обертка над IndexedDB для офлайн-хранения заявок, адресов и очереди команд.
-
-- **Config Methods:**
-  - `setConfig(key: string, value: any): Promise<void>`
-  - `getConfig(key: string): Promise<any>`
-- **Address Methods:**
-  - `saveAddresses(flatAddresses: Array): Promise<void>`
-  - `getCities(): Promise<Array<{id, name}>>`
-  - `searchAddresses(cityId: number, query: string): Promise<Array>`
-- **Outbox Methods (New API):**
-  - `addOutboxCommand(cmd: OutboxCommand): Promise<OutboxCommand>`
-  - `getAllPending(): Promise<Array<OutboxCommand>>`
-  - `getPendingBatch(limit?: number): Promise<Array<OutboxCommand>>`
-  - `getPendingByTicket(ticketId: number|string): Promise<Array<OutboxCommand>>`
-  - `getPendingByAuthor(authorId: number): Promise<Array<OutboxCommand>>`
-  - `updateOutboxCommand(commandUuid: string, patch: object): Promise<OutboxCommand|null>`
-  - `deleteOutboxCommands(uuids: string[]): Promise<void>`
-  - `getOutboxCount(): Promise<number>`
-  - `getFailedCount(): Promise<number>`
-  - `countByType(type: string): Promise<number>`
-  - `clearOutbox(): Promise<void>`
-- **Outbox Shim Methods (Deprecated):**
-  - `addToOutbox(oldCmd: object): Promise<object>`
-  - `getOutboxBatch(limit?: number): Promise<Array>`
-  - `getAllFromOutbox(): Promise<Array>`
-  - `deleteFromOutbox(uuids: string[]): Promise<void>`
-- **Tickets Cache Methods:**
-  - `saveTickets(type: string, tickets: Array): Promise<void>`
-  - `getTickets(type: string): Promise<Array>`
-
-**Dependencies:** `vendor/idb`
-
----
-
-### SyncManager (`sync-manager.js`)
-
-**Export:** `class SyncManager`  
-**Description:** Оркестратор фоновой синхронизации outbox-очереди с сервером.
-
-- **Constructor:** `constructor(api: ApiService, router: object, onOpenTicketsUpdated: Function, opts?: { onDuplicateDetected?: Function })`
-- **Public Properties:**
-  - `isSyncing: boolean`
-- **Methods:**
-  - `start(): void`
-  - `stop(): void`
-  - `triggerSync(): Promise<void>`
-
-**Dependencies:** `offline-db`, `auth-store`, `outbox-queue`, `sync/batch-builder`, `sync/backoff`, `utils/uuid`, `utils/sync-lock`, `components/notify`, `history-logger`, `api-service`
-
----
-
-## 2. State Management Stores
-
-### authStore (`auth-store.js`)
-
-**Export:** `const authStore`  
-**Description:** Хранилище сессии (access-token в памяти, user в localStorage).
-
-- **Methods:**
-  - `loadUser(): void`
-  - `setSession(accessToken: string, expiresAt: number, user: object): void`
-  - `setAccess(accessToken: string, expiresAt: number): void`
-  - `clear(): void`
-  - `getAccess(): string|null`
-  - `getExpiresAt(): number|null`
-  - `getUser(): object|null`
-  - `hasAccess(): boolean`
-  - `getRole(): string`
-
-**Dependencies:** `config`
-
-### userStore (`user-store.js`)
+## Правила фронтенда
 
-**Export:** `const userStore`  
-**Description:** Хранилище роли и матрицы прав доступа.
+### 1. Экранирование при вставке разметки
 
-- **Properties:**
-  - `ROLES: string[]`
-  - `role: string`
-  - `userId: number|null`
-  - `ROLES_EDIT: string[]`
-- **Methods:**
-  - `setUserId(id: number): void`
-  - `setRole(newRole: string): void`
-  - `isAdmin(): boolean`
-  - `isDispatcher(): boolean`
-  - `isEngineer(): boolean`
-  - `isGuest(): boolean`
-  - `canEditBase(): boolean`
-  - `can(action: string, ctx?: object): boolean`
-  - `isAssignedTo(ticket: object, currentUserId: number): boolean`
+`innerHTML` с интерполяцией запрещён без явного `escapeHtml`.
 
-### dictStore (`dict-store.js`)
+Правило распространяется на **любое** значение, попадающее в шаблонную строку,
+которая присваивается `innerHTML` / `insertAdjacentHTML` / возвращается из
+view-функции: данные сервера, payload outbox, поля формы, `title`, `alt`,
+значения атрибутов, тексты статусов.
 
-**Export:** `const dictStore`  
-**Description:** Хранилище справочников (отдел, запрос, группа).
+Разрешено без экранирования:
 
-- **Properties:**
-  - `department: Array`
-  - `request: Array`
-  - `group: Array`
-- **Methods:**
-  - `set(key: 'department'|'request'|'group', raw: Object|Array): void`
-  - `getName(key: string, id: string|number): string|null`
-  - `fillSelect(selectEl: HTMLSelectElement, key: string, placeholder?: string, selectedId?: string|number|null): void`
+- статические строки без интерполяции (`el.innerHTML = ""`, каркас без `${}`);
+- вывод чисел и форматированных дат (`formatTs`, `Number`, `String(count)`);
+- функции-санитайзеры, экранирующие сами (`formatFullHistory`).
 
-### staffStore (`staff-store.js`)
+Предпочтительный способ — не `innerHTML`, а `createElement` + `textContent`.
+Так реализованы `api-status.js`, `body-render.js`, `_renderCityDropdown`.
 
-**Export:** `const staffStore`  
-**Description:** Хранилище списка электромехаников.
+Проверка на ревью: grep по `innerHTML` и по обратным кавычкам с `${` в
+`details/views/`, `route/pages/`, `components/`. Новое вхождение без
+`escapeHtml` — блокирующее замечание.
 
-- **Properties:**
-  - `list: Array<{id, name, phone}>`
-- **Methods:**
-  - `setList(arr: Array): void`
-  - `getById(id: string|number): object|null`
-  - `getPhone(id: string|number): string|null`
-  - `fillSelect(selectEl: HTMLSelectElement, placeholder?: string, selectedId?: string|number|null): void`
+### 2. Офлайн: срок ремонта
 
-### appState (`app-state.js`)
+Клиент офлайн срок не задаёт никогда (`API_syncCommands.md` §4.1.1).
 
-**Export:** `const appState`  
-**Description:** Глобальное состояние UI-контекста.
+- picker не создаётся при `!navigator.onLine`, слот скрыт;
+- ключ `repair_time` **отсутствует** в payload, а не равен `null`;
+- состояние пересчитывается по событиям `online` / `offline`, слушатели
+  снимаются в `destroy()` / `unmount()`;
+- в карточке офлайн-заявки — «будет назначен при синхронизации»;
+- оверлей `_pendingRepair` не существует.
 
-- **Properties:**
-  - `pendingCreateAddress: object|null`
-- **Methods:**
-  - `reset(): void`
+Ответственные, статус уведомления, отдел / тип / группа в форме создания
+остаются доступны офлайн.
 
----
+### 3. Владение DOM
 
-## 3. Controllers
+Экран владеет DOM только пока активен.
 
-### LoginController (`login-controller.js`)
+- `mount()` ставит `_isActive = true` и увеличивает `_mountId`;
+- `unmount()` снимает флаг, увеличивает `_mountId`, удаляет свои
+  слушатели, таймеры и элементы вне контейнера роутера (backdrop);
+- после каждого `await` — проверка `isStale()` перед обращением к DOM;
+- внешние обработчики (`main.js`, поллер) проверяют `ctrl.isActive`,
+  а не наличие ссылки на контроллер;
+- обработчик `refreshSyncState` обновляет шапку всегда, кнопку таблицы —
+  только у активного контроллера.
 
-**Export:** `class LoginController`
+### 4. Идентификаторы заявки (переходная мера)
 
-- **Constructor:** `constructor(apiInstance: ApiService, routerInstance: object)`
-- **Methods:**
-  - `mount(): Promise<void>`
-  - `unmount(): void`
+`ticket` с сервера отдаёт `call_id` + `call_number`, списки — `id`.
+До появления `id` на сервере нормализация выполняется в двух местах:
+`ticket-repository.fetchById` и `normalizeTicketFields`. Все три поля
+сводятся к одному значению. Снять после добавления `id` в ответ `ticket`.
 
-**Dependencies:** `auth-store`, `components/notify`, `history-logger`
+### 5. Время
 
-### CreateController (`create-controller.js`)
+Все метки в состоянии и в DOM — Unix-секунды. Миллисекунды outbox
+приводятся на границе (`toSeconds`). Ячейки даты несут `data-ts` с
+исходной меткой; сортировка читает атрибут, а не парсит текст.
+Часовой пояс к метке не прибавляется и не вычитается ни на одной стороне.
 
-**Export:** `class CreateController`
+### 6. Очередь
 
-- **Constructor:** `constructor(apiInstance: ApiService, routerInstance: object)`
-- **Methods:**
-  - `mount(globalTicketsArrayRef: Array): void`
-  - `unmount(): void`
-
-**Dependencies:** `staff-store`, `components/*`, `history-logger`, `config`, `app-state`, `offline-db`, `auth-store`, `utils/date-utils`, `outbox-queue`
-
-### TicketsController (`tickets-controller.js`)
-
-**Export:** `class TicketsController`
-
-- **Constructor:** `constructor(apiInstance: ApiService, routerInstance: object, dataType?: 'open'|'close')`
-- **Methods:**
-  - `mount(globalTicketsArrayRef: Array): Promise<void>`
-  - `unmount(): void`
-  - `refreshFromMemory(ticketsArrayRef: Array): void`
-
-**Dependencies:** `table/*`, `config`, `history-logger`, `offline-db`, `utils/date-utils`
-
-### DetailsController (`details-controller.js`)
-
-**Export:** `class DetailsController`
-
-- **Constructor:** `constructor(apiInstance: ApiService, routerInstance: object)`
-- **Methods:**
-  - `mount(ticketId: string|number, globalTicketsArrayRef: Array): Promise<void>`
-  - `unmount(): void`
-
-**Dependencies:** `auth-store`, `user-store`, `dict-store`, `staff-store`, `outbox-queue`, `app-state`, `offline-db`, `components/*`, `history-logger`, `config`, `utils/date-utils`
-
-### QueueController (`queue-controller.js`)
-
-**Export:** `class QueueController`
-
-- **Constructor:** `constructor(api: ApiService, router: object)`
-- **Methods:**
-  - `mount(): Promise<void>`
-  - `unmount(): void`
-
-**Dependencies:** `offline-db`, `outbox-queue`, `components/notify`, `utils/date-utils`
-
-### ProfileController (`profile-controller.js`)
-
-**Export:** `class ProfileController`
-
-- **Constructor:** `constructor(api: ApiService, router: object)`
-- **Methods:**
-  - `mount(): Promise<void>`
-
-**Dependencies:** `auth-store`, `components/notify`, `table/settings`
-
-### SettingsController (`settings-controller.js`)
-
-**Export:** `class SettingsController`
-
-- **Constructor:** `constructor(api: ApiService, router: object)`
-- **Methods:**
-  - `mount(): Promise<void>`
-
-**Dependencies:** `offline-db`, `components/notify`, `history-logger`, `user-store`
-
-### ThemeController (`theme-controller.js`)
-
-**Export:** `class ThemeController`
-
-- **Constructor:** `constructor(toggleBtnId: string)`
-- **Methods:**
-  - `init(): void`
-
----
-
-## 4. Utilities & Helpers
-
-### Outbox Queue Facade (`outbox-queue.js`)
-
-**Export:** `const outboxQueue`  
-**Description:** Единая точка входа для постановки команд в offline-outbox.
-
-- **Enqueue Methods:**
-  - `enqueueCreate(payload: object): Promise<object>`
-  - `enqueueEdit(ticketId: number|string, patch: object, opts?: {offline_uuid?: string}): Promise<object>`
-  - `enqueueClose(ticketId: number|string, solution: string, opts?: {offline_uuid?: string}): Promise<object>`
-  - `enqueueComment(ticketId: number|string, text: string, opts?: {offline_uuid?: string}): Promise<object>`
-- **Read Methods:**
-  - `getPendingBatch(limit?: number): Promise<Array>`
-  - `getPendingByTicket(ticketId: number|string): Promise<Array>`
-  - `getPendingByAuthor(authorId: number): Promise<Array>`
-  - `getTicketFlags(ticketId: number|string): Promise<{hasCreate, hasEdit, hasClose, hasComment, count}>`
-- **Management Methods:**
-  - `remove(commandUuids: string[]): Promise<void>`
-  - `markFailed(commandUuid: string, reason: string): Promise<object>`
-  - `markRetry(commandUuid: string, reason: string, nextRetryAt: number): Promise<object>`
-  - `resetToPending(commandUuid: string): Promise<object>`
-  - `clear(): Promise<void>`
-  - `getCounts(): Promise<{pending: number, failed: number}>`
-
-**Dependencies:** `offline-db`, `auth-store`, `utils/uuid`
-
-### NotificationsPoller (`notifications-poller.js`)
-
-**Export:** `class NotificationsPoller`
-
-- **Constructor:** `constructor(api: ApiService)`
-- **Methods:**
-  - `start(): void`
-  - `stop(): void`
-
-**Dependencies:** `components/notify`, `history-logger`, `staff-store`, `dict-store`, `config`, `utils/escape-html`
-
-### History Logger (`history-logger.js`)
-
-**Export:** `function logHistoryAction(text: string): void`
-
-**Dependencies:** `config`
-
----
-
-## 5. Key Architectural Relationships
-
-1.  **Offline-First Pattern:** Все контроллеры записи (`CreateController`, `DetailsController`) используют `outboxQueue` вместо прямых вызовов API при отсутствии сети. `SyncManager` фоново синхронизирует очередь через `ApiService`.
-2.  **State Isolation:** `authStore` хранит токен только в памяти (XSS-safe), тогда как `userStore` и `dictStore` работают с данными из localStorage/сервера для UI-рендеринга.
-3.  **RBAC on Client:** `userStore.can()` является единственным источником правды для видимости UI-элементов редактирования в `DetailsController` и `TicketsController`.
-4.  **Event-Driven Sync:** Компоненты общаются через Custom Events (`triggerSync`, `refreshSyncState`, `addresses:updated`, `auth:loggedin`), что снижает связанность контроллеров.
-5.  **Mount/Unmount Lifecycle:** Все контроллеры реализуют паттерн `mount()/unmount()` с защитой от stale-closures (`_mountId` guard) для корректной очистки подписок и таймеров при SPA-навигации.
+Слияние правок офлайн-заявки в `CreateTicket` — чтение по индексу и запись
+в **одной** `readwrite`-транзакции; callback обязан быть синхронным.
+Возвращается обновлённая запись. Любое изменение очереди диспатчит
+`refreshSyncState`.

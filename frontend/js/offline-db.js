@@ -1,71 +1,210 @@
 import { openDB } from "./vendor/idb.js";
 
 /**
- * IndexedDB SPA — версия 2 (офлайн-синхронизация по API_PROTOCOL.md v4.2).
+ * IndexedDB SPA — версия 3 (поштучная синхронизация, API_syncCommands.md v5.4).
  *
- * Ключевое решение: outbox — ГЛОБАЛЬНЫЙ на устройстве. Команды
- * синхронизируются ЛЮБЫМ залогиненным пользователем. Авторство
- * сохраняется в offline_author_id / offline_author_name и попадает
- * в payload при сборке пачки (см. batch-builder.js: applyAuthorMarker).
- *
- * Изменения от v1:
- *   - outbox: keyPath 'uuid' → 'command_uuid'; новая схема команд
- *     (command_type, ticket_id, offline_uuid, payload, status,
- *      retry_count, next_retry_at, last_error,
- *      offline_author_id, offline_author_name).
- *   - Индексы outbox: status, created_at, ticket_id, offline_uuid,
- *     offline_author_id.
- *   - При upgrade v1→v2 старый outbox УДАЛЯЕТСЯ (согласовано: п.9).
- *   - tickets_cache, address_flat, config — без изменений.
- *
- * Shim-методы (addToOutbox, getOutboxBatch, getAllFromOutbox,
- * deleteFromOutbox) — для совместимости до Фаз 1–3.
- * После Фаз 1–3 shim удаляется.
+ * v2 → v3:
+ *   - составной индекс [status, created_at] для строгого FIFO (п. 2.1);
+ *   - индекс добавляется К СУЩЕСТВУЮЩЕМУ хранилищу, данные не удаляются;
+ *   - нормализация старых записей (created_at в секундах, статус по умолчанию);
+ *   - статусы needs_confirmation / rejected и отдельные счётчики (п. 2.14);
+ *   - отбор с пропуском заблокированных ключей и backoff (п. 2.3, 2.7);
+ *   - cleanupFailed чистит failed и rejected по возрасту статуса (п. 2.16).
  */
 
 const DB_NAME = "LiftCallsDB";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+
+const OUTBOX = "outbox";
+const FIFO_INDEX = "status_created_at";
+
+export const OUTBOX_STATUS = {
+  PENDING: "pending",
+  NEEDS_CONFIRMATION: "needs_confirmation",
+  FAILED: "failed",
+  REJECTED: "rejected",
+};
+
+const ALL_STATUSES = Object.values(OUTBOX_STATUS);
+const MAX_TS = Number.MAX_SAFE_INTEGER;
+
+/** Unix-метка в секундах; миллисекунды старых записей приводим. */
+function toSeconds(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n > 9999999999 ? Math.floor(n / 1000) : n;
+}
+
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function statusRange(status, from = 0, to = MAX_TS) {
+  return IDBKeyRange.bound([status, from], [status, to]);
+}
+
+/** Ключ блокировки заявки: ticket_id ?? offline_uuid (API_syncCommands §7.3). */
+export function outboxLockKey(cmd) {
+  if (!cmd) return null;
+  if (cmd.ticket_id != null && cmd.ticket_id !== "")
+    return String(cmd.ticket_id);
+  if (cmd.offline_uuid) return String(cmd.offline_uuid);
+  return "cmd:" + cmd.command_uuid;
+}
+
+/** ticket_id в индексе хранится числом; строковый ключ IDB не найдёт. */
+function normalizeTicketKey(ticketId) {
+  if (ticketId == null || ticketId === "") return null;
+  const s = String(ticketId);
+  if (s.startsWith("offline_")) return s;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : s;
+}
 
 function createOutboxStore(db) {
-  const store = db.createObjectStore("outbox", { keyPath: "command_uuid" });
-  store.createIndex("status", "status");
-  store.createIndex("created_at", "created_at");
+  const store = db.createObjectStore(OUTBOX, { keyPath: "command_uuid" });
+  store.createIndex(FIFO_INDEX, ["status", "created_at"]);
   store.createIndex("ticket_id", "ticket_id");
   store.createIndex("offline_uuid", "offline_uuid");
   store.createIndex("offline_author_id", "offline_author_id");
   return store;
 }
 
+function ensureOutboxIndexes(store) {
+  if (!store.indexNames.contains(FIFO_INDEX))
+    store.createIndex(FIFO_INDEX, ["status", "created_at"]);
+  if (!store.indexNames.contains("ticket_id"))
+    store.createIndex("ticket_id", "ticket_id");
+  if (!store.indexNames.contains("offline_uuid"))
+    store.createIndex("offline_uuid", "offline_uuid");
+  if (!store.indexNames.contains("offline_author_id"))
+    store.createIndex("offline_author_id", "offline_author_id");
+}
+
+/**
+ * Нормализация существующих записей внутри upgrade-транзакции.
+ * Без неё записи с undefined в status / created_at не попадают
+ * в составной индекс и становятся невидимыми для FIFO и счётчиков.
+ * Данные не удаляются — только приводятся к схеме.
+ */
+async function normalizeOutboxRecords(store) {
+  let cursor = await store.openCursor();
+  while (cursor) {
+    const v = cursor.value;
+    const status = ALL_STATUSES.includes(v.status)
+      ? v.status
+      : OUTBOX_STATUS.PENDING;
+    const createdAt = toSeconds(v.created_at, nowSec());
+    const ticketId = normalizeTicketKey(v.ticket_id);
+    const nextRetryAt = Number.isFinite(Number(v.next_retry_at))
+      ? Number(v.next_retry_at)
+      : 0;
+    const retryCount = Number.isFinite(Number(v.retry_count))
+      ? Number(v.retry_count)
+      : 0;
+
+    const changed =
+      status !== v.status ||
+      createdAt !== v.created_at ||
+      ticketId !== v.ticket_id ||
+      nextRetryAt !== v.next_retry_at ||
+      retryCount !== v.retry_count;
+
+    if (changed) {
+      await cursor.update({
+        ...v,
+        status,
+        created_at: createdAt,
+        ticket_id: ticketId,
+        next_retry_at: nextRetryAt,
+        retry_count: retryCount,
+      });
+    }
+    cursor = await cursor.continue();
+  }
+}
+
 class OfflineDB {
   constructor() {
-    this.dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db, oldVersion) {
-        // v0 → v1
+    this._promise = null;
+    this._db = null;
+  }
+
+  /** Совместимость с прежним API: offlineDB.dbPromise. */
+  get dbPromise() {
+    return this._open();
+  }
+
+   _open() {
+    if (this._promise) return this._promise;
+
+    // Локальный на попытку открытия: ready шлём только если реально
+    // показывали предупреждение о блокировке.
+    let wasBlocked = false;
+
+    this._promise = openDB(DB_NAME, DB_VERSION, {
+      upgrade: async (db, oldVersion, newVersion, tx) => {
         if (oldVersion < 1) {
-          if (!db.objectStoreNames.contains("config")) {
+          if (!db.objectStoreNames.contains("config"))
             db.createObjectStore("config", { keyPath: "key" });
-          }
+
           if (!db.objectStoreNames.contains("address_flat")) {
-            const store = db.createObjectStore("address_flat", {
-              keyPath: "id",
-            });
-            store.createIndex("city_id", "city_id");
+            const s = db.createObjectStore("address_flat", { keyPath: "id" });
+            s.createIndex("city_id", "city_id");
           }
-          if (!db.objectStoreNames.contains("tickets_cache")) {
+
+          if (!db.objectStoreNames.contains("tickets_cache"))
             db.createObjectStore("tickets_cache", { keyPath: "id" });
-          }
         }
 
-        // v1 → v2: пересоздаём outbox под новую схему.
-        // Старый формат (callNewOffline) не мигрируем — чистим (п.9).
-        if (oldVersion < 2) {
-          if (db.objectStoreNames.contains("outbox")) {
-            db.deleteObjectStore("outbox");
-          }
+        if (!db.objectStoreNames.contains(OUTBOX)) {
           createOutboxStore(db);
+          return;
         }
+
+        // Хранилище уже есть — только схема. Данные сохраняются.
+        const store = tx.objectStore(OUTBOX);
+        ensureOutboxIndexes(store);
+        if (oldVersion < 3) await normalizeOutboxRecords(store);
       },
-    });
+
+      blocked: () => {
+        wasBlocked = true;
+        console.warn("[OfflineDB] Обновление БД заблокировано другой вкладкой.");
+        window.dispatchEvent(new CustomEvent("db:upgrade-blocked"));
+      },
+
+      blocking: () => {
+        try {
+          this._db?.close();
+        } catch (e) {
+          console.warn("[OfflineDB] close on blocking:", e);
+        }
+        this._db = null;
+        this._promise = null;
+        window.dispatchEvent(new CustomEvent("db:upgrade-required"));
+      },
+
+      terminated: () => {
+        console.warn("[OfflineDB] Соединение с БД разорвано.");
+        this._db = null;
+        this._promise = null;
+      },
+    })
+      .then((db) => {
+        this._db = db;
+        if (wasBlocked) {
+          window.dispatchEvent(new CustomEvent("db:upgrade-ready"));
+        }
+        return db;
+      })
+      .catch((err) => {
+        this._promise = null;
+        console.error("[OfflineDB] Не удалось открыть БД:", err);
+        throw err;
+      });
+
+    return this._promise;
   }
 
   // =========================================================================
@@ -87,11 +226,21 @@ class OfflineDB {
   // Адреса
   // =========================================================================
 
+  /**
+   * 2.26: пустой ответ не должен затирать кэш.
+   * clear() выполняется только когда новые данные уже на руках.
+   */
   async saveAddresses(flatAddresses) {
+    if (!Array.isArray(flatAddresses) || flatAddresses.length === 0) {
+      console.warn("[OfflineDB] Пустой справочник адресов — кэш сохранён.");
+      return 0;
+    }
+
     const db = await this.dbPromise;
     const tx = db.transaction("address_flat", "readwrite");
     const store = tx.objectStore("address_flat");
-    store.clear();
+
+    await store.clear();
 
     const CHUNK_SIZE = 2000;
     for (let i = 0; i < flatAddresses.length; i += CHUNK_SIZE) {
@@ -99,19 +248,26 @@ class OfflineDB {
       await Promise.all(chunk.map((addr) => store.put(addr)));
     }
     await tx.done;
+    return flatAddresses.length;
   }
 
   async getCities() {
     const db = await this.dbPromise;
     const all = await db.getAll("address_flat");
     const citiesMap = new Map();
+
     for (const item of all) {
+      if (item.city_id == null) continue;
       if (!citiesMap.has(item.city_id)) {
-        citiesMap.set(item.city_id, { id: item.city_id, name: item.city_name });
+        citiesMap.set(item.city_id, {
+          id: item.city_id,
+          name: item.city_name || `Город ${item.city_id}`,
+        });
       }
     }
+
     return Array.from(citiesMap.values()).sort((a, b) =>
-      a.name.localeCompare(b.name),
+      String(a.name).localeCompare(String(b.name), "ru"),
     );
   }
 
@@ -120,236 +276,318 @@ class OfflineDB {
     const tx = db.transaction("address_flat", "readonly");
     const index = tx.objectStore("address_flat").index("city_id");
 
-    const q = query.toLowerCase().trim();
-    const tokens = q ? q.split(" ").filter((t) => t.length > 0) : [];
+    const q = String(query || "").toLowerCase().trim();
+    const tokens = q ? q.split(/\s+/).filter(Boolean) : [];
     const results = [];
 
-    let cursor = await index.openCursor(IDBKeyRange.only(cityId));
+    let cursor = await index.openCursor(IDBKeyRange.only(Number(cityId)));
     while (cursor) {
       const item = cursor.value;
       if (tokens.length === 0) {
         results.push(item);
       } else {
-        const words = item.search_string.split(" ");
-        const isMatch = tokens.every((token) =>
-          words.some((word) => word.startsWith(token)),
-        );
-        if (isMatch) results.push(item);
+        const words = String(item.search_string || "").split(" ");
+        if (tokens.every((t) => words.some((w) => w.startsWith(t))))
+          results.push(item);
       }
       if (results.length >= 50) break;
       cursor = await cursor.continue();
     }
+
     await tx.done;
     return results;
   }
 
   // =========================================================================
-  // Outbox — НОВЫЙ API (Фазы 1–3)
+  // Outbox
   // =========================================================================
 
   /**
-   * Положить команду в outbox.
-   * @param {Object} cmd
-   * @param {string} cmd.command_uuid
-   * @param {string} cmd.command_type      'CreateTicket'|'EditTicket'|'CloseTicket'|'AddComment'|'AcceptTicket'
-   * @param {number|null} cmd.ticket_id
-   * @param {string|null} cmd.offline_uuid
-   * @param {Object} cmd.payload
-   * @param {number} [cmd.created_at]      unix ts (секунды)
-   * @param {number|null} [cmd.offline_author_id]
-   * @param {string|null} [cmd.offline_author_name]
+   * Запись сохраняется целиком: reason / existing_tickets / force_create
+   * нужны экрану очереди и модалке дубликата после перезагрузки.
    */
   async addOutboxCommand(cmd) {
     const db = await this.dbPromise;
+    const ts = nowSec();
+
     const record = {
+      ...cmd,
       command_uuid: cmd.command_uuid,
       command_type: cmd.command_type,
-      ticket_id: cmd.ticket_id ?? null,
+      ticket_id: normalizeTicketKey(cmd.ticket_id),
       offline_uuid: cmd.offline_uuid ?? null,
       payload: cmd.payload || {},
-      created_at: cmd.created_at || Math.floor(Date.now() / 1000),
-      retry_count: cmd.retry_count ?? 0,
-      next_retry_at: cmd.next_retry_at ?? 0,
+      created_at: toSeconds(cmd.created_at, ts),
+      retry_count: Number(cmd.retry_count) || 0,
+      next_retry_at: Number(cmd.next_retry_at) || 0,
       last_error: cmd.last_error ?? null,
-      status: cmd.status || "pending",
+      status: ALL_STATUSES.includes(cmd.status)
+        ? cmd.status
+        : OUTBOX_STATUS.PENDING,
+      status_changed_at: cmd.status_changed_at ?? toSeconds(cmd.created_at, ts),
       offline_author_id: cmd.offline_author_id ?? null,
       offline_author_name: cmd.offline_author_name ?? null,
     };
-    await db.put("outbox", record);
+
+    await db.put(OUTBOX, record);
     return record;
   }
 
-  /**
-   * ВСЕ команды любого статуса, любого автора.
-   * Используется: sync-manager (для сборки пачки — фильтр по status='pending'
-   * внутри), queue-controller (список), tickets-controller (бейджи).
-   * НЕ фильтрует по offline_author_id — это осознанное решение v1.
-   */
-  async getAllPending() {
+  /** Все записи очереди, любые статусы. Для экрана очереди и служебных задач. */
+  async getAllCommands() {
     const db = await this.dbPromise;
-    return db.getAll("outbox");
+    return db.getAll(OUTBOX);
+  }
+
+  /** @deprecated имя сохранено ради совместимости — возвращает все статусы. */
+  async getAllPending() {
+    return this.getAllCommands();
   }
 
   /**
-   * Только pending, FIFO (created_at asc), любые авторы.
-   * Используется batch-builder'ом.
+   * Строгий FIFO по индексу [status, created_at] (п. 2.2).
+   *
+   * Пропускаются:
+   *   - записи с заблокированным ключом (failed с исчерпанным retry, п. 2.3);
+   *   - записи в backoff (next_retry_at > now, п. 2.7).
+   *
+   * Пропуск по backoff блокирует и последующие команды ТОЙ ЖЕ заявки:
+   * иначе комментарий B уйдёт раньше комментария A (§7.2).
+   *
+   * @param {number} limit
+   * @param {{blockedKeys?: Set<string>, now?: number}} opts
    */
-  async getPendingBatch(limit = 20) {
+  async getPendingBatch(limit = 1, opts = {}) {
+    const now = Number.isFinite(opts.now) ? opts.now : nowSec();
+    const blocked = opts.blockedKeys instanceof Set ? opts.blockedKeys : null;
+    const softBlocked = new Set();
+
     const db = await this.dbPromise;
-    const tx = db.transaction("outbox", "readonly");
-    const index = tx.objectStore("outbox").index("status");
+    const tx = db.transaction(OUTBOX, "readonly");
+    const index = tx.objectStore(OUTBOX).index(FIFO_INDEX);
     const batch = [];
-    let cursor = await index.openCursor(IDBKeyRange.only("pending"));
+
+    let cursor = await index.openCursor(statusRange(OUTBOX_STATUS.PENDING));
     while (cursor && batch.length < limit) {
-      batch.push(cursor.value);
+      const cmd = cursor.value;
+      const key = outboxLockKey(cmd);
+
+      if (blocked?.has(key) || softBlocked.has(key)) {
+        cursor = await cursor.continue();
+        continue;
+      }
+      if (Number(cmd.next_retry_at) > now) {
+        softBlocked.add(key);
+        cursor = await cursor.continue();
+        continue;
+      }
+
+      batch.push(cmd);
       cursor = await cursor.continue();
     }
+
     await tx.done;
-    // Сортируем по created_at для стабильного FIFO
-    batch.sort((a, b) => a.created_at - b.created_at);
     return batch;
   }
-  /**
-   * Найти pending-CreateTicket по offline_uuid.
-   * Используется outbox-queue (merge Edit/Comment/Close #3–#5)
-   * и ticket-repository (#6 fetchById для offline_).
-   * Возвращает запись outbox или null.
-   */
+
+  /** Ключи заявок с failed (retry исчерпан) — блокируют только свою заявку. */
+  async getBlockedKeys() {
+    const db = await this.dbPromise;
+    const failed = await db.getAllFromIndex(
+      OUTBOX,
+      FIFO_INDEX,
+      statusRange(OUTBOX_STATUS.FAILED),
+    );
+    return new Set(failed.map(outboxLockKey).filter(Boolean));
+  }
+
   async findPendingCreateByOfflineUuid(offlineUuid) {
-    const all = await this.getAllPending();
+    if (!offlineUuid) return null;
+    const db = await this.dbPromise;
+    const list = await db.getAllFromIndex(
+      OUTBOX,
+      "offline_uuid",
+      IDBKeyRange.only(String(offlineUuid)),
+    );
     return (
-      all.find(
+      list.find(
         (c) =>
           c.command_type === "CreateTicket" &&
-          c.status === "pending" &&
-          c.offline_uuid === offlineUuid,
+          c.status === OUTBOX_STATUS.PENDING,
       ) || null
     );
   }
+
   /**
-   * Pending-команды, привязанные к заявке (любые авторы).
-   * Используется tickets-controller / details-controller для бейджей «⏳».
+   * Зависимые команды серверной заявки.
+   * Для offline_ их не существует — правки свёрнуты в CreateTicket (§9.1).
    */
   async getPendingByTicket(ticketId) {
+    const key = normalizeTicketKey(ticketId);
+    if (key == null || typeof key === "string") return [];
+
     const db = await this.dbPromise;
-    const tx = db.transaction("outbox", "readonly");
-    const index = tx.objectStore("outbox").index("ticket_id");
-    const list = await index.getAll(IDBKeyRange.only(ticketId));
-    await tx.done;
-    return list.filter((c) => c.status === "pending");
+    const list = await db.getAllFromIndex(
+      OUTBOX,
+      "ticket_id",
+      IDBKeyRange.only(key),
+    );
+    return list
+      .filter((c) => c.status === OUTBOX_STATUS.PENDING)
+      .sort((a, b) => a.created_at - b.created_at);
   }
 
-  /**
-   * Pending-команды конкретного автора.
-   * Используется ТОЛЬКО для UI-фильтра «Только мои» в экране очереди.
-   * НЕ используется для синхронизации.
-   */
   async getPendingByAuthor(authorId) {
+    const id = Number(authorId);
+    if (!Number.isFinite(id)) return [];
+
     const db = await this.dbPromise;
-    const tx = db.transaction("outbox", "readonly");
-    const index = tx.objectStore("outbox").index("offline_author_id");
-    const list = await index.getAll(IDBKeyRange.only(authorId));
-    await tx.done;
-    return list.filter((c) => c.status === "pending");
+    const list = await db.getAllFromIndex(
+      OUTBOX,
+      "offline_author_id",
+      IDBKeyRange.only(id),
+    );
+    return list.filter((c) => c.status === OUTBOX_STATUS.PENDING);
   }
 
-  /** Обновить поля команды. */
   async updateOutboxCommand(commandUuid, patch) {
     const db = await this.dbPromise;
-    const existing = await db.get("outbox", commandUuid);
-    if (!existing) return null;
-    const merged = { ...existing, ...patch, command_uuid: commandUuid };
-    await db.put("outbox", merged);
-    return merged;
-  }
+    const tx = db.transaction(OUTBOX, "readwrite");
+    const store = tx.objectStore(OUTBOX);
 
-  /** Удалить команды по command_uuid[]. */
-  async deleteOutboxCommands(uuids) {
-    if (!uuids || uuids.length === 0) return;
-    const db = await this.dbPromise;
-    const tx = db.transaction("outbox", "readwrite");
-    for (const id of uuids) tx.objectStore("outbox").delete(id);
+    const existing = await store.get(commandUuid);
+    if (!existing) {
+      await tx.done;
+      return null;
+    }
+
+    const next = { ...existing, ...patch, command_uuid: commandUuid };
+    if (patch.ticket_id !== undefined)
+      next.ticket_id = normalizeTicketKey(patch.ticket_id);
+    if (patch.status && patch.status !== existing.status)
+      next.status_changed_at = nowSec();
+
+    await store.put(next);
     await tx.done;
+    return next;
   }
 
-  /** Количество pending (любые авторы). */
+  async deleteOutboxCommands(uuids) {
+    if (!Array.isArray(uuids) || uuids.length === 0) return 0;
+    const db = await this.dbPromise;
+    const tx = db.transaction(OUTBOX, "readwrite");
+    const store = tx.objectStore(OUTBOX);
+    for (const id of uuids) store.delete(id);
+    await tx.done;
+    return uuids.length;
+  }
+
+  // --- Счётчики (п. 2.14) ---
+
+  async _countStatus(status) {
+    const db = await this.dbPromise;
+    return db.countFromIndex(OUTBOX, FIFO_INDEX, statusRange(status));
+  }
+
+  /** Только pending — основной бейдж не должен висеть вечно жёлтым. */
   async getOutboxCount() {
-    const db = await this.dbPromise;
-    return db.countFromIndex("outbox", "status", "pending");
+    return this._countStatus(OUTBOX_STATUS.PENDING);
   }
 
-  /** Количество failed (любые авторы). */
   async getFailedCount() {
-    const db = await this.dbPromise;
-    return db.countFromIndex("outbox", "status", "failed");
+    return this._countStatus(OUTBOX_STATUS.FAILED);
   }
-  /**
-   * Количество pending-команд с заданным command_type.
-   * Используется в create-controller: лимит офлайн-заявок
-   * (OFFLINE.MAX_OFFLINE_TICKETS) должен считать только CreateTicket,
-   * а не все pending (Edit/Comment/Close к офлайн- или серверным
-   * заявкам — это не «офлайн-заявки»).
-   *
-   * Реализация через курсор по индексу status: O(n) по pending,
-   * но n редко >50 (иначе лимит уже сработал бы). Отдельный
-   * составной индекс [status, command_type] не нужен.
-   */
+
+  async getNeedsConfirmationCount() {
+    return this._countStatus(OUTBOX_STATUS.NEEDS_CONFIRMATION);
+  }
+
+  async getRejectedCount() {
+    return this._countStatus(OUTBOX_STATUS.REJECTED);
+  }
+
+  /** Все четыре счётчика одной транзакцией — для индикатора и сводки. */
+  async getOutboxCounts() {
+    const db = await this.dbPromise;
+    const tx = db.transaction(OUTBOX, "readonly");
+    const index = tx.objectStore(OUTBOX).index(FIFO_INDEX);
+
+    const [pending, needsConfirmation, failed, rejected] = await Promise.all(
+      ALL_STATUSES.map((s) => index.count(statusRange(s))),
+    );
+    await tx.done;
+
+    return {
+      pending,
+      needs_confirmation: needsConfirmation,
+      failed,
+      rejected,
+      total: pending + needsConfirmation + failed + rejected,
+    };
+  }
+
+  /** Четыре группы экрана очереди в порядке FIFO (п. 2.17). */
+  async getOutboxGrouped() {
+    const db = await this.dbPromise;
+    const tx = db.transaction(OUTBOX, "readonly");
+    const index = tx.objectStore(OUTBOX).index(FIFO_INDEX);
+
+    const groups = {};
+    for (const status of ALL_STATUSES) {
+      groups[status] = await index.getAll(statusRange(status));
+    }
+    await tx.done;
+    return groups;
+  }
+
   async countByType(type) {
     const db = await this.dbPromise;
-    const tx = db.transaction("outbox", "readonly");
-    const index = tx.objectStore("outbox").index("status");
-    let count = 0;
-    let cursor = await index.openCursor(IDBKeyRange.only("pending"));
-    while (cursor) {
-      if (cursor.value.command_type === type) count++;
-      cursor = await cursor.continue();
-    }
-    await tx.done;
-    return count;
+    const list = await db.getAllFromIndex(
+      OUTBOX,
+      FIFO_INDEX,
+      statusRange(OUTBOX_STATUS.PENDING),
+    );
+    return list.filter((c) => c.command_type === type).length;
   }
+
   async clearOutbox() {
     const db = await this.dbPromise;
-    await db.clear("outbox");
+    await db.clear(OUTBOX);
   }
 
   /**
-   * Удаляет failed-команды старше `maxAgeDays`.
-   *
-   * Вызывается при старте SPA (main.js). Без этого outbox
-   * растёт бесконечно: SyncManager ставит status='failed' после
-   * MAX_RETRIES=5, и команда висит в статусе failed навсегда,
-   * замедляя getAllPending() и засоряя UI-бейджи.
-   *
-   * @param {number} [maxAgeDays=7]
-   * @returns {Promise<number>} количество удалённых записей
+   * 2.16: failed и rejected старше maxAgeDays.
+   * Возраст считается от смены статуса, а не от создания команды:
+   * заявка недельной давности, отклонённая вчера, должна дожить до 7 дней.
    */
   async cleanupFailed(maxAgeDays = 7) {
+    const cutoff = nowSec() - maxAgeDays * 24 * 60 * 60;
     const db = await this.dbPromise;
-    const cutoff = Math.floor(Date.now() / 1000) - maxAgeDays * 24 * 60 * 60;
-    const tx = db.transaction("outbox", "readwrite");
-    const store = tx.objectStore("outbox");
-    const index = store.index("status");
+    const tx = db.transaction(OUTBOX, "readwrite");
+    const index = tx.objectStore(OUTBOX).index(FIFO_INDEX);
 
     let removed = 0;
-    let cursor = await index.openCursor(IDBKeyRange.only("failed"));
-    while (cursor) {
-      if (cursor.value.created_at < cutoff) {
-        cursor.delete();
-        removed++;
+    for (const status of [OUTBOX_STATUS.FAILED, OUTBOX_STATUS.REJECTED]) {
+      let cursor = await index.openCursor(statusRange(status));
+      while (cursor) {
+        const v = cursor.value;
+        const stamp = toSeconds(v.status_changed_at, v.created_at);
+        if (stamp < cutoff) {
+          await cursor.delete();
+          removed++;
+        }
+        cursor = await cursor.continue();
       }
-      cursor = await cursor.continue();
     }
+
     await tx.done;
     return removed;
   }
+
   // =========================================================================
-  // Outbox — SHIM (старый API, до Фаз 1–3)
+  // SHIM (старый API)
   // =========================================================================
 
-  /**
-   * @deprecated create-controller.js до Фазы 3.
-   * Принимает старый формат, мапит в новый.
-   */
   async addToOutbox(oldCmd) {
     return this.addOutboxCommand({
       command_uuid:
@@ -359,17 +597,13 @@ class OfflineDB {
       ticket_id: null,
       offline_uuid: oldCmd.offline_uuid || null,
       payload: oldCmd.payload || {},
-      created_at: oldCmd.created_at || Math.floor(Date.now() / 1000),
+      created_at: oldCmd.created_at ?? nowSec(),
       offline_author_id: oldCmd.offline_author_id ?? null,
       offline_author_name: oldCmd.offline_author_name ?? null,
     });
   }
 
-  /**
-   * @deprecated sync-manager.js до Фазы 2.
-   * Отдаёт pending в СТАРОМ формате. Всех авторов.
-   */
-  async getOutboxBatch(limit = 10) {
+  async getOutboxBatch(limit = 1) {
     const cmds = await this.getPendingBatch(limit);
     return cmds.map((c) => ({
       uuid: c.command_uuid,
@@ -381,15 +615,13 @@ class OfflineDB {
     }));
   }
 
-  /**
-   * @deprecated tickets-controller.js / details-controller.js до Фазы 3.
-   * Отдаёт ТОЛЬКО CreateTicket — для UI «офлайн-заявок». Всех авторов.
-   */
   async getAllFromOutbox() {
-    const all = await this.getAllPending();
+    const all = await this.getAllCommands();
     return all
       .filter(
-        (c) => c.command_type === "CreateTicket" && c.status === "pending",
+        (c) =>
+          c.command_type === "CreateTicket" &&
+          c.status === OUTBOX_STATUS.PENDING,
       )
       .map((c) => ({
         uuid: c.command_uuid,
@@ -401,29 +633,28 @@ class OfflineDB {
       }));
   }
 
-  /** @deprecated sync-manager.js до Фазы 2. */
   async deleteFromOutbox(uuids) {
     return this.deleteOutboxCommands(uuids);
   }
 
   // =========================================================================
-  // Кэш заявок (без изменений)
+  // Кэш заявок
   // =========================================================================
 
   async saveTickets(type, tickets) {
+    if (!Array.isArray(tickets)) return;
     const db = await this.dbPromise;
     const tx = db.transaction("tickets_cache", "readwrite");
     const store = tx.objectStore("tickets_cache");
 
     let cursor = await store.openCursor();
     while (cursor) {
-      if (cursor.value._type === type) {
-        cursor.delete().catch(() => {});
-      }
+      if (cursor.value._type === type) await cursor.delete();
       cursor = await cursor.continue();
     }
 
     for (const t of tickets) {
+      if (t?.id == null) continue;
       store.put({ ...t, _type: type });
     }
     await tx.done;

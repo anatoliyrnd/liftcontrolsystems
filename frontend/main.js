@@ -92,8 +92,8 @@ function leaveAll() {
 router.onBeforeNavigate(leaveAll);
 
 function activeTicketsController() {
-  if (openTicketsCtrl.isActive) return openTicketsCtrl;
-  if (closedTicketsCtrl.isActive) return closedTicketsCtrl;
+  if (openTicketsCtrl._isActive) return openTicketsCtrl;
+  if (closedTicketsCtrl._isActive) return closedTicketsCtrl;
   return null;
 }
 
@@ -118,11 +118,10 @@ async function updateOutboxFlag() {
   }
   outboxFlagBusy = true;
   try {
-    const [pending, failed] = await Promise.all([
-      offlineDB.getOutboxCount(),
-      offlineDB.getFailedCount(),
-    ]);
-    window.__hasPendingOutbox = pending + failed > 0;
+    const c = await offlineDB.getOutboxCounts();
+    // После 2.14 getOutboxCount = только pending. Для предупреждения
+    // о потере работы учитываем все четыре статуса.
+    window.__hasPendingOutbox = c.total > 0;
   } catch (e) {
     console.warn("[App] Не удалось прочитать счётчики очереди:", e);
   } finally {
@@ -144,7 +143,52 @@ window.addEventListener("beforeunload", (e) => {
 
 window.addEventListener("online", updateOutboxFlag);
 window.addEventListener("offline", updateOutboxFlag);
+// --- Обновление схемы IndexedDB между вкладками ---
+// Регистрация ДО первого обращения к offlineDB: событие blocked
+// диспатчится синхронно внутри openDB и не переигрывается.
+let dbUpgradeToast = null;
 
+window.addEventListener("db:upgrade-blocked", () => {
+  if (dbUpgradeToast) return;
+  logHistoryAction(
+    "Обновление базы данных ожидает закрытия других вкладок приложения.",
+  );
+  dbUpgradeToast = notify.warning(
+    "Обновление базы данных заблокировано другой вкладкой. Закройте остальные вкладки приложения и обновите страницу.",
+    {
+      timeout: 0,
+      persistent: true,
+      actionText: "Обновить страницу",
+      onAction: () => window.location.reload(),
+    },
+  );
+});
+
+// Блокировка снялась: другая вкладка отпустила соединение, апгрейд прошёл.
+window.addEventListener("db:upgrade-ready", () => {
+  dbUpgradeToast?.dismiss?.();
+  dbUpgradeToast = null;
+  notify.success("База данных обновлена. Можно продолжать работу.", {
+    once: true,
+  });
+});
+
+// Мы держали старую версию, соединение уже закрыто в blocking().
+// Работать дальше нельзя — данные пишет другая вкладка на новой схеме.
+window.addEventListener("db:upgrade-required", () => {
+  logHistoryAction(
+    "База данных обновлена в другой вкладке. Требуется перезагрузка страницы.",
+  );
+  notify.warning(
+    "Данные приложения обновлены в другой вкладке. Обновите страницу.",
+    {
+      timeout: 0,
+      persistent: true,
+      actionText: "Обновить страницу",
+      onAction: () => window.location.reload(),
+    },
+  );
+});
 // --- 1.23: полный teardown приложения ---
 let tornDown = false;
 function teardownApp() {
@@ -352,12 +396,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 1.15: поллер трогает только активный экран.
   window.addEventListener("sync:fetch_open_tickets", () => {
-    if (openTicketsCtrl.isActive)
+    if (openTicketsCtrl._isActive)
       openTicketsCtrl.refreshSilently(openTicketsArray);
   });
 
   window.addEventListener("sync:fetch_closed_tickets", () => {
-    if (closedTicketsCtrl.isActive)
+    if (closedTicketsCtrl._isActive)
       closedTicketsCtrl.refreshSilently(closedTicketsArray);
   });
 
@@ -493,7 +537,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     (newTickets) => {
       const safeTickets = Array.isArray(newTickets) ? newTickets : [];
       openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
-      if (openTicketsCtrl.isActive)
+      if (openTicketsCtrl._isActive)
         openTicketsCtrl.refreshFromMemory(openTicketsArray);
       refreshSyncUi();
     },
