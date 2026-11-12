@@ -185,7 +185,7 @@ export class SyncManager {
     this.syncNow();
   }
 
-  /* async startSync(opts = {}) {
+  async startSync(opts = {}) {
     if (this._stopped || this._syncing) return;
     if (!navigator.onLine || !authStore.hasAccess()) return;
 
@@ -312,12 +312,19 @@ export class SyncManager {
 
     window.dispatchEvent(new Event("refreshSyncState"));
 
-    if (touchedTickets) {
-      // п. 2.27: списки перечитываются событием, а не переданным массивом.
-      window.dispatchEvent(new Event("sync:fetch_open_tickets"));
-      window.dispatchEvent(new Event("sync:fetch_closed_tickets"));
-    }
-  } */
+   if (touchedTickets) {
+  // 2.27: сбрасываем applied, чтобы следующий _tick подтянул свежие
+  // версии. Без этого poller продолжит слать старые applied и получать
+  // тот же outdated.
+  window.dispatchEvent(
+    new CustomEvent("sync:applied_reset", {
+      detail: { layers: ["open_tickets", "closed_tickets"] },
+    }),
+  );
+  // 2.27: один тик поллера сразу, а не через 120 сек.
+  window.notificationsPollerInstance?._tick?.();
+}
+  }
 
 
   /** Кнопка «Синхронизировать»: сбрасывает ручной режим и счётчик. */
@@ -397,7 +404,7 @@ export class SyncManager {
 
   // --- Запуск ---
 
-  async startSync(opts = {}) {
+/*   async startSync(opts = {}) {
     if (this._stopped || this._syncing) return;
     if (!navigator.onLine || !authStore.hasAccess()) return;
 
@@ -524,28 +531,45 @@ export class SyncManager {
   // 2.27: один тик поллера сразу, а не через 120 сек.
   window.notificationsPollerInstance?._tick?.();
 }
-  }
+  } */
 
   // --- Одна команда ---
 
-  async _sendOne(cmd, blockedKeys) {
-    const user = authStore.getUser();
-    const batchId = await this._batchIdFor(cmd);
-    const command = buildCommand(cmd, user, {
+ async _sendOne(cmd, blockedKeys) {
+  const user = authStore.getUser();
+  const batchId = await this._batchIdFor(cmd);
+
+  let command;
+  try {
+    command = buildCommand(cmd, user, {
       forceCreate: cmd.confirmed === true,
     });
-
-    let resp;
-    try {
-      resp = await this.api.post(
-        { action: "syncCommands", batch_id: batchId, commands: [command] },
-        null,
-        "sync",
+  } catch (err) {
+    if (err.name === "CommandBuildError") {
+      await offlineDB.updateOutboxCommand(cmd.command_uuid, {
+        status: "rejected",
+        reason: err.reason,
+        last_error: err.message,
+      });
+      logHistoryAction(
+        `Команда ${cmd.command_uuid} отклонена клиентом: ${err.reason}`,
       );
-    } catch (e) {
-      console.warn("[SyncManager] Сеть недоступна:", e);
-      return { kind: "network" };
+      return { kind: "done", terminal: true, touchedTickets: false };
     }
+    throw err;
+  }
+
+  let resp;
+  try {
+    resp = await this.api.post(
+      { action: "syncCommands", batch_id: batchId, commands: [command] },
+      null,
+      "sync",
+    );
+  } catch (e) {
+    console.warn("[SyncManager] Сеть недоступна:", e);
+    return { kind: "network" }
+  }
 
     if (!resp) return { kind: "network" };
     if (resp._authLost) return { kind: "auth" };

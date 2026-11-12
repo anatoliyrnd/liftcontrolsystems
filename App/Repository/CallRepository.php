@@ -478,5 +478,12 @@ final class CallRepository
             'closureallowed' => 0,
         ];
     }
+    public function findTypeCategory(int $typeId): ?array
+    {
+        return $this->db->fetchOne(
+            "SELECT type FROM lift_types WHERE type_id = :id",
+            ['id' => $typeId]
+        );
+    }
 
 }

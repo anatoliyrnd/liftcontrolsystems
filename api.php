@@ -22,8 +22,9 @@ try {
     ApiController::create()->handle($request)->send();
 
 } catch (ApiException $e) {
-    Response::error($e->errorCode, $e->getMessage())->send();
+    Response::error($e->errorCode, $e->getMessage(), $e->reason, $e->details)->send();
+
 } catch (Throwable $e) {
     \App\Support\Logger::error("[FATAL API] " . $e->getMessage(), ['exception' => $e]);
-    Response::error($e->errorCode, $e->getMessage(), $e->reason, $e->details)->send();
+    Response::error(ErrorCode::InternalError, 'Внутренняя ошибка сервера')->send();
 }

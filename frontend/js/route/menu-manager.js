@@ -13,7 +13,8 @@ export class MenuManager {
         this.router = routerInstance;
         this.container = document.getElementById(containerId);
         this.hamburgerBtn = null;
-
+        this._configLoading = null;
+        this._pendingReload = false;
         this._onDocumentClick = this._onDocumentClick.bind(this);
         this._onHashChange = this._onHashChange.bind(this);
 
@@ -32,8 +33,34 @@ export class MenuManager {
         if (/data:text\/html/i.test(s)) return null;
         return s;
     }
+async initialize() {
+  if (this._configLoading) {
+    this._pendingReload = true;
+    return this._configLoading;
+  }
 
-    async initialize() {
+  this._configLoading = this._doInitialize();
+  try {
+    await this._configLoading;
+  } catch (e) {
+    // _doInitialize уже отрисовала fallback-меню.
+  } finally {
+    this._configLoading = null;
+  }
+
+  while (this._pendingReload) {
+    this._pendingReload = false;
+    this._configLoading = this._doInitialize();
+    try {
+      await this._configLoading;
+    } catch (e) {
+      /* fallback */
+    } finally {
+      this._configLoading = null;
+    }
+  }
+}
+    async _doInitialize() {
         try {
             const responseData = await this.api.get(
                 { data: 'config' },

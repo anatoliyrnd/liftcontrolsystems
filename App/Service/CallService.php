@@ -55,18 +55,23 @@ class CallService
 
         // 🛡️ Валидация обязательных полей
         if ($isOffline && !isset($data['opened_at'])) {
-            throw new ApiException(ErrorCode::InvalidInput, 'opened_at обязателен для офлайн-заявки');
+            throw new ApiException(ErrorCode::InvalidInput, 'opened_at обязателен для офлайн-заявки',reason: 'opened_at_required');
         }
         $openedAt = isset($data['opened_at']) ? (int)$data['opened_at'] : time();
 
         $details = trim((string)($data['details'] ?? ''));
         if (mb_strlen($details) < 6) {
-            throw new ApiException(ErrorCode::InvalidInput, 'validation_error: details_too_short');
+            throw new ApiException(ErrorCode::InvalidInput, 'Описание слишком короткое (минимум 6 символов)', reason: 'details_too_short');
         }
-
-        $repairTime = isset($data['repair_time']) ? (int)$data['repair_time'] : 0;
-        if ($repairTime > 0 && $repairTime < time()) {
-            throw new ApiException(ErrorCode::InvalidInput, 'validation_error: repair_time_in_past');
+        $comments = trim((string) ($data['comments'] ?? ''));
+        $repairTime = isset($data['repair_time']) ? (int) $data['repair_time'] : 0;
+// Офлайн срок не задаётся — валидация к нему не применяется.
+        if (!$isOffline && $repairTime > 0 && $repairTime < time()) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Срок ремонта не может быть в прошлом',
+                reason: 'repair_time_in_past'
+            );
         }
 
         $addr = $this->validateAddress($data);
@@ -114,11 +119,19 @@ class CallService
         $now = time();
         $hasDateCorrection = false;
         $originalDateStr = '';
+
         if ($isOffline && $openedAt > ($now + 86400)) {
             $originalDateStr = date('d.m.Y H:i', $openedAt);
             $openedAt = $now;
             $hasDateCorrection = true;
-            $details .= "\n\n⏳ [Автокоррекция даты] Исходная дата создания офлайн: {$originalDateStr}. Скорректировано на системную: " . date('d.m.Y H:i', $now) . ".";
+
+            // Пометка уходит в comments, а не засоряет описание заявки.
+            $correctionNote = "⏳ [Автокоррекция даты] Исходная дата создания офлайн: {$originalDateStr}. "
+                . "Скорректировано на системную: " . date('d.m.Y H:i', $now) . ".";
+
+            $comments = $comments === ''
+                ? $correctionNote
+                : $comments . "\n" . $correctionNote;
         }
 
         $callStatus = 0;
@@ -130,7 +143,8 @@ class CallService
 
         if ($solution !== '') {
             if (mb_strlen($solution) < 6) {
-                throw new ApiException(ErrorCode::InvalidInput, 'validation_error: solution_too_short');
+                throw new ApiException(ErrorCode::InvalidInput,
+                    'Решение слишком короткое', reason: 'solution_too_short');
             }
             $callStatus = 1;
             if ($closedAt === null) {
@@ -142,7 +156,17 @@ class CallService
                 $hasClosedAtCorrection = true;
             }
         }
-
+// Онлайн: значение клиента. Офлайн: время синхронизации + флаг «назначен сервером».
+        if ($isOffline) {
+            $repairFinal = time();
+            $repairIsDefault = 1;
+        } else {
+            $repairFinal = $repairTime > 0 ? $repairTime : time() + (3 * 86400);
+            $repairIsDefault = $repairTime > 0 ? 0 : 1;
+        }
+        $this->assertDictCategory($depId, 1);
+        $this->assertDictCategory((int) ($data['request_id'] ?? 0), 2);
+        $this->assertDictCategory($groupId, 3);
         $callId = $this->callRepo->create([
             'call_first_name'      => $authorName,
             'call_details'         => $details,
@@ -159,14 +183,28 @@ class CallService
             'call_status'          => $callStatus,
             'call_solution'        => $callStatus === 1 ? $solution : '',
             'call_last_name'       => $callStatus === 1 ? (string)$closeName : '',
+            'closed_by_id'   => $callStatus === 1
+                ? (isset($data['closed_by_id']) ? (int) $data['closed_by_id'] : $authorId)
+                : null,
             'call_date2'           => $callStatus === 1 ? $closedAt : 0,
-            'alert_level'          => $this->determineAlertLevel($data),
-            'expected_repair_time' => time() + (3 * 86400),
+            'alert_level' => isset($data['alert_level'])
+                ? max(1, min(3, (int) $data['alert_level']))
+                : $this->determineAlertLevel($data),
+            'expected_repair_time'   => $repairFinal,
+            'repair_time_is_default' => $repairIsDefault,
             'call_user'            => $authorId,
             'offline_uuid'         => $offlineUuid
         ]);
 
         // Логирование автокоррекций после получения callId
+        if ($isOffline) {
+            $this->historyRepo->add(
+                $callId,
+                'Срок ремонта назначен сервером: офлайн-клиент срок не задаёт',
+                $authorId,
+                $source
+            );
+        }
         if ($hasDateCorrection) {
             $this->historyRepo->add($callId, "Автокоррекция даты создания: оффлайн-таймстемп {$originalDateStr} сдвинут на время сервера", $authorId, $source);
         }
@@ -212,13 +250,21 @@ class CallService
             }
         }
         // 🛡️ ИСПРАВЛЕНО: Теперь оффлайн-комментарии гарантированно получают флаг is_offline=1 (§2.10)
-        if (!empty($data['comments'])) {
-            $noteId = $this->noteRepo->add($callId, $authorId, trim((string)$data['comments']));
+        if ($comments !== '') {
+            $noteId = $this->noteRepo->add($callId, $authorId, $comments);
             if ($isOffline) {
                 $this->noteRepo->updateOfflineFlag($noteId, $openedAt);
             }
         }
-
+// Заявка создана сразу закрытой: заметки обязаны попасть в слепок,
+// иначе карточка их не покажет — она читает call_full_note_history.
+        if ($callStatus === 1) {
+            $notes = $this->noteRepo->listByCall($callId);
+            if (!empty($notes)) {
+                $this->callRepo->saveNotesHistory($callId, json_encode($notes, JSON_UNESCAPED_UNICODE));
+                $this->noteRepo->deleteByCall($callId);
+            }
+        }
         $this->cacheService->invalidateTickets();
         // 🔔 ВОЗВРАТ УВЕДОМЛЕНИЙ (фикс регрессии: в v5.2-версии сервиса
         // вызовы NotificationsService исчезли из всех четырёх методов).
@@ -239,11 +285,11 @@ class CallService
     public function calledit(array $user, array $data, string $source = 'online'): array
     {
         $callId = (int) ($data['call_id'] ?? 0);
-        if (!$callId) throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен');
+        if (!$callId) throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен',reason: 'call_id_required');
 
         $call = $this->callRepo->findById($callId);
         if (!$call) throw new ApiException(ErrorCode::NotFound, "Заявка не найдена");
-        if ((int) $call['call_status'] === 1) throw new ApiException(ErrorCode::Closed, "validation_error: ticket_already_closed");
+        if ((int) $call['call_status'] === 1) throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
 
         $isOffline = ($source === 'offline_sync');
         $authorName = $data['offline_author_name'] ?? $user['name'];
@@ -267,7 +313,17 @@ class CallService
             if (!$isOffline) return true;
             return (int)($call[$fieldName] ?? 0) === 0;
         };
-
+// Категория справочника проверяется до записи. Отсутствующий id
+// не трогаем — легаси мог ссылаться на удалённое значение.
+        if (array_key_exists('department_id', $data)) {
+            $this->assertDictCategory((int) $data['department_id'], 1);
+        }
+        if (array_key_exists('request_id', $data)) {
+            $this->assertDictCategory((int) $data['request_id'], 2);
+        }
+        if (array_key_exists('group_id', $data)) {
+            $this->assertDictCategory((int) $data['group_id'], 3);
+        }
         if (array_key_exists('department_id', $data) && $canUpdate('call_department')) $fields['call_department'] = (int) $data['department_id'];
         if (array_key_exists('request_id', $data) && $canUpdate('call_request')) $fields['call_request'] = (int) $data['request_id'];
         if (array_key_exists('group_id', $data) && $canUpdate('call_group')) $fields['call_group'] = (int) $data['group_id'];
@@ -294,8 +350,12 @@ class CallService
                 $fields[$colDate] = $fields[$colStatus] !== 0 ? time() : 0;
             }
         }
-        if (array_key_exists('repair_time', $data) && $canUpdate('expected_repair_time')) $fields['expected_repair_time'] = (int) $data['repair_time'];
-
+        // Офлайн срок ремонта игнорируется молча (не ошибка).
+        if (!$isOffline && array_key_exists('repair_time', $data) && $canUpdate('expected_repair_time')) {
+            $fields['expected_repair_time'] = (int) $data['repair_time'];
+            // Диспетчер задал срок явно — снимаем признак «по умолчанию».
+            $fields['repair_time_is_default'] = 0;
+        }
         if (!empty($fields)) {
             $this->callRepo->updateFields($callId, $fields);
             $this->historyRepo->add($callId, "Отредактирована пользователем {$authorName}", $authorId, $source);
@@ -340,6 +400,7 @@ class CallService
             'call_date2'     => $closedAt,
             'call_solution'  => $solution,
             'call_last_name' => $authorName,
+            'closed_by_id'   => $authorId,
         ]);
 
         $this->historyRepo->add($callId, "Закрыта пользователем {$authorName}. Решение: {$solution}", $authorId, $source);
@@ -358,7 +419,7 @@ class CallService
         $note = trim((string) ($data['text'] ?? $data['note'] ?? ''));
 
         if (!$callId) throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен');
-        if (mb_strlen($note) < 6) throw new ApiException(ErrorCode::InvalidInput, 'validation_error: text_too_short');
+        if (mb_strlen($note) < 6) throw new ApiException(ErrorCode::InvalidInput, 'Комментарий слишком короткий', reason: 'text_too_short');
 
         $call = $this->callRepo->findById($callId);
         if (!$call) throw new ApiException(ErrorCode::NotFound, "Заявка не найдена");
@@ -399,7 +460,7 @@ class CallService
         $liftId = (int) ($data['object_id'] ?? 0);
 
         $address = $this->callRepo->resolveAddress($cityId, $streetId, $homeId, $liftId);
-        if (!$address) throw new ApiException(ErrorCode::NotFound, 'validation_error: object_not_found');
+        if (!$address) throw new ApiException(ErrorCode::NotFound, 'Объект не найден в справочнике адресов', reason: 'object_not_found');
 
         return [
             'city' => $cityId, 'street' => $streetId, 'home' => $homeId, 'lift' => $liftId,
@@ -414,6 +475,22 @@ class CallService
         if ((int) ($data['department_id'] ?? 0) === 23) return 3;
         if ((int) ($data['request_id'] ?? 0) === 1) return 2;
         return 1;
+    }
+    /**
+     * Отклоняем id из чужой категории (заявка №8: call_request=7 — это группа).
+     * Отсутствующий id не трогаем — легаси-данные могли ссылаться на удалённое.
+     */
+    private function assertDictCategory(int $typeId, int $expectedType): void
+    {
+        if ($typeId <= 0) return;
+        $row = $this->callRepo->findTypeCategory($typeId);
+        if ($row && (int) $row['type'] !== $expectedType) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Значение справочника не принадлежит нужной категории',
+                reason: 'invalid_dict_category'
+            );
+        }
     }
 }
 

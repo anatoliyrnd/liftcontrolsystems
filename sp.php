@@ -258,6 +258,7 @@ try {
         'object_id' => $liftId,
         'repair_time' => time() + ($classification['repair_days'] * 86400),
         'staff_id' => 0,
+        'alert_level' => $classification['alert_level'],
     ];
 
     // Системный пользователь

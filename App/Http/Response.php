@@ -13,13 +13,22 @@ final readonly class Response
         return new self(['status' => 'ok'] + $payload);
     }
 
-    public static function error(ErrorCode $code, string $message = ''): self
-    {
-        return new self([
-            'status' => 'error',
-            'code' => $code->value,
-            'message' => $message ?: $code->value
-        ]);
+    public static function error(
+        ErrorCode $code,
+        string $message = '',
+        ?string $reason = null,
+        array $extra = []
+    ): self {
+        $payload = [
+            'status'  => 'error',
+            'code'    => $code->value,
+            'message' => $message ?: $code->value,
+        ];
+        if ($reason !== null && $reason !== '') {
+            $payload['reason'] = $reason;
+        }
+        // retry_after, existing_tickets — плоско на верхнем уровне.
+        return new self($payload + $extra);
     }
 
     public function send(): never

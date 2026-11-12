@@ -11,9 +11,12 @@ use App\Exceptions\ApiException;
 
 try {
     $request = Request::fromGlobals();
+
     AuthController::create()->handle($request)->send();
 } catch (ApiException $e) {
-    Response::error($e->errorCode, $e->getMessage())->send();
+    Response::error($e->errorCode, $e->getMessage(), $e->reason, $e->details)->send();
+
 } catch (Throwable $e) {
-    \App\Support\Logger::error("[FATAL AUTH] " . $e->getMessage(), ['exception' => $e]);
-    Response::error($e->errorCode, $e->getMessage(), $e->reason, $e->details)->send();}
+    \App\Support\Logger::error("[FATAL API] " . $e->getMessage(), ['exception' => $e]);
+    Response::error(ErrorCode::InternalError, 'Внутренняя ошибка сервера')->send();
+}

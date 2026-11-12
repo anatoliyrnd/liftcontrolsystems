@@ -17,21 +17,6 @@ final class ApiException extends RuntimeException
     ) {
         parent::__construct($message ?: $errorCode->value, 0, $previous);
     }
-    public static function error(
-        ErrorCode $code,
-        string $message = '',
-        ?string $reason = null,
-        array $extra = []
-    ): self {
-        $payload = [
-            'status'  => 'error',
-            'code'    => $code->value,
-            'message' => $message ?: $code->value,
-        ];
-        if ($reason !== null && $reason !== '') {
-            $payload['reason'] = $reason;
-        }
-        // retry_after, existing_tickets — плоско на верхнем уровне.
-        return new self($payload + $extra);
-    }
+
+
 }
