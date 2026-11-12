@@ -159,7 +159,18 @@ export function renderTableBody(tableElement, serverData) {
       ) {
         cellValue = "—";
       }
-
+      // data-ts: исходный timestamp для корректной сортировки,
+      // не зависящей от парсинга отформатированной строки.
+      if (col.dataType === "date") {
+        const raw = rowData[col.id];
+        if (raw != null && raw !== "") {
+          const n = Number(raw);
+          if (Number.isFinite(n) && n > 0) {
+            const tsSec = n > 9999999999 ? Math.floor(n / 1000) : n;
+            td.setAttribute("data-ts", String(tsSec));
+          }
+        }
+      }
       td.textContent = cellValue;
 
       if (
