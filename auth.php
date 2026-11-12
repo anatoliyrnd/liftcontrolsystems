@@ -16,5 +16,4 @@ try {
     Response::error($e->errorCode, $e->getMessage())->send();
 } catch (Throwable $e) {
     \App\Support\Logger::error("[FATAL AUTH] " . $e->getMessage(), ['exception' => $e]);
-    Response::error(ErrorCode::InternalError, 'Внутренняя ошибка сервера')->send();
-}
+    Response::error($e->errorCode, $e->getMessage(), $e->reason, $e->details)->send();}

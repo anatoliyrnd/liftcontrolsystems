@@ -272,6 +272,7 @@ function syncAuthUI() {
     if (!notifPoller) {
       notifPoller = new NotificationsPoller(api);
       notifPoller.start();
+      window.notificationsPollerInstance = notifPoller;
     }
     if (!inactivityTracker) {
       inactivityTracker = new InactivityTracker(router, 30 * 60 * 1000);
@@ -388,28 +389,89 @@ document.addEventListener("DOMContentLoaded", async () => {
   syncIndicator.init();
   offlineBanner.init();
 
-  window.addEventListener("sync:fetch_staff", async () => {
+window.addEventListener("sync:fetch_staff", async (e) => {
+  const version = e.detail?.version;
+  try {
     if (menuManager) await menuManager.initialize();
-  });
+    if (version != null) {
+      window.dispatchEvent(new CustomEvent("sync:applied", {
+        detail: { layer: "staff", version },
+      }));
+    }
+  } catch (err) {
+    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+      detail: { layer: "staff" },
+    }));
+  }
+});
 
-  window.addEventListener("sync:fetch_dicts", async () => {
+window.addEventListener("sync:fetch_dicts", async (e) => {
+  const version = e.detail?.version;
+  try {
     if (menuManager) await menuManager.initialize();
-  });
+    if (version != null) {
+      window.dispatchEvent(new CustomEvent("sync:applied", {
+        detail: { layer: "dicts", version },
+      }));
+    }
+  } catch (err) {
+    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+      detail: { layer: "dicts" },
+    }));
+  }
+})
 
-  window.addEventListener("sync:fetch_addresses", () => {
-    refreshAddresses({ force: true });
-  });
+window.addEventListener("sync:fetch_addresses", async (e) => {
+  const version = e.detail?.version;
+  try {
+    await refreshAddresses({ force: true });
+    if (version != null) {
+      window.dispatchEvent(new CustomEvent("sync:applied", {
+        detail: { layer: "addresses", version },
+      }));
+    }
+  } catch (err) {
+    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+      detail: { layer: "addresses" },
+    }));
+  }
+});
 
-  // 1.15: поллер трогает только активный экран.
-  window.addEventListener("sync:fetch_open_tickets", () => {
-    if (openTicketsCtrl._isActive)
-      openTicketsCtrl.refreshSilently(openTicketsArray);
-  });
+window.addEventListener("sync:fetch_open_tickets", async (e) => {
+  const version = e.detail?.version;
+  try {
+    if (openTicketsCtrl.isActive) {
+      await openTicketsCtrl.refreshSilently(openTicketsArray);
+    }
+    if (version != null) {
+      window.dispatchEvent(new CustomEvent("sync:applied", {
+        detail: { layer: "open_tickets", version },
+      }));
+    }
+  } catch (err) {
+    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+      detail: { layer: "open_tickets" },
+    }));
+  }
+});
 
-  window.addEventListener("sync:fetch_closed_tickets", () => {
-    if (closedTicketsCtrl._isActive)
-      closedTicketsCtrl.refreshSilently(closedTicketsArray);
-  });
+window.addEventListener("sync:fetch_closed_tickets", async (e) => {
+  const version = e.detail?.version;
+  try {
+    if (closedTicketsCtrl.isActive) {
+      await closedTicketsCtrl.refreshSilently(closedTicketsArray);
+    }
+    if (version != null) {
+      window.dispatchEvent(new CustomEvent("sync:applied", {
+        detail: { layer: "closed_tickets", version },
+      }));
+    }
+  } catch (err) {
+    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+      detail: { layer: "closed_tickets" },
+    }));
+  }
+});
 
   window.addEventListener("refreshSyncState", refreshSyncUi);
 

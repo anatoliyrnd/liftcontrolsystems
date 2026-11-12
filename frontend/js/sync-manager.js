@@ -513,10 +513,17 @@ export class SyncManager {
     window.dispatchEvent(new Event("refreshSyncState"));
 
     if (touchedTickets) {
-      // п. 2.27: списки перечитываются事件ом, а не переданным массивом.
-      window.dispatchEvent(new Event("sync:fetch_open_tickets"));
-      window.dispatchEvent(new Event("sync:fetch_closed_tickets"));
-    }
+  // 2.27: сбрасываем applied, чтобы следующий _tick подтянул свежие
+  // версии. Без этого poller продолжит слать старые applied и получать
+  // тот же outdated.
+  window.dispatchEvent(
+    new CustomEvent("sync:applied_reset", {
+      detail: { layers: ["open_tickets", "closed_tickets"] },
+    }),
+  );
+  // 2.27: один тик поллера сразу, а не через 120 сек.
+  window.notificationsPollerInstance?._tick?.();
+}
   }
 
   // --- Одна команда ---
