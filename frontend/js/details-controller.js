@@ -26,7 +26,7 @@ const AUTO_RETURN_MS = UI.AUTO_RETURN_MS;
 const ERROR_UNLOCK_MS = UI.ERROR_UNLOCK_MS;
 
 export class DetailsController {
-  constructor(apiInstance, routerInstance) {
+   constructor(apiInstance, routerInstance) {
     this.api = apiInstance;
     this.router = routerInstance;
     this.notesComposer = null;
@@ -42,6 +42,42 @@ export class DetailsController {
     this._sourceArray = null;
     this._sourceIdx = -1;
     this._isRefreshing = false;
+
+    // Один слушатель на время жизни приложения (контроллер — синглтон).
+    // Проверка текущей заявки внутри делает его no-op вне карточки.
+    this._onTicketCreated = this._onTicketCreated.bind(this);
+    window.addEventListener("sync:ticket_created", this._onTicketCreated);
+  }
+
+  /**
+   * Офлайн-заявка синхронизирована: offline_uuid больше не резолвится,
+   * переводим открытую карточку на серверный номер.
+   * В режиме правки не дёргаем — предложили открыть из журнала.
+   */
+  _onTicketCreated(e) {
+    const { offline_uuid: offlineUuid, ticket_id: serverId } = e.detail || {};
+    if (!offlineUuid || serverId == null) return;
+
+    const t = this.ticket;
+    if (!t || !t.isOffline) return;
+    if (String(t.offline_uuid || t.id) !== String(offlineUuid)) return;
+
+    if (this.state.mode !== "view") {
+      notify.info(
+        `Заявка синхронизирована: №${serverId}. Завершите редактирование и откройте её из журнала.`,
+        { once: true },
+      );
+      return;
+    }
+
+    logHistoryAction(`Офлайн-заявка синхронизирована: №${serverId}.`);
+    this.router.navigate("#/ticket/" + serverId);
+  }
+
+  /** Полный teardown — вызывается из main.js при выгрузке приложения. */
+  destroy() {
+    this.unmount();
+    window.removeEventListener("sync:ticket_created", this._onTicketCreated);
   }
 
   get ticket() {

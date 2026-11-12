@@ -1,527 +1,859 @@
 /**
- * Менеджер офлайн-синхронизации.
+ * Менеджер офлайн-синхронизации. Поштучная отправка.
+ * API_syncCommands.md v5.4, ТЗ фронтенда, волна 2.
  *
- * Отправляет пачки команд через POST /calls/syncCommands (action: syncCommands).
- * Протокол: API_syncCommands.md v4.2, OFFLINE_PROTOCOL.md v3.0.
+ * Удалено: buildBatch, накопление веса, лимит 20, блок «очередь не
+ * уменьшилась», проверка полноты results, прогресс по терминальным
+ * статусам, лимит итераций, _processResults, _applyCreatedTickets,
+ * _refreshOpenTickets и колбэк onOpenTicketsUpdated.
  *
- * Ключевые особенности:
- *   - Синхронизирует outbox ЦЕЛИКОМ, независимо от автора команды.
- *     Если синхронизирует не автор — в payload добавляется префикс-маркер
- *     (см. batch-builder.applyAuthorMarker).
- *   - Мультитаб: Web Locks (utils/sync-lock.js) сериализует вызовы между вкладками.
- *   - Идемпотентность: pendingBatchId хранится в offlineDB.config.
- *     При network error retry идёт с тем же batch_id — сервер вернёт кэш.
- *   - Partial Success: success/ignored/archived удаляются из outbox;
- *     failed — retry с экспоненциальным backoff (30→480s, MAX_RETRIES=5);
- *     duplicate_detected — модалка через onDuplicateDetected (b),
- *     при подтверждении повтор с force_create: true.
- *   - AUTH_LOST: прерывает текущий запрос через api.abortTag('sync'),
- *     команды остаются pending, после логина синхронизация продолжится.
- *   - Триггеры: online, triggerSync (кнопка), открытие SPA (startSync извне),
- *     polling 60s (visible + есть pending), после успешной пачки.
+ * Порядок: строгий FIFO по индексу [status, created_at].
+ * Блокировка: только failed с исчерпанным retry, только своей заявки.
+ * Два счётчика: failedRuns (сеть, 3 → ручной режим) и retry_count команды.
+ * Лок Web Locks берётся на команду, не на весь запуск.
  */
 
-import { offlineDB } from "./offline-db.js";
 import { authStore } from "./auth-store.js";
+import { offlineDB } from "./offline-db.js";
 import { outboxQueue } from "./outbox-queue.js";
-import { buildBatch, buildCommand } from "./sync/batch-builder.js";
-import { MAX_RETRIES, getNextRetryAt } from "./sync/backoff.js";
-import { generateBatchId } from "./utils/uuid.js";
-import { withSyncLock } from "./utils/sync-lock.js";
 import { notify } from "./components/notify.js";
 import { logHistoryAction } from "./history-logger.js";
-import { ApiService } from "./api-service.js";
-import { withIdbWriteLock } from "./utils/idb-write-lock.js";
-const POLL_INTERVAL_MS = 60_000;
-const NETWORK_RETRY_COOLDOWN_MS = 30_000;
-const AUTH_RETRY_COOLDOWN_MS = 30_000;
-const PENDING_BATCH_ID_KEY = "pendingBatchId";
-const PENDING_BATCH_UUIDS_KEY = "pendingBatchUuids";
+import { buildCommand } from "./sync/batch-builder.js";
+import { MAX_RETRIES, getNextRetryAt, isRetryExhausted } from "./sync/backoff.js";
+import { generateBatchId } from "./utils/uuid.js";
+
+const CMD_LOCK = "lift-sync-command";
+
+const CFG_MANUAL = "sync_manual_mode";
+const CFG_FAILED_RUNS = "sync_failed_runs";
+
+const MAX_FAILED_RUNS = 3;
+
+const DELAY_ONLINE = 5000;
+const DELAY_START = 3000;
+const DELAY_VISIBILITY = 2000;
+const PERIODIC_INTERVAL = 60000;
+
+const NO_RIGHTS_TEXT = {
+  CloseTicket: "Недостаточно прав для этого действия. Заявка не закрыта.",
+  CreateTicket: "Недостаточно прав для этого действия. Заявка не создана.",
+  EditTicket: "Недостаточно прав для этого действия. Изменения не применены.",
+  AddComment: "Недостаточно прав для этого действия. Комментарий не добавлен.",
+};
+
+const NETWORK_CODES = new Set([
+  "network_error",
+  "timeout",
+  "aborted",
+  "invalid_response",
+  "rate_limited",
+]);
+
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
+
+/** Ключ блокировки заявки: ticket_id ?? offline_uuid (§7.3). */
+function lockKeyOf(cmd) {
+  if (cmd.ticket_id != null && cmd.ticket_id !== "") return String(cmd.ticket_id);
+  if (cmd.offline_uuid) return String(cmd.offline_uuid);
+  return "cmd:" + cmd.command_uuid;
+}
+
+/**
+ * Web Locks на одну команду. ifAvailable — если другая вкладка уже
+ * держит лок, не ждём: она сама возьмёт старейшую eligible.
+ * Без navigator.locks работаем без лока (однооконный режим).
+ */
+async function withCommandLock(fn) {
+  if (!navigator.locks?.request) return fn();
+  return navigator.locks.request(CMD_LOCK, { ifAvailable: true }, async (lock) => {
+    if (!lock) return { skipped: true };
+    return fn();
+  });
+}
 
 export class SyncManager {
   /**
-   * @param {ApiService} api
-   * @param {Object} router
-   * @param {(openTickets: Array) => void} onOpenTicketsUpdated
-   * @param {Object} [opts]
-   * @param {(cmd, existingTickets) => Promise<boolean>} [opts.onDuplicateDetected]
-   *   Модалка duplicate_detected. Возвращает true = создать дубликат (force_create),
-   *   false = отменить. По умолчанию — false (без модалки, для тестов).
+   * Совместимость вызова: (api, router, options) и устаревший
+   * (api, router, onOpenTicketsUpdated, options). Колбэк игнорируется —
+   * списки обновляются событиями, а не прямой передачей массива.
    */
-  constructor(api, router, onOpenTicketsUpdated, opts = {}) {
+  constructor(api, router, legacyCallbackOrOptions, maybeOptions) {
     this.api = api;
     this.router = router;
-    this.onOpenTicketsUpdated = onOpenTicketsUpdated;
-    this.onDuplicateDetected =
-      typeof opts.onDuplicateDetected === "function"
-        ? opts.onDuplicateDetected
-        : () => Promise.resolve(false);
 
-    this.isSyncing = false;
+    const options =
+      legacyCallbackOrOptions && typeof legacyCallbackOrOptions !== "function"
+        ? legacyCallbackOrOptions
+        : maybeOptions || {};
+
+    // Модалка дубликата в фоне не открывается (§13.2).
+    // Хэндл сохранён для экрана очереди — вызывается по клику.
+    this._onDuplicateDetected = options.onDuplicateDetected || null;
+
+    this._syncing = false;
+    this._manualMode = false;
+    this._failedRuns = 0;
+    this._flagsLoaded = false;
     this._cooldownUntil = 0;
-    this._stopRequested = false;
-    this._pollIntervalId = null;
-    this._successCount = 0;
-    this._archivedCount = 0;
+    this._notBefore = nowSec() + DELAY_START / 1000;
 
-    this._lifecycleAbort = new AbortController();
+    this._progress = { done: 0, total: 0, active: false };
+
+    this._onlineTimer = null;
+    this._visibilityTimer = null;
+    this._periodicTimer = null;
+    this._startTimer = null;
+    this._stopped = false;
+
+    this._onOnline = this._onOnline.bind(this);
+    this._onVisibility = this._onVisibility.bind(this);
+    this._onTriggerSync = this._onTriggerSync.bind(this);
+
     this._bindTriggers();
-
-    // Совместимость: tickets-controller._updateSyncButton() читает
-    // window.syncManagerInstance.isSyncing и ._cooldownUntil
-    if (typeof window !== "undefined") {
-      window.syncManagerInstance = this;
-    }
   }
 
-  // =========================================================================
-  // Триггеры
-  // =========================================================================
+  // --- Публичное состояние ---
+
+  get isSyncing() {
+    return this._syncing;
+  }
+
+  get manualMode() {
+    return this._manualMode;
+  }
+
+  get failedRuns() {
+    return this._failedRuns;
+  }
+
+  getProgress() {
+    return { ...this._progress };
+  }
+
+  // --- Триггеры (§8.1) ---
 
   _bindTriggers() {
-    const signal = this._lifecycleAbort.signal;
+    window.addEventListener("online", this._onOnline);
+    document.addEventListener("visibilitychange", this._onVisibility);
+    window.addEventListener("triggerSync", this._onTriggerSync);
 
-    window.addEventListener("online", () => this.startSync(), { signal });
+    // Открытие SPA — 3 с. Более ранний вызов startSync() из main.js
+    // будет отложен до этого момента, а не сожжёт попытку впустую.
+    this._startTimer = setTimeout(() => {
+      this._startTimer = null;
+      this.startSync();
+    }, DELAY_START);
 
-    window.addEventListener("triggerSync", () => this.startSync(), { signal });
-
-    window.addEventListener(
-      ApiService.AUTH_LOST_EVENT,
-      () => {
-        this._stopRequested = true;
-        this._cooldownUntil = Date.now() + AUTH_RETRY_COOLDOWN_MS;
-        try {
-          this.api.abortTag("sync");
-        } catch (e) {
-          /* ignore */
-        }
-      },
-      { signal },
-    );
-
-    document.addEventListener(
-      "visibilitychange",
-      () => {
-        if (document.visibilityState === "visible") this._pollOnce();
-      },
-      { signal },
-    );
-
-    this._pollIntervalId = setInterval(
-      () => this._pollOnce(),
-      POLL_INTERVAL_MS,
-    );
+    this._periodicTimer = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      this.startSync();
+    }, PERIODIC_INTERVAL);
   }
 
-  async _pollOnce() {
-    if (this.isSyncing) return;
+  _onOnline() {
+    // navigator.onLine врёт раньше, чем связь реально работает:
+    // DHCP, DNS, captive portal. Debounce 5 с, таймер не плодим.
+    if (this._onlineTimer) clearTimeout(this._onlineTimer);
+    this._onlineTimer = setTimeout(() => {
+      this._onlineTimer = null;
+      this.startSync();
+    }, DELAY_ONLINE);
+  }
+
+  _onVisibility() {
     if (document.visibilityState !== "visible") return;
-    if (!authStore.hasAccess()) return;
-    if (Date.now() < this._cooldownUntil) return;
-
-    const pending = await offlineDB.getOutboxCount();
-    if (pending > 0) this.startSync();
+    if (this._visibilityTimer) clearTimeout(this._visibilityTimer);
+    this._visibilityTimer = setTimeout(() => {
+      this._visibilityTimer = null;
+      this.startSync();
+    }, DELAY_VISIBILITY);
   }
 
-  // =========================================================================
-  // Публичный запуск
-  // =========================================================================
-
-  async startSync() {
-    if (this.isSyncing) return;
-    if (!authStore.hasAccess()) return;
-
-    if (Date.now() < this._cooldownUntil) {
-      const waitMins = Math.ceil((this._cooldownUntil - Date.now()) / 60000);
-      notify.warning(
-        `Синхронизация заблокирована. Попробуйте через ${waitMins} мин.`,
-      );
+/**
+   * Кнопка «Синхронизировать» (offline-banner, queue-controller).
+   * Единственный триггер, который сбрасывает ручной режим (п. 2.10).
+   * Программный вызов может opt-out: dispatchEvent(new CustomEvent(
+   * "triggerSync", { detail: { manual: false } })).
+   */
+  _onTriggerSync(e) {
+    if (e?.detail?.manual === false) {
+      this.startSync();
       return;
     }
-
-    const pending = await offlineDB.getOutboxCount();
-    if (pending === 0) return;
-
-    this._stopRequested = false;
-    this._successCount = 0;
-    this._archivedCount = 0;
-    this.isSyncing = true;
-    this._emitStateChanged();
-
-    const btn = document.getElementById("refreshBtn");
-    if (btn) btn.classList.add("is-syncing");
-
-    try {
-      await withSyncLock(async () => {
-        // Внутривкладочный mutex: пока SyncManager обрабатывает
-        // пачку (updateOutboxCommand + deleteOutboxCommands + config),
-        // NotificationsPoller не полезет в те же stores. Web Locks
-        // выше сериализует вкладки, этот — операции внутри вкладки.
-        await withIdbWriteLock(async () => {
-          await this._syncLoop();
-        });
-      });
-    } catch (err) {
-      console.error("[SyncManager] Ошибка синхронизации:", err);
-      logHistoryAction(
-        "Сбой синхронизации: " + (err.message || "неизвестная ошибка"),
-      );
-    } finally {
-      this.isSyncing = false;
-      if (btn) btn.classList.remove("is-syncing");
-      this._emitStateChanged();
-    }
+    this.syncNow();
   }
 
-  // =========================================================================
-  // Основной цикл
-  // =========================================================================
+  /* async startSync(opts = {}) {
+    if (this._stopped || this._syncing) return;
+    if (!navigator.onLine || !authStore.hasAccess()) return;
 
-  async _syncLoop() {
-    this._hadSyncWork = false;
-    while (!this._stopRequested) {
-      if (!authStore.hasAccess()) break;
+    await this._loadFlags();
 
-      const pending = await offlineDB.getPendingBatch(50);
-      if (pending.length === 0) break;
-
-      const currentUser = authStore.getUser();
-      const commands = buildBatch(pending, currentUser);
-      if (commands.length === 0) break; // все в backoff
-
-      const batchId = await this._getOrCreateBatchId(commands);
-
-      try {
-        const response = await this.api.post(
-          { action: "syncCommands", batch_id: batchId, commands },
-          `Синхронизация (${commands.length} команд)...`,
-          "sync",
-        );
-
-        // Порядок важен: offline (сеть упала / таймаут / сервер вернул не-JSON)
-        // обрабатываем как retryable-ошибку — ставим cooldown, чтобы не бомбить
-        // сервер. Ручной abort (AUTH_LOST через abortTag, отмена по кнопке) —
-        // это сигнал остановки, а не ошибка: break без cooldown, команды
-        // остаются pending для следующей сессии.
-        //
-        // Признаки:
-        //   network_error + offline: true           — fetch reject (сеть упала)
-        //   invalid_response + offline: true         — Content-Type не JSON
-        //   aborted + reason: 'timeout' + offline    — Q8 таймаут
-        //   aborted + reason: 'manual'  (без offline) — ручной abort
-        if (
-          response &&
-          (response.code === "network_error" || response.offline)
-        ) {
-          this._cooldownUntil = Date.now() + NETWORK_RETRY_COOLDOWN_MS;
-          logHistoryAction("Сеть недоступна. Повтор через 30 сек.");
-          break;
+    const manual = opts.manual === true;
+    if (!manual) {
+      if (this._manualMode) return;
+      const now = nowSec();
+      if (now < this._cooldownUntil || now < this._notBefore) {
+        const wait = Math.max(this._cooldownUntil, this._notBefore) - now;
+        if (!this._startTimer) {
+          this._startTimer = setTimeout(() => {
+            this._startTimer = null;
+            this.startSync();
+          }, Math.max(wait, 1) * 1000);
         }
-
-        if (response && response.code === "aborted") {
-          // AUTH_LOST или ручная отмена — команды остаются pending.
-          break;
-        }
-        if (response && response.status === "error") {
-          // Ошибка верхнего уровня
-          if (response.code === "rate_limited") {
-            const waitSec =
-              response.retryAfterSec || response.retry_after || 60;
-            this._cooldownUntil = Date.now() + waitSec * 1000;
-            await this._clearBatchId();
-            logHistoryAction(`Rate-limit: повтор через ${waitSec}s`);
-            notify.syncError({ reason: "rate_limited", retryAfter: waitSec });
-            break;
-          }
-
-          // invalid_input / etc — пометить как failed (retry не поможет)
-          await this._markBatchFailed(commands, response.code || "batch_error");
-          await this._clearBatchId();
-          logHistoryAction(
-            `Синхронизация отклонена: ${response.message || response.code}`,
-          );
-          break;
-        }
-
-       // Успех или частичный успех (поддерживаем и response.data, и корень response)
-        const payload = response.data || response;
-        await this._processResults(payload, commands, pending);
-        await this._clearBatchId();
-
-        // 💡 Обновляем UI после КАЖДОЙ пачки (индикатор, очередь, таблица)
-        this._emitStateChanged();
-
-         const remaining = await offlineDB.getOutboxCount();
-        if (remaining === 0) break;
-        
-        if (remaining >= pending.length) {
-            console.warn('[SyncManager] Очередь не уменьшилась. Принудительно очищаем проблемные команды.');
-            
-            // Безопасно извлекаем массив результатов. 
-            // Если response.data нет (например, replay кэша), берем из корня response.
-            const payload = response.data || response;
-            const resultsArray = Array.isArray(payload.results) ? payload.results : [];
-            
-            // Если сервер вернул результаты — чистим по ним. 
-            // Если нет — чистим по текущей пачке pending (чтобы избежать вечного цикла).
-            const stuckUuids = resultsArray.length > 0
-                ? resultsArray.map(r => r.command_uuid).filter(Boolean)
-                : pending.map(p => p.command_uuid).filter(Boolean);
-                
-            if (stuckUuids.length > 0) {
-                await offlineDB.deleteOutboxCommands(stuckUuids);
-            }
-            break;
-        }
-      } catch (err) {
-        console.error("[SyncManager] Batch send error:", err);
-        await this._markBatchFailed(commands, "send_exception");
-        await this._clearBatchId();
-        break;
+        return;
       }
     }
 
-    // Финал: если outbox пуст — обновить открытые и уведомить
-    const remaining = await offlineDB.getOutboxCount();
-    if (remaining === 0) {
-      if (this._hadSyncWork) {
-        logHistoryAction("Все офлайн-действия синхронизированы.");
-        if (this._successCount > 0) {
-          notify.syncSuccess({ success: this._successCount });
-        }
-        await this._refreshOpenTickets();
-      }
-    }
-  }
-
-  // =========================================================================
-  // Обработка результатов
-  // =========================================================================
-
-     async _processResults(data, batchCommands, outboxRecords) {
-        if (!data || !Array.isArray(data.results)) return;
-
-        const toRemove = [];
-        const toRetry = [];
-        const toDuplicate = [];
-
-        for (const result of data.results) {
-            const record = outboxRecords.find(r => r.command_uuid === result.command_uuid);
-
-            // ЖЕЛЕЗОБЕТОННАЯ ЗАЩИТА: если команда не найдена в памяти,
-            // мы всё равно удаляем её из базы по ID, чтобы не зацикливаться.
-            if (!record) {
-                toRemove.push(result.command_uuid);
-                continue;
-            }
-
-            switch (result.status) {
-                case 'success':
-                case 'ignored':
-                case 'archived':
-                    toRemove.push(result.command_uuid);
-                    if (result.status === 'success') this._successCount += 1;
-                    if (result.status === 'archived') {
-                        this._archivedCount += 1;
-                        notify.syncPartial({
-                            archived: 1,
-                            message: this._buildArchivedMessage(result)
-                        });
-                    }
-                    break;
-
-                case 'failed':
-                    toRetry.push({ record, reason: result.reason || 'server_error' });
-                    break;
-
-                case 'duplicate_detected':
-                    toDuplicate.push({ record, result });
-                    break;
-            }
-        }
-
-        if (toRemove.length > 0) {
-            console.log('[SyncManager] Удаляем успешные/игнорируемые команды из базы:', toRemove);
-            await offlineDB.deleteOutboxCommands(toRemove);
-        }
-        for (const { record, reason } of toRetry) {
-            await this._scheduleRetryOne(record, reason);
-        }
-
-        for (const { record, result } of toDuplicate) {
-            await this._handleDuplicate(record, result);
-        }
-
-        await this._applyCreatedTickets(data.created_tickets);
-    }
-
-  async _handleDuplicate(record, result) {
-    const existingTickets = result.existing_tickets || [];
-
-    let confirmed = false;
+    let counts;
     try {
-      confirmed = await this.onDuplicateDetected(record, existingTickets);
+      counts = await offlineDB.getOutboxCounts();
     } catch (e) {
-      console.error("[SyncManager] onDuplicateDetected error:", e);
-      confirmed = false;
+      console.warn("[SyncManager] Очередь недоступна:", e);
+      return;
     }
-
-    if (!confirmed) {
-      await offlineDB.deleteOutboxCommands([record.command_uuid]);
-      logHistoryAction(`Создание дубликата отменено: ${record.command_uuid}`);
-      this._emitStateChanged();
+    if (counts.pending === 0) {
+      this._publishProgress(0, 0, false);
+      window.dispatchEvent(new Event("refreshSyncState"));
       return;
     }
 
-    // Повтор с force_create: true — отдельный запрос, новый batch_id
+    this._syncing = true;
 
-    // Повтор с force_create: true — отдельный запрос, новый batch_id
-    const currentUser = authStore.getUser();
-    const forceCmd = buildCommand(record, currentUser, { forceCreate: true });
-    const newBatchId = generateBatchId();
+    let done = 0;
+    let terminalSeen = false;
+    let networkFailure = false;
+    let serverReject = false;
+    let authLost = false;
+    let touchedTickets = false;
 
     try {
-      const response = await this.api.post(
-        { action: "syncCommands", batch_id: newBatchId, commands: [forceCmd] },
-        "Создание дубликата...",
+      const blockedKeys = await offlineDB.getBlockedKeys();
+
+      while (!this._stopped) {
+        if (!navigator.onLine) {
+          networkFailure = true;
+          break;
+        }
+
+        // Лок на команду: выбор и отправка внутри одного удержания,
+        // иначе два таба возьмут одну и ту же старейшую запись.
+        const outcome = await withCommandLock(async () => {
+          const [cmd] = await offlineDB.getPendingBatch(1, { blockedKeys });
+          if (!cmd) return { kind: "empty" };
+          return this._sendOne(cmd, blockedKeys);
+        });
+
+        // Простой: лок занят, всё в backoff, все ключи заблокированы.
+        // Не отказ запуска — счётчик не трогаем.
+        if (!outcome || outcome.skipped || outcome.kind === "empty") break;
+
+        if (outcome.kind === "auth") {
+          authLost = true;
+          break;
+        }
+        if (outcome.kind === "network") {
+          networkFailure = true;
+          if (outcome.retryAfter) {
+            this._cooldownUntil = nowSec() + Number(outcome.retryAfter);
+          }
+          break;
+        }
+        if (outcome.kind === "blocked_run") {
+          // Верхнеуровневый status:"error" — команда не выполнена (§10.2).
+          serverReject = true;
+          break;
+        }
+
+        if (done === 0) this._publishProgress(0, counts.pending, true);
+        done++;
+        this._publishProgress(done, counts.pending, true);
+
+        if (outcome.terminal) terminalSeen = true;
+        if (outcome.touchedTickets) touchedTickets = true;
+      }
+    } catch (e) {
+      console.error("[SyncManager] Сбой запуска:", e);
+      networkFailure = true;
+    } finally {
+      this._syncing = false;
+      this._publishProgress(done, counts.pending, false);
+    }
+
+    if (!authLost) {
+      if (terminalSeen) {
+        // Любой success / ignored / archived сбрасывает счётчик (§8.2).
+        if (this._failedRuns !== 0) {
+          this._failedRuns = 0;
+          await this._persistFlags();
+        }
+      } else if (networkFailure || serverReject) {
+        // Только фактическая неудача. Серверные failed владеет
+        // retry_count команды — здесь их не считаем.
+        this._failedRuns += 1;
+        if (this._failedRuns >= MAX_FAILED_RUNS && !this._manualMode) {
+          this._manualMode = true;
+          notify.warning(
+            "Синхронизация приостановлена. Нажмите «Синхронизировать»",
+            { timeout: 0, persistent: true, once: true },
+          );
+          logHistoryAction(
+            "Синхронизация приостановлена: 3 запуска без успешных команд.",
+          );
+        }
+        await this._persistFlags();
+      } else if (done === 0) {
+        // Ни одной отправки и ни одной ошибки — ждём backoff точным таймером.
+        await this._scheduleBackoffWake();
+      }
+    }
+
+    window.dispatchEvent(new Event("refreshSyncState"));
+
+    if (touchedTickets) {
+      // п. 2.27: списки перечитываются событием, а не переданным массивом.
+      window.dispatchEvent(new Event("sync:fetch_open_tickets"));
+      window.dispatchEvent(new Event("sync:fetch_closed_tickets"));
+    }
+  } */
+
+
+  /** Кнопка «Синхронизировать»: сбрасывает ручной режим и счётчик. */
+  async syncNow() {
+    await this._loadFlags();
+    if (this._manualMode || this._failedRuns > 0) {
+      this._manualMode = false;
+      this._failedRuns = 0;
+      await this._persistFlags();
+      logHistoryAction("Синхронизация возобновлена вручную.");
+    }
+    this._cooldownUntil = 0;
+    this._notBefore = 0;
+    return this.startSync({ manual: true });
+  }
+
+  stop() {
+    this._stopped = true;
+    window.removeEventListener("online", this._onOnline);
+    document.removeEventListener("visibilitychange", this._onVisibility);
+    window.removeEventListener("triggerSync", this._onTriggerSync);
+    for (const key of ["_onlineTimer", "_visibilityTimer", "_startTimer"]) {
+      if (this[key]) {
+        clearTimeout(this[key]);
+        this[key] = null;
+      }
+    }
+    if (this._periodicTimer) {
+      clearInterval(this._periodicTimer);
+      this._periodicTimer = null;
+    }
+  }
+
+  // --- Персистентные флаги (§8.3) ---
+
+  async _loadFlags() {
+    if (this._flagsLoaded) return;
+    try {
+      const [manual, runs] = await Promise.all([
+        offlineDB.getConfig(CFG_MANUAL),
+        offlineDB.getConfig(CFG_FAILED_RUNS),
+      ]);
+      this._manualMode = manual === true || manual === "true";
+      this._failedRuns = Number(runs) || 0;
+    } catch (e) {
+      console.warn("[SyncManager] Флаги недоступны:", e);
+    }
+    this._flagsLoaded = true;
+  }
+
+  async _persistFlags() {
+    try {
+      await offlineDB.setConfig(CFG_MANUAL, this._manualMode);
+      await offlineDB.setConfig(CFG_FAILED_RUNS, this._failedRuns);
+    } catch (e) {
+      console.warn("[SyncManager] Не удалось сохранить флаги:", e);
+    }
+  }
+
+  // --- Прогресс (§13.4) ---
+
+  _publishProgress(done, total, active) {
+    this._progress = { done, total, active };
+    window.dispatchEvent(
+      new CustomEvent("sync:progress", { detail: { ...this._progress } }),
+    );
+
+    const btn = document.getElementById("syncIndicator");
+    if (btn && active && total > 0) {
+      btn.title = `Синхронизация: ${Math.min(done + 1, total)} из ${total}`;
+    }
+    const label = document.querySelector(".sync-indicator-progress");
+    if (label) {
+      label.textContent = active && total > 0 ? `${done} / ${total}` : "";
+    }
+  }
+
+  // --- Запуск ---
+
+  async startSync(opts = {}) {
+    if (this._stopped || this._syncing) return;
+    if (!navigator.onLine || !authStore.hasAccess()) return;
+
+    await this._loadFlags();
+
+    const manual = opts.manual === true;
+    if (!manual) {
+      if (this._manualMode) return;
+      const now = nowSec();
+      if (now < this._cooldownUntil || now < this._notBefore) {
+        const wait = Math.max(this._cooldownUntil, this._notBefore) - now;
+        if (!this._startTimer) {
+          this._startTimer = setTimeout(() => {
+            this._startTimer = null;
+            this.startSync();
+          }, Math.max(wait, 1) * 1000);
+        }
+        return;
+      }
+    }
+
+    let counts;
+    try {
+      counts = await offlineDB.getOutboxCounts();
+    } catch (e) {
+      console.warn("[SyncManager] Очередь недоступна:", e);
+      return;
+    }
+    if (counts.pending === 0) {
+      this._publishProgress(0, 0, false);
+      window.dispatchEvent(new Event("refreshSyncState"));
+      return;
+    }
+
+    this._syncing = true;
+    this._publishProgress(0, counts.pending, true);
+
+    let terminalSeen = false;
+    let networkFailure = false;
+    let authLost = false;
+    let touchedTickets = false;
+    let done = 0;
+
+    try {
+      const blockedKeys = await offlineDB.getBlockedKeys();
+
+      while (!this._stopped) {
+        if (!navigator.onLine) {
+          networkFailure = true;
+          break;
+        }
+
+        // Лок на команду: выбор и отправка внутри одного удержания,
+        // иначе два таба возьмут одну и ту же старейшую запись.
+        const outcome = await withCommandLock(async () => {
+          const [cmd] = await offlineDB.getPendingBatch(1, { blockedKeys });
+          if (!cmd) return { kind: "empty" };
+          return this._sendOne(cmd, blockedKeys);
+        });
+
+        if (!outcome || outcome.skipped || outcome.kind === "empty") break;
+
+        if (outcome.kind === "auth") {
+          authLost = true;
+          break;
+        }
+        if (outcome.kind === "network") {
+          networkFailure = true;
+          if (outcome.retryAfter) {
+            this._cooldownUntil = nowSec() + Number(outcome.retryAfter);
+          }
+          break;
+        }
+        if (outcome.kind === "blocked_run") break;
+
+        done++;
+        this._publishProgress(done, counts.pending, true);
+
+        if (outcome.terminal) terminalSeen = true;
+        if (outcome.touchedTickets) touchedTickets = true;
+      }
+    } catch (e) {
+      console.error("[SyncManager] Сбой запуска:", e);
+      networkFailure = true;
+    } finally {
+      this._syncing = false;
+      this._publishProgress(done, counts.pending, false);
+    }
+
+    if (!authLost) {
+      if (terminalSeen) {
+        // Любой успех сбрасывает счётчик запусков (§8.2, п. 2.12).
+        if (this._failedRuns !== 0) {
+          this._failedRuns = 0;
+          await this._persistFlags();
+        }
+      } else if (networkFailure || done === 0) {
+        this._failedRuns += 1;
+        if (this._failedRuns >= MAX_FAILED_RUNS && !this._manualMode) {
+          this._manualMode = true;
+          notify.warning(
+            "Синхронизация приостановлена. Нажмите «Синхронизировать»",
+            { timeout: 0, persistent: true, once: true },
+          );
+          logHistoryAction(
+            "Синхронизация приостановлена: 3 запуска без успешных команд.",
+          );
+        }
+        await this._persistFlags();
+      }
+    }
+
+    window.dispatchEvent(new Event("refreshSyncState"));
+
+    if (touchedTickets) {
+      // п. 2.27: списки перечитываются事件ом, а не переданным массивом.
+      window.dispatchEvent(new Event("sync:fetch_open_tickets"));
+      window.dispatchEvent(new Event("sync:fetch_closed_tickets"));
+    }
+  }
+
+  // --- Одна команда ---
+
+  async _sendOne(cmd, blockedKeys) {
+    const user = authStore.getUser();
+    const batchId = await this._batchIdFor(cmd);
+    const command = buildCommand(cmd, user, {
+      forceCreate: cmd.confirmed === true,
+    });
+
+    let resp;
+    try {
+      resp = await this.api.post(
+        { action: "syncCommands", batch_id: batchId, commands: [command] },
+        null,
         "sync",
       );
-
-      if (response && response.status === "ok") {
-        const forceResult = response.data?.results?.[0];
-        if (
-          forceResult?.status === "success" ||
-          forceResult?.status === "ignored"
-        ) {
-          await offlineDB.deleteOutboxCommands([record.command_uuid]);
-          await this._applyCreatedTickets(response.data.created_tickets);
-          notify.success("Заявка создана.");
-          this._emitStateChanged();
-          return;
-        }
-      }
-      // Не удалось — retry с backoff
-      await this._scheduleRetryOne(record, "force_create_failed");
     } catch (e) {
-      console.error("[SyncManager] force_create error:", e);
-      await this._scheduleRetryOne(record, "force_create_exception");
+      console.warn("[SyncManager] Сеть недоступна:", e);
+      return { kind: "network" };
     }
-  }
 
-  async _scheduleRetryOne(record, reason) {
-    const nextRetryCount = (record.retry_count || 0) + 1;
-    if (nextRetryCount > MAX_RETRIES) {
-      await outboxQueue.markFailed(record.command_uuid, "retry_exhausted");
-      notify.syncError({ reason: "retry_exhausted" });
+    if (!resp) return { kind: "network" };
+    if (resp._authLost) return { kind: "auth" };
+    if (resp.offline === true || NETWORK_CODES.has(resp.code)) {
+      return { kind: "network", retryAfter: resp.retry_after };
+    }
+
+    // Ошибка верхнего уровня: команда не выполнена, остаётся pending (§10.2).
+    if (resp.status === "error") {
       logHistoryAction(
-        `Команда ${record.command_uuid}: retry_exhausted. ` +
-          `Действие не синхронизировано после ${MAX_RETRIES} попыток.`,
+        `Синхронизация отклонена: ${resp.message || resp.code || "ошибка сервера"}`,
       );
-    } else {
-      const nextRetryAt = getNextRetryAt(nextRetryCount);
-      await offlineDB.updateOutboxCommand(record.command_uuid, {
-        retry_count: nextRetryCount,
-        next_retry_at: nextRetryAt,
-        last_error: String(reason || "unknown"),
-        status: "pending",
+      return { kind: "blocked_run" };
+    }
+    if (resp.status !== "ok") return { kind: "blocked_run" };
+
+    // Переходная мера: ответ может лежать плоско (§5).
+    const data = resp.data || resp;
+    const result = Array.isArray(data.results) ? data.results[0] : null;
+    if (!result) return { kind: "blocked_run" };
+
+    return this._applyResult(cmd, result, data, blockedKeys);
+  }
+
+  /**
+   * batch_id deprecated (§11.2), но переиспользуется при повторе той же
+   * команды. Состав всегда один — отслеживать нечего.
+   */
+  async _batchIdFor(cmd) {
+    if (cmd.batch_id) return cmd.batch_id;
+    const batchId = generateBatchId();
+    try {
+      await offlineDB.updateOutboxCommand(cmd.command_uuid, {
+        batch_id: batchId,
       });
+    } catch (e) {
+      console.warn("[SyncManager] batch_id не сохранён:", e);
     }
+    return batchId;
   }
 
-  async _markBatchFailed(commands, reason) {
-    for (const cmd of commands) {
-      await outboxQueue.markFailed(cmd.command_uuid, reason);
-    }
-  }
+ async _applyResult(cmd, result, data, blockedKeys) {
+    const status = result.status;
+    const reason = this._reasonOf(result);
+    const message = result.message || "";
+    const ticketRef = cmd.ticket_id ?? cmd.offline_uuid ?? "—";
 
-  async _applyCreatedTickets(createdTickets) {
-    if (!createdTickets || typeof createdTickets !== "object") return;
-    const all = await offlineDB.getAllPending();
-    for (const cmd of all) {
-      if (
-        cmd.ticket_id === null &&
-        cmd.offline_uuid &&
-        createdTickets[cmd.offline_uuid]
-      ) {
+    // --- success ---
+    if (status === "success") {
+      await outboxQueue.remove([cmd.command_uuid]);
+      logHistoryAction(
+        message || `Синхронизировано: ${cmd.command_type} №${ticketRef}`,
+      );
+      this._announceCreatedTicket(cmd, result, data);
+      return { kind: "done", terminal: true, touchedTickets: true };
+    }
+
+    // --- ignored: идемпотентность, без уведомления ---
+    if (status === "ignored") {
+      await outboxQueue.remove([cmd.command_uuid]);
+      this._announceCreatedTicket(cmd, result, data);
+      return { kind: "done", terminal: true, touchedTickets: true };
+    }
+
+    // --- archived → rejected (п. 2.13) ---
+    if (status === "archived") {
+      await offlineDB.updateOutboxCommand(cmd.command_uuid, {
+        status: "rejected",
+        reason,
+        last_error: message || reason,
+        server_message: message,
+      });
+
+      if (reason === "no_rights") {
+        // п. 2.21: текст по типу, persistent, номер — в историю.
+        notify.error(
+          NO_RIGHTS_TEXT[cmd.command_type] ||
+            "Недостаточно прав для этого действия.",
+          { timeout: 0, persistent: true },
+        );
+        logHistoryAction(
+          `Отказ в правах: ${cmd.command_type}, заявка №${ticketRef}.`,
+        );
+        window.dispatchEvent(new Event("sync:fetch_dicts"));
+      } else {
+        notify.warning(
+          `Действие отклонено сервером: ${message || reason}. Запись осталась в очереди.`,
+          { once: true },
+        );
+        logHistoryAction(
+          `Отклонено: ${cmd.command_type} №${ticketRef} — ${message || reason}`,
+        );
+      }
+      return { kind: "done", terminal: true, touchedTickets: false };
+    }
+
+    // --- duplicate_detected → needs_confirmation (§13.2) ---
+    if (status === "duplicate_detected") {
+      const existing = result.existing_tickets || data.existing_tickets || [];
+      await offlineDB.updateOutboxCommand(cmd.command_uuid, {
+        status: "needs_confirmation",
+        reason: "duplicate_detected",
+        existing_tickets: existing,
+        last_error: message || "На объект уже есть активная заявка",
+      });
+
+      // В фоне — уведомление со ссылкой, НЕ модалка. Локи свободны.
+      notify.warning("Требуется подтверждение дубликата", {
+        timeout: 0,
+        persistent: true,
+        actionText: "Открыть очередь",
+        onAction: () => this.router?.navigate("#/queue"),
+      });
+      logHistoryAction(`Дубликат требует подтверждения: заявка №${ticketRef}.`);
+      return { kind: "done", terminal: false, touchedTickets: false };
+    }
+
+    // --- failed: единственное, что инкрементирует retry_count ---
+    if (status === "failed") {
+      const retryCount = (Number(cmd.retry_count) || 0) + 1;
+
+      if (isRetryExhausted(retryCount)) {
+        await outboxQueue.markFailed(
+          cmd.command_uuid,
+          message || reason || "internal_error",
+        );
+        blockedKeys.add(lockKeyOf(cmd));
+        logHistoryAction(
+          `Ошибка синхронизации ${cmd.command_type} №${ticketRef}: попытки исчерпаны. Команды этой заявки ждут.`,
+        );
+        notify.error(
+          `Не удалось синхронизировать действие по заявке №${ticketRef}. Повторите из очереди.`,
+          { once: true },
+        );
+      } else {
         await offlineDB.updateOutboxCommand(cmd.command_uuid, {
-          ticket_id: createdTickets[cmd.offline_uuid],
+          retry_count: retryCount,
+          next_retry_at: getNextRetryAt(retryCount),
+          last_error: message || reason || "internal_error",
+          status: "pending",
         });
       }
+      return { kind: "done", terminal: false, touchedTickets: false };
     }
+
+    console.warn("[SyncManager] Неизвестный статус результата:", status);
+    return { kind: "blocked_run" };
   }
 
-  _buildArchivedMessage(result) {
-    const map = {
-      no_rights: "нет прав на действие",
-      ticket_already_closed: "заявка уже закрыта",
-      ticket_not_found: "заявка не найдена",
-      contract_terminated: "договор расторгнут",
-      photo_limit_exceeded: "лимит фото превышен",
-      validation_error: "ошибка валидации",
-    };
-    const reason = map[result.reason] || result.reason || "причина неизвестна";
-    return `Действие отброшено: ${reason}`;
+  /**
+   * Переходная мера (§4): reason может отсутствовать — разбираем message.
+   * additionally: сервер отдаёт ticket_closed / not_found вместо
+   * протокольных имён (§14) — нормализуем.
+   */
+  _reasonOf(result) {
+    const raw =
+      result.reason ||
+      (typeof result.message === "string"
+        ? result.message.split(":")[0].trim()
+        : "") ||
+      "";
+    if (raw === "ticket_closed") return "ticket_already_closed";
+    if (raw === "not_found") return "ticket_not_found";
+    return raw;
   }
 
-  // =========================================================================
-  // Идемпотентность batch_id
-  // =========================================================================
+  /**
+   * Прямое обновление одной записи вместо _applyCreatedTickets.
+   * Созданная офлайн-заявка получает серверный номер в кэше журнала.
+   */
+ /*  async _linkCreatedTicket(cmd, result, data) {
+    if (cmd.command_type !== "CreateTicket") return;
 
-  async _getOrCreateBatchId(commands) {
-    const uuids = commands
-      .map((c) => c.command_uuid)
-      .sort()
-      .join(",");
-    const storedBatch = await offlineDB.getConfig(PENDING_BATCH_ID_KEY);
-    const storedUuids = await offlineDB.getConfig(PENDING_BATCH_UUIDS_KEY);
+    const map = data.created_tickets || {};
+    const serverId =
+      result.server_id ??
+      result.ticket_id ??
+      map[cmd.offline_uuid] ??
+      map[cmd.command_uuid] ??
+      null;
 
-    // Если состав пачки не изменился — переиспользуем batch_id
-    if (storedBatch && storedUuids === uuids) return storedBatch;
+    if (serverId == null || !cmd.offline_uuid) return;
 
-    const newBatchId = generateBatchId();
-    await offlineDB.setConfig(PENDING_BATCH_ID_KEY, newBatchId);
-    await offlineDB.setConfig(PENDING_BATCH_UUIDS_KEY, uuids);
-    return newBatchId;
-  }
-
-  async _clearBatchId() {
-    await offlineDB.setConfig(PENDING_BATCH_ID_KEY, null);
-    await offlineDB.setConfig(PENDING_BATCH_UUIDS_KEY, null);
-  }
-
-  // =========================================================================
-  // Прочее
-  // =========================================================================
-
-  async _refreshOpenTickets() {
-    if (!this.onOpenTicketsUpdated) return;
     try {
-      const openData = await this.api.post({ data: "open" }, null, "sync");
-      if (Array.isArray(openData)) {
-        await offlineDB.saveTickets("open", openData);
-        this.onOpenTicketsUpdated(openData);
-      }
-    } catch (e) {
-      console.warn(
-        "[SyncManager] Не удалось обновить open после синхронизации:",
-        e,
+      const cached = await offlineDB.getTickets("open");
+      const idx = cached.findIndex(
+        (t) => String(t.id) === String(cmd.offline_uuid),
       );
+      if (idx < 0) return;
+      const merged = {
+        ...cached[idx],
+        id: serverId,
+        call_id: serverId,
+        call_number: String(serverId),
+        isOffline: false,
+      };
+      delete merged.offline_uuid;
+      cached[idx] = merged;
+      await offlineDB.saveTickets("open", cached);
+    } catch (e) {
+      console.warn("[SyncManager] Не удалось связать локальную заявку:", e);
     }
+  } */
+
+  // --- Для экрана очереди ---
+
+  /**
+   * Модалка дубликата — только по клику из очереди (§13.2).
+   * Подтверждение живёт в поле записи confirmed, а не в payload:
+   * force_create проставляет сборщик из opts (п. 3.2 протокола).
+   */
+  async confirmDuplicate(commandUuid) {
+    const all = await offlineDB.getAllCommands();
+    const cmd = all.find((c) => c.command_uuid === commandUuid);
+    if (!cmd || cmd.status !== "needs_confirmation") return false;
+
+    const show =
+      this._onDuplicateDetected ||
+      ((record, existing) =>
+        import("./components/duplicate-ticket-modal.js").then((m) =>
+          m.duplicateTicketModal.show(record, existing),
+        ));
+
+    const confirmed = await show(cmd, cmd.existing_tickets || []);
+    if (!confirmed) return false;
+
+    await offlineDB.updateOutboxCommand(commandUuid, {
+      status: "pending",
+      confirmed: true,
+      next_retry_at: 0,
+    });
+    window.dispatchEvent(new Event("refreshSyncState"));
+    this.syncNow();
+    return true;
   }
 
-  _emitStateChanged() {
+  async cancelDuplicate(commandUuid) {
+    await outboxQueue.remove([commandUuid]);
     window.dispatchEvent(new Event("refreshSyncState"));
   }
 
-  destroy() {
-    this._lifecycleAbort?.abort();
-    this._lifecycleAbort = null;
-    if (this._pollIntervalId) {
-      clearInterval(this._pollIntervalId);
-      this._pollIntervalId = null;
+  async retryFailed(commandUuid) {
+    await offlineDB.updateOutboxCommand(commandUuid, {
+      status: "pending",
+      retry_count: 0,
+      next_retry_at: 0,
+      last_error: null,
+    });
+    window.dispatchEvent(new Event("refreshSyncState"));
+    this.syncNow();
+  }
+   /**
+   * Точный будильник по ближайшему next_retry_at.
+   * Без него backoff 30 с округляется периодическим тиком до 60 с.
+   * Записи с уже наступившим сроком не учитываем: они заблокированы
+   * ключом или их забрала другая вкладка — иначе получим горячий цикл.
+   */
+  async _scheduleBackoffWake() {
+    if (this._stopped || this._manualMode || this._startTimer) return;
+
+    let earliest = null;
+    try {
+      const all = await offlineDB.getAllCommands();
+      const now = nowSec();
+      for (const c of all) {
+        if (c.status !== "pending") continue;
+        const at = Number(c.next_retry_at) || 0;
+        if (at <= now) continue;
+        if (earliest == null || at < earliest) earliest = at;
+      }
+    } catch (e) {
+      console.warn("[SyncManager] Backoff-сроки недоступны:", e);
+      return;
     }
-    if (typeof window !== "undefined" && window.syncManagerInstance === this) {
-      window.syncManagerInstance = null;
+
+    if (earliest == null) return;
+    const wait = Math.min(Math.max(earliest - nowSec(), 1), 120);
+    this._startTimer = setTimeout(() => {
+      this._startTimer = null;
+      this.startSync();
+    }, wait * 1000);
+  }
+
+  /**
+   * Прямое обновление одной записи (п. 2.1) вместо _applyCreatedTickets.
+   * Адресат — открытая карточка офлайн-заявки: после удаления команды
+   * из outbox её offline_uuid больше не резолвится.
+   * Кэш tickets_cache содержит только серверные строки — сканировать
+   * его бессмысленно, журнал перечитывается по sync:fetch_open_tickets.
+   */
+  _announceCreatedTicket(cmd, result, data) {
+    if (cmd.command_type !== "CreateTicket" || !cmd.offline_uuid) return;
+
+    const map = data.created_tickets || {};
+    const serverId =
+      result.server_id ??
+      result.ticket_id ??
+      map[cmd.offline_uuid] ??
+      map[cmd.command_uuid] ??
+      null;
+
+    if (serverId == null) {
+      // §11.7: при ignored created_tickets не заполняется. Номер
+      // появится в журнале после перечитывания; карточку не трогаем.
+      console.warn(
+        "[SyncManager] created_tickets пуст, связать локальную заявку нельзя:",
+        cmd.offline_uuid,
+      );
+      return;
     }
+
+    window.dispatchEvent(
+      new CustomEvent("sync:ticket_created", {
+        detail: { offline_uuid: cmd.offline_uuid, ticket_id: serverId },
+      }),
+    );
   }
 }

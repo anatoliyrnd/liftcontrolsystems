@@ -195,7 +195,13 @@ function teardownApp() {
   if (tornDown) return;
   tornDown = true;
 
-  leaveAll();
+ leaveAll();
+
+  try {
+    detailsCtrl.destroy?.();
+  } catch (e) {
+    console.warn("[App] detailsCtrl.destroy:", e);
+  }
 
   try {
     themeCtrl?.unmount?.();
