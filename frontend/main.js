@@ -235,14 +235,20 @@ async function initAuthorizedApp() {
   if (initAuthorizedPromise) return initAuthorizedPromise;
   if (menuManager && authorizedForUserId === uid) return;
 
-  initAuthorizedPromise = (async () => {
+initAuthorizedPromise = (async () => {
     if (!menuManager) menuManager = new MenuManager(api, router, "dynamicMenu");
-    await menuManager.initialize();
+    try {
+        await menuManager.initialize();
+    } catch (e) {
+        // Fallback-меню уже отрисовано. Повтор config придёт от поллера
+        // через sync:fetch_staff/dicts (версии не применены → outdated).
+        console.warn("[App] config недоступен при старте:", e);
+    }
     await refreshAddresses({ silent: true });
     authorizedForUserId = uid;
-  })().finally(() => {
+})().finally(() => {
     initAuthorizedPromise = null;
-  });
+});
 
   return initAuthorizedPromise;
 }
