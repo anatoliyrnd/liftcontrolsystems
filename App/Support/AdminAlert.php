@@ -162,6 +162,14 @@ final class AdminAlert
             $secure = strtolower(self::conf('ADMIN_SMTP_SECURE') ?: 'ssl');
             if ($secure === 'ssl' || $secure === 'tls') {
                 $mail->SMTPSecure = $secure;
+
+// Джино хранит пароли в необратимом виде (bcrypt/argon2).
+// CRAM-MD5 требует обратимости, поэтому всегда даёт 535.
+// LOGIN безопасен поверх TLS: пароль идёт в base64, но канал
+// зашифрован. PLAIN — запасной вариант, тоже поверх TLS.
+// Порядок важен: сервер предлагает оба, PHPMailer попробует
+// сначала первый.
+                $mail->AuthType = 'LOGIN PLAIN';
             }
 
             // Отладка протокола — только в error_log. По умолчанию выкл:

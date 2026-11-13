@@ -28,7 +28,7 @@ import { InactivityTracker } from "./js/route/inactivity-tracker.js";
 import { logHistoryAction } from "./js/history-logger.js";
 import { offlineDB } from "./js/offline-db.js";
 import { flattenAddresses } from "./js/utils/address-flattener.js";
-import { syncTableSettingsFromStorage } from "./js/table/settings.js";
+import { applyUserSettings, resetSettings } from "./js/table/settings.js";
 import { registerSW } from "virtual:pwa-register";
 import { syncIndicator } from "./js/components/sync-indicator.js";
 import { offlineBanner } from "./js/components/offline-banner.js";
@@ -66,6 +66,13 @@ const TENANT_CACHE_KEY = "lift_tenant_info";
 const TENANT_TTL = 5 * 60 * 1000;
 
 /**
+ * 3.9: серверная часть настроек включается после готовности
+ * get_user_settings / save_user_settings на бэкенде (API_PROTOCOL §13).
+ * До этого работает только локальный per-user кэш.
+ */
+const SERVER_SETTINGS_ENABLED = false;
+
+/**
  * Единая точка очистки перед сменой маршрута.
  * Вызывается ДО замены DOM, поэтому unmount видит старую разметку.
  */
@@ -92,8 +99,8 @@ function leaveAll() {
 router.onBeforeNavigate(leaveAll);
 
 function activeTicketsController() {
-  if (openTicketsCtrl._isActive) return openTicketsCtrl;
-  if (closedTicketsCtrl._isActive) return closedTicketsCtrl;
+  if (openTicketsCtrl.isActive) return openTicketsCtrl;
+  if (closedTicketsCtrl.isActive) return closedTicketsCtrl;
   return null;
 }
 
@@ -104,6 +111,39 @@ function refreshSyncUi() {
     console.warn("[App] Не удалось обновить индикатор синхронизации:", e),
   );
   updateOutboxFlag();
+}
+
+/**
+ * 3.8/3.9: перечитывание per-user настроек в уже смонтированный журнал.
+ * Порядок обязателен — applyUserSettings сбрасывает scope на "open",
+ * refreshColumns первым делом возвращает scope своего экрана.
+ */
+async function refreshActiveJournalSettings() {
+  const ctrl = activeTicketsController();
+  try {
+    await ctrl?.refreshColumns?.();
+  } catch (e) {
+    console.warn("[App] Не удалось перечитать настройки журнала:", e);
+  }
+}
+
+/**
+ * 3.9, шаг «запрос сервера → применение → перезапись кэша».
+ * Сервер — источник правды только для order/hidden; ширины,
+ * сортировка, период и фильтры остаются локальными (3.3).
+ */
+async function loadServerSettings(uid) {
+  if (!SERVER_SETTINGS_ENABLED || uid == null || !navigator.onLine) return;
+  try {
+    const resp = await api.post({ data: "get_user_settings" }, null, "silent");
+    if (!resp || resp.status !== "ok" || resp.offline === true) return;
+    // Пользователь мог смениться, пока запрос был в пути.
+    if ((authStore.getUser()?.id ?? null) !== uid) return;
+    applyUserSettings(uid, resp.column_settings || null);
+    await refreshActiveJournalSettings();
+  } catch (e) {
+    console.warn("[App] get_user_settings недоступен:", e);
+  }
 }
 
 // --- 1.21: флаг непустой очереди для beforeunload ---
@@ -143,6 +183,7 @@ window.addEventListener("beforeunload", (e) => {
 
 window.addEventListener("online", updateOutboxFlag);
 window.addEventListener("offline", updateOutboxFlag);
+
 // --- Обновление схемы IndexedDB между вкладками ---
 // Регистрация ДО первого обращения к offlineDB: событие blocked
 // диспатчится синхронно внутри openDB и не переигрывается.
@@ -189,47 +230,51 @@ window.addEventListener("db:upgrade-required", () => {
     },
   );
 });
+
 // --- 1.23: полный teardown приложения ---
 let tornDown = false;
+
 function teardownApp() {
-    if (tornDown) return;
-    tornDown = true;
+  if (tornDown) return;
+  tornDown = true;
 
-    leaveAll();
+  leaveAll();
 
-    try {
-        detailsCtrl.destroy?.();
-    } catch (e) {
-        console.warn("[App] detailsCtrl.destroy:", e);
-    }
+  try {
+    detailsCtrl.destroy?.();
+  } catch (e) {
+    console.warn("[App] detailsCtrl.destroy:", e);
+  }
 
-    try {
-        syncManager?.stop();
-    } catch (e) {
-        console.warn("[App] syncManager.stop:", e);
-    }
-    syncManager = null;
+  try {
+    syncManager?.stop();
+  } catch (e) {
+    console.warn("[App] syncManager.stop:", e);
+  }
+  syncManager = null;
+  window.syncManagerInstance = null;
 
-    try {
-        themeCtrl?.unmount?.();
-    } catch (e) {
-        console.warn("[App] ThemeController.unmount:", e);
-    }
-    themeCtrl = null;
-window.syncManagerInstance = null; 
-    try {
-        notifPoller?.stop();
-    } catch (e) {
-        console.warn("[App] notifPoller.stop:", e);
-    }
-    notifPoller = null;
+  try {
+    themeCtrl?.unmount?.();
+  } catch (e) {
+    console.warn("[App] ThemeController.unmount:", e);
+  }
+  themeCtrl = null;
 
-    try {
-        inactivityTracker?.stopTracking();
-    } catch (e) {
-        console.warn("[App] inactivityTracker.stopTracking:", e);
-    }
-    inactivityTracker = null;
+  try {
+    notifPoller?.stop();
+  } catch (e) {
+    console.warn("[App] notifPoller.stop:", e);
+  }
+  notifPoller = null;
+  window.notificationsPollerInstance = null;
+
+  try {
+    inactivityTracker?.stopTracking();
+  } catch (e) {
+    console.warn("[App] inactivityTracker.stopTracking:", e);
+  }
+  inactivityTracker = null;
 }
 
 // bfcache: persisted=true — страница вернётся живой, рвать нельзя.
@@ -239,23 +284,33 @@ window.addEventListener("pagehide", (e) => {
 
 async function initAuthorizedApp() {
   const uid = authStore.getUser()?.id ?? null;
+
+  // 3.4/3.9: локальный кэш применяется СИНХРОННО, до первого await.
+  // Иначе hashchange → mount прочитает дефолты при state.userId === null.
+  applyUserSettings(uid, null);
+
   if (initAuthorizedPromise) return initAuthorizedPromise;
   if (menuManager && authorizedForUserId === uid) return;
 
-initAuthorizedPromise = (async () => {
+  initAuthorizedPromise = (async () => {
     if (!menuManager) menuManager = new MenuManager(api, router, "dynamicMenu");
     try {
-        await menuManager.initialize();
+      await menuManager.initialize();
     } catch (e) {
-        // Fallback-меню уже отрисовано. Повтор config придёт от поллера
-        // через sync:fetch_staff/dicts (версии не применены → outdated).
-        console.warn("[App] config недоступен при старте:", e);
+      // Fallback-меню уже отрисовано. Повтор config придёт от поллера
+      // через sync:fetch_staff/dicts (версии не применены → outdated).
+      console.warn("[App] config недоступен при старте:", e);
     }
     await refreshAddresses({ silent: true });
-    authorizedForUserId = uid;
-})().finally(() => {
+
+    // Пользователь мог смениться, пока config был в пути.
+    if ((authStore.getUser()?.id ?? null) === uid) {
+      authorizedForUserId = uid;
+      await loadServerSettings(uid);
+    }
+  })().finally(() => {
     initAuthorizedPromise = null;
-});
+  });
 
   return initAuthorizedPromise;
 }
@@ -297,6 +352,7 @@ function syncAuthUI() {
 
     notifPoller?.stop();
     notifPoller = null;
+    window.notificationsPollerInstance = null;
     inactivityTracker?.stopTracking();
     inactivityTracker = null;
 
@@ -398,97 +454,112 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!themeCtrl) themeCtrl = new ThemeController("themeToggle");
 
   setNotifyRouter(router);
-  syncTableSettingsFromStorage();
+  // 3.1/3.4: syncTableSettingsFromStorage() больше не вызывается —
+  // до авторизации читать настройки нечего, работают дефолты.
   syncIndicator.init();
   offlineBanner.init();
 
-window.addEventListener("sync:fetch_staff", async (e) => {
+  window.addEventListener("sync:fetch_staff", async (e) => {
     const version = e.detail?.version;
     try {
-        if (!menuManager) await initAuthorizedApp();   // дедуп уже есть внутри
-        const ok = await menuManager.initialize();
-        if (!ok) throw new Error("config not applied");
-        if (version != null) {
-            window.dispatchEvent(new CustomEvent("sync:applied", {
-                detail: { layer: "staff", version },
-            }));
-        }
+      if (!menuManager) await initAuthorizedApp();
+      const ok = await menuManager.initialize();
+      if (!ok) throw new Error("config not applied");
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "staff", version },
+          }),
+        );
+      }
     } catch (err) {
-        window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-            detail: { layer: "staff" },
-        }));
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", { detail: { layer: "staff" } }),
+      );
     }
-});
-window.addEventListener("sync:fetch_dicts", async (e) => {
+  });
+
+  window.addEventListener("sync:fetch_dicts", async (e) => {
     const version = e.detail?.version;
     try {
-        if (!menuManager) await initAuthorizedApp();   // дедуп уже есть внутри
-        const ok = await menuManager.initialize();
-        if (!ok) throw new Error("config not applied");
-        if (version != null) {
-            window.dispatchEvent(new CustomEvent("sync:applied", {
-                detail: { layer: "dicts", version },
-            }));
-        }
+      if (!menuManager) await initAuthorizedApp();
+      const ok = await menuManager.initialize();
+      if (!ok) throw new Error("config not applied");
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "dicts", version },
+          }),
+        );
+      }
     } catch (err) {
-        window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-            detail: { layer: "dicts" },
-        }));
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", { detail: { layer: "dicts" } }),
+      );
     }
-});
+  });
 
+  window.addEventListener("sync:fetch_addresses", async (e) => {
+    const version = e.detail?.version;
+    try {
+      await refreshAddresses({ force: true });
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "addresses", version },
+          }),
+        );
+      }
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", { detail: { layer: "addresses" } }),
+      );
+    }
+  });
 
-window.addEventListener("sync:fetch_addresses", async (e) => {
-  const version = e.detail?.version;
-  try {
-    await refreshAddresses({ force: true });
-    if (version != null) {
-      window.dispatchEvent(new CustomEvent("sync:applied", {
-        detail: { layer: "addresses", version },
-      }));
+  window.addEventListener("sync:fetch_open_tickets", async (e) => {
+    const version = e.detail?.version;
+    try {
+      if (openTicketsCtrl.isActive) {
+        await openTicketsCtrl.refreshSilently(openTicketsArray);
+      }
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "open_tickets", version },
+          }),
+        );
+      }
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", {
+          detail: { layer: "open_tickets" },
+        }),
+      );
     }
-  } catch (err) {
-    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-      detail: { layer: "addresses" },
-    }));
-  }
-});
+  });
 
-window.addEventListener("sync:fetch_open_tickets", async (e) => {
-  const version = e.detail?.version;
-  try {
-    if (openTicketsCtrl.isActive) {
-      await openTicketsCtrl.refreshSilently(openTicketsArray);
+  window.addEventListener("sync:fetch_closed_tickets", async (e) => {
+    const version = e.detail?.version;
+    try {
+      if (closedTicketsCtrl.isActive) {
+        await closedTicketsCtrl.refreshSilently(closedTicketsArray);
+      }
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "closed_tickets", version },
+          }),
+        );
+      }
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", {
+          detail: { layer: "closed_tickets" },
+        }),
+      );
     }
-    if (version != null) {
-      window.dispatchEvent(new CustomEvent("sync:applied", {
-        detail: { layer: "open_tickets", version },
-      }));
-    }
-  } catch (err) {
-    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-      detail: { layer: "open_tickets" },
-    }));
-  }
-});
-
-window.addEventListener("sync:fetch_closed_tickets", async (e) => {
-  const version = e.detail?.version;
-  try {
-    if (closedTicketsCtrl.isActive) {
-      await closedTicketsCtrl.refreshSilently(closedTicketsArray);
-    }
-    if (version != null) {
-      window.dispatchEvent(new CustomEvent("sync:applied", {
-        detail: { layer: "closed_tickets", version },
-      }));
-    }
-  } catch (err) {
-    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-      detail: { layer: "closed_tickets" },
-    }));
-  }
-});
+  });
 
   window.addEventListener("refreshSyncState", refreshSyncUi);
 
@@ -496,13 +567,32 @@ window.addEventListener("sync:fetch_closed_tickets", async (e) => {
 
   window.addEventListener("auth:loggedin", async () => {
     syncAuthUI();
+
+    const uid = authStore.getUser()?.id ?? null;
+
+    // 3.8: смена пользователя без F5 — чужие строки не должны мелькнуть
+    // в журнале до перезагрузки списка.
+    if (authorizedForUserId != null && authorizedForUserId !== uid) {
+      openTicketsArray.splice(0, openTicketsArray.length);
+      closedTicketsArray.splice(0, closedTicketsArray.length);
+      openTicketsCtrl.isLoaded = false;
+      closedTicketsCtrl.isLoaded = false;
+      authorizedForUserId = null;
+    }
+
+    // Синхронно, до await: закрывает гонку auth:loggedin → hashchange → mount.
+    applyUserSettings(uid, null);
+
     await initAuthorizedApp();
+    await refreshActiveJournalSettings();
     updateOutboxFlag();
   });
 
   window.addEventListener(ApiService.AUTH_LOST_EVENT, (e) => {
     authStore.clear();
     authorizedForUserId = null;
+    // 3.4: следующий пользователь не наследует колонки предыдущего.
+    resetSettings();
     syncAuthUI();
 
     const msg =
@@ -556,6 +646,11 @@ window.addEventListener("sync:fetch_closed_tickets", async (e) => {
 
       openTicketsArray.splice(0, openTicketsArray.length);
       closedTicketsArray.splice(0, closedTicketsArray.length);
+      openTicketsCtrl.isLoaded = false;
+      closedTicketsCtrl.isLoaded = false;
+
+      // 3.4: настройки пользователя снимаются, остаются дефолты.
+      resetSettings();
 
       syncAuthUI();
       logHistoryAction("Вы вышли из системы");
@@ -616,13 +711,12 @@ window.addEventListener("sync:fetch_closed_tickets", async (e) => {
       historyWrapper.classList.toggle("is-collapsed");
   }
 
-syncManager = new SyncManager(api, router, {
+  syncManager = new SyncManager(api, router, {
     onDuplicateDetected: (record, existingTickets) =>
-        duplicateTicketModal.show(record, existingTickets),
-});
+      duplicateTicketModal.show(record, existingTickets),
+  });
 
-window.syncManagerInstance = syncManager;
-
+  window.syncManagerInstance = syncManager;
 
   const runFailedCleanup = () => {
     if (window.syncManagerInstance?.isSyncing) {
