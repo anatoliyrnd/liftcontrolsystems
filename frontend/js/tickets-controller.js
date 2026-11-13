@@ -24,13 +24,8 @@ export class TicketsController {
       localStorage.getItem("tablePeriod_" + this.dataType) || "1";
     this.rowsCache = [];
 
-    const savedSortId = localStorage.getItem(
-      "tableSortColumn_" + this.dataType,
-    );
-    const parsedSortId = savedSortId ? parseInt(savedSortId, 10) : NaN;
-    this.currentSortColumnId = Number.isFinite(parsedSortId)
-      ? parsedSortId
-      : -1;
+   const savedSortId = localStorage.getItem("tableSortColumn_" + this.dataType);
+this.currentSortColumnId = savedSortId || -1;
     this.isAscending =
       localStorage.getItem("tableSortDir_" + this.dataType) !== "desc";
 
