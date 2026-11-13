@@ -390,36 +390,40 @@ document.addEventListener("DOMContentLoaded", async () => {
   offlineBanner.init();
 
 window.addEventListener("sync:fetch_staff", async (e) => {
-  const version = e.detail?.version;
-  try {
-    if (menuManager) await menuManager.initialize();
-    if (version != null) {
-      window.dispatchEvent(new CustomEvent("sync:applied", {
-        detail: { layer: "staff", version },
-      }));
+    const version = e.detail?.version;
+    try {
+        if (!menuManager) await initAuthorizedApp();   // дедуп уже есть внутри
+        const ok = await menuManager.initialize();
+        if (!ok) throw new Error("config not applied");
+        if (version != null) {
+            window.dispatchEvent(new CustomEvent("sync:applied", {
+                detail: { layer: "staff", version },
+            }));
+        }
+    } catch (err) {
+        window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+            detail: { layer: "staff" },
+        }));
     }
-  } catch (err) {
-    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-      detail: { layer: "staff" },
-    }));
-  }
+});
+window.addEventListener("sync:fetch_dicts", async (e) => {
+    const version = e.detail?.version;
+    try {
+        if (!menuManager) await initAuthorizedApp();   // дедуп уже есть внутри
+        const ok = await menuManager.initialize();
+        if (!ok) throw new Error("config not applied");
+        if (version != null) {
+            window.dispatchEvent(new CustomEvent("sync:applied", {
+                detail: { layer: "dicts", version },
+            }));
+        }
+    } catch (err) {
+        window.dispatchEvent(new CustomEvent("sync:apply_failed", {
+            detail: { layer: "dicts" },
+        }));
+    }
 });
 
-window.addEventListener("sync:fetch_dicts", async (e) => {
-  const version = e.detail?.version;
-  try {
-    if (menuManager) await menuManager.initialize();
-    if (version != null) {
-      window.dispatchEvent(new CustomEvent("sync:applied", {
-        detail: { layer: "dicts", version },
-      }));
-    }
-  } catch (err) {
-    window.dispatchEvent(new CustomEvent("sync:apply_failed", {
-      detail: { layer: "dicts" },
-    }));
-  }
-})
 
 window.addEventListener("sync:fetch_addresses", async (e) => {
   const version = e.detail?.version;
