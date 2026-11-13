@@ -36,16 +36,16 @@ class SyncIndicator {
     this.progressLabel = null;
   }
 
-  init() {
-    this.progressLabel = this.el.querySelector(".sync-indicator-progress");
+init() {
     this.el = document.getElementById("syncIndicator");
     if (!this.el) return;
     this.badge = this.el.querySelector(".sync-indicator-badge");
+    this.progressLabel = this.el.querySelector(".sync-indicator-progress");
     this.el.addEventListener("click", this._onClick);
     window.addEventListener("refreshSyncState", this._onRefresh);
     window.addEventListener("sync:progress", this._onProgress);
     this._onRefresh();
-  }
+}
 
   _onClick() {
     window.location.hash = "#/queue";
