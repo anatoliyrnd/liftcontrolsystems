@@ -2,7 +2,7 @@ import { staffStore } from '../staff-store.js';
 import { userStore } from '../user-store.js';
 import { dictStore } from '../dict-store.js';
 import { authStore } from '../auth-store.js'; // <-- ДОБАВЛЕНО ДЛЯ FALLBACK
-import { API, AUTH } from '../config.js';
+
 
 /**
  * Класс динамического адаптивного управления навигационным меню SPA.
@@ -62,23 +62,23 @@ async _doInitialize() {
             { data: 'config' },
             'Генерация интерфейса навигации...'
         );
-        staffStore.setList(responseData && responseData.staff_list);
-        if (responseData) {
-            dictStore.set('department', responseData.department);
-            dictStore.set('request', responseData.request);
-            dictStore.set('group', responseData.group);
+        // Сторы пишем ТОЛЬКО при валидном ответе (§16.5: при ошибке
+        // уже отображённые данные не очищаются).
+        if (!responseData || !Array.isArray(responseData.menu_structure)) {
+            console.warn('[MenuManager] Нетипичная структура конфига. Задействован fallback.');
+            this._renderDefaultFallbackMenu();
+            return false;
         }
-        const perms = (responseData && responseData.user_permissions) || {};
+        staffStore.setList(responseData.staff_list);
+        dictStore.set('department', responseData.department);
+        dictStore.set('request', responseData.request);
+        dictStore.set('group', responseData.group);
+        const perms = responseData.user_permissions || {};
         userStore.setRole(perms.role);
         const effectiveUserId = perms.user_id ?? (authStore.getUser()?.id ?? null);
         userStore.setUserId(effectiveUserId);
-        if (responseData && Array.isArray(responseData.menu_structure)) {
-            this.renderMenu(responseData.menu_structure, perms);
-            return true;
-        }
-        console.warn('[MenuManager] Нетипичная структура конфига. Задействован fallback.');
-        this._renderDefaultFallbackMenu();
-        return false;
+        this.renderMenu(responseData.menu_structure, perms);
+        return true;
     } catch (error) {
         console.error('[MenuManager] Ошибка сети при сборке меню:', error);
         this._renderDefaultFallbackMenu();
