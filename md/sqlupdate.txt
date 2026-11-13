@@ -497,3 +497,68 @@ INSERT IGNORE INTO lift_dict_versions (dict_name, version, updated_at) VALUES
     ('addresses',      0, UNIX_TIMESTAMP()),
     ('open_tickets',   0, UNIX_TIMESTAMP()),
     ('closed_tickets', 0, UNIX_TIMESTAMP());
+
+    -- ============================================================================
+-- Миграция 1.2 — привязка объектов к СПульт + журнал событий интеграции
+-- Идемпотентна. Существующие данные не удаляются.
+-- ============================================================================
+
+-- 1. GUID лифта — первичный ключ поиска объекта при приёме сигнала.
+--    ascii + ascii_bin: GUID это hex, кириллица и регистронезависимость
+--    не нужны, индекс получается компактным и сравнение точным.
+--    NULL = не привязан. Именно NULL, не пустая строка: уникальный индекс
+--    допускает сколько угодно NULL, но две пустые строки сочтёт дублем.
+ALTER TABLE `lift_object`
+    ADD COLUMN IF NOT EXISTS `guid` char(32)
+        CHARACTER SET ascii COLLATE ascii_bin NULL DEFAULT NULL
+        COMMENT 'GUID лифта в СПульт (LIFT@GUID). NULL = не привязан';
+
+ALTER TABLE `lift_object`
+    ADD UNIQUE KEY IF NOT EXISTS `uq_object_guid` (`guid`);
+
+-- 2. Идентификатор лифта в СПульт (LIFT@ID).
+--    Строка, а не число: внешний ID может быть нечисловым или большим,
+--    числовой тип на этом даёт отказ приёма сигнала.
+--    Не unique: теоретически может повторяться между пультами.
+ALTER TABLE `lift_object`
+    ADD COLUMN IF NOT EXISTS `spult_id` varchar(32) NULL DEFAULT NULL
+        COMMENT 'Идентификатор лифта в СПульт (LIFT@ID)';
+
+ALTER TABLE `lift_object`
+    ADD KEY IF NOT EXISTS `idx_object_spult_id` (`spult_id`);
+
+-- 3. ОПЦИОНАЛЬНО, но рекомендую: abbreviated_name под будущий текст.
+--    Сейчас mediumint(6) — текст туда не поместится. Колонку никто
+--    не читает, существующие числа станут строками ("768").
+--    Без этого шага при внедрении описания лифта потребуется вторая миграция.
+ALTER TABLE `lift_object`
+    MODIFY COLUMN IF EXISTS `abbreviated_name` varchar(255) NOT NULL DEFAULT ''
+        COMMENT 'Сокращённое наименование / доп. описание лифта из СПульт';
+
+-- ============================================================================
+-- Журнал событий интеграции — источник данных для админ-панели.
+-- Append-only, чистится cron'ом за 30 дней.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `spult_events` (
+    `id`          bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+    `created_at`  timestamp NOT NULL DEFAULT current_timestamp(),
+    `kind`        varchar(32) NOT NULL
+        COMMENT 'guid_mismatch|guid_conflict|spult_id_conflict|address_unresolved|org_mismatch|pult_guid_mismatch|bad_xml|fatal|duplicate_note_failed',
+    `lift_id`     int(11) DEFAULT NULL COMMENT 'Объект, если удалось определить',
+    `ticket_id`   int(11) DEFAULT NULL COMMENT 'Заявка, если создана',
+    `guid`        char(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+    `spult_id`    varchar(32) DEFAULT NULL,
+    `xml_address` varchar(512) DEFAULT NULL COMMENT 'Адрес как пришёл из пульта',
+    `db_address`  varchar(512) DEFAULT NULL COMMENT 'Адрес объекта в нашей БД',
+    `message`     varchar(500) DEFAULT NULL,
+    `spool_file`  varchar(255) DEFAULT NULL
+        COMMENT 'Относительный путь в _spult/, например quarantine/20261113_….xml',
+    `meta`        longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL
+        COMMENT 'JSON: статусы, классификация, id, ожидаемый GUID пульта',
+    PRIMARY KEY (`id`),
+    KEY `idx_created_at` (`created_at`),
+    KEY `idx_kind_lift` (`kind`, `lift_id`, `created_at`),
+    KEY `idx_lift` (`lift_id`),
+    KEY `idx_ticket` (`ticket_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='События интеграции СПульт для админ-панели';
