@@ -33,9 +33,11 @@ class SyncIndicator {
     this._onRefresh = this._onRefresh.bind(this);
     this._onClick = this._onClick.bind(this);
     this._onProgress = this._onProgress.bind(this);
+    this.progressLabel = null;
   }
 
   init() {
+    this.progressLabel = this.el.querySelector(".sync-indicator-progress");
     this.el = document.getElementById("syncIndicator");
     if (!this.el) return;
     this.badge = this.el.querySelector(".sync-indicator-badge");
@@ -65,26 +67,27 @@ class SyncIndicator {
    * 2.6: прогресс «N из M» в бейдже во время активной синхронизации.
    * Не перебиваем paused/error/attention — они важнее.
    */
-  _onProgress(e) {
+ _onProgress(e) {
     const p = e.detail;
-    if (!p || !p.active || p.total === 0) {
-      this._progressActive = false;
-      return;
+    if (!p || !p.active || !p.total) {
+        this._progressActive = false;
+        if (this.progressLabel) this.progressLabel.textContent = "";
+        return;
     }
     this._progressActive = true;
-
+    // Label — чисто информационный, обновляем всегда (как делал менеджер).
+    if (this.progressLabel) this.progressLabel.textContent = `${p.done} / ${p.total}`;
     const cls = this.el.classList;
+    // paused/error/attention важнее прогресса — класс/бейдж не перебиваем.
     if (cls.contains("sync-paused") || cls.contains("sync-error") || cls.contains("sync-attention")) return;
-
     cls.remove("sync-idle");
     cls.add("sync-pending");
     this.el.title = `Синхронизация: ${Math.min(p.done + 1, p.total)} из ${p.total}`;
     if (this.badge) {
-      this.badge.textContent = `${Math.min(p.done + 1, p.total)}/${p.total}`;
-      this.badge.style.display = "inline-flex";
+        this.badge.textContent = `${Math.min(p.done + 1, p.total)}/${p.total}`;
+        this.badge.style.display = "inline-flex";
     }
-  }
-
+}
   update(c) {
     if (!this.el) return;
 
@@ -129,13 +132,14 @@ class SyncIndicator {
       "sync-paused",
     );
 
-    if (state === "idle") {
-      this._progressActive = false;
-      this.el.classList.add("sync-idle");
-      this.el.title = "Всё синхронизировано";
-      if (this.badge) this.badge.style.display = "none";
-      return;
-    }
+   if (state === "idle") {
+    this._progressActive = false;
+    this.el.classList.add("sync-idle");
+    this.el.title = "Всё синхронизировано";
+    if (this.badge) this.badge.style.display = "none";
+    if (this.progressLabel) this.progressLabel.textContent = "";
+    return;
+}
 
     this.el.classList.add("sync-" + state);
 

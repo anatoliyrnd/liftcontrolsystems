@@ -202,29 +202,26 @@ function show(type, text, opts = {}) {
     const cleanText = normalizeText(text);
     if (!cleanText) {
         log('Пустой текст — тост не показан');
-        return;
+        return null;
     }
-
     if (opts.once) {
         const key = opts.id || ('text:' + type + ':' + cleanText);
         const shown = loadShownIds();
         if (shown.has(key)) {
             log('Тост уже показан в этой сессии:', key);
-            return;
+            return null;
         }
         shown.add(key);
         saveShownIds(shown);
     }
-
     const existing = findSame(type, cleanText);
     if (existing) {
         existing.count = (existing.count || 1) + 1;
         updateCountBadge(existing);
         log('Схлопнуто:', cleanText, '×' + existing.count);
-        return;
+        return { dismiss: () => closeToast(existing) };
     }
-
-       const toastData = {
+    const toastData = {
         id: 'toast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
         type,
         text: cleanText,
@@ -236,20 +233,17 @@ function show(type, text, opts = {}) {
         element: null,
         timerId: null,
         closing: false,
-        // НОВЫЕ ПОЛЯ ДЛЯ КНОПКИ ДЕЙСТВИЯ:
         actionText: opts.actionText || null,
         actionCallback: opts.onAction || null
     };
-
     ensureEscapeHandler();
-
     if (stack.length >= CONFIG.MAX_STACK) {
         if (isPriority(type)) {
             const victim = findVictimInStack();
             if (victim) {
                 closeToast(victim);
                 renderToast(toastData);
-                return;
+                return { dismiss: () => closeToast(toastData) };
             }
         }
         queue.push(toastData);
@@ -259,8 +253,8 @@ function show(type, text, opts = {}) {
     } else {
         renderToast(toastData);
     }
+    return { dismiss: () => closeToast(toastData) };
 }
-
 // ============================================================================
 // РЕНДЕР
 // ============================================================================
@@ -374,7 +368,9 @@ function closeToast(data, silent = false) {
 
     const idx = stack.indexOf(data);
     if (idx !== -1) stack.splice(idx, 1);
-
+//убираем из очереди, если тост ещё не рендерился.
+const qi = queue.indexOf(data);
+if (qi !== -1) queue.splice(qi, 1);
     if (data.element) {
         const el = data.element;
         el.classList.remove('toast-visible');

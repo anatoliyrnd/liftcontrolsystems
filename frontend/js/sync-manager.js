@@ -384,23 +384,16 @@ export class SyncManager {
     }
   }
 
-  // --- Прогресс (§13.4) ---
 
-  _publishProgress(done, total, active) {
+
+ // --- Прогресс (§13.4) ---
+_publishProgress(done, total, active) {
     this._progress = { done, total, active };
     window.dispatchEvent(
-      new CustomEvent("sync:progress", { detail: { ...this._progress } }),
+        new CustomEvent("sync:progress", { detail: { ...this._progress } }),
     );
-
-    const btn = document.getElementById("syncIndicator");
-    if (btn && active && total > 0) {
-      btn.title = `Синхронизация: ${Math.min(done + 1, total)} из ${total}`;
-    }
-    const label = document.querySelector(".sync-indicator-progress");
-    if (label) {
-      label.textContent = active && total > 0 ? `${done} / ${total}` : "";
-    }
-  }
+}
+  
 
  
 
