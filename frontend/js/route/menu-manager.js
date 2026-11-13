@@ -36,19 +36,24 @@ export class MenuManager {
 async initialize() {
     if (this._configLoading) {
         this._pendingReload = true;
-        return this._configLoading;      // вернёт boolean первого запуска
+        return this._configLoading;      // весь chain, включая повторный проход
     }
-    let ok;
-    this._configLoading = this._doInitialize();
-    try { ok = await this._configLoading; }
-    finally { this._configLoading = null; }
+    this._configLoading = this._runChain();
+    try {
+        return await this._configLoading;
+    } finally {
+        this._configLoading = null;
+    }
+}
+
+async _runChain() {
+    let ok = await this._doInitialize();
     while (this._pendingReload) {
         this._pendingReload = false;
-        this._configLoading = this._doInitialize();
-        try { ok = await this._configLoading; }
-        finally { this._configLoading = null; }
+        ok = await this._doInitialize();
     }
-    return ok;
+    if (!ok) throw new Error("[MenuManager] config load failed");
+    return true;
 }
 
 async _doInitialize() {
