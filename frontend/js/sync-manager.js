@@ -283,32 +283,37 @@ export class SyncManager {
     }
 
     if (!authLost) {
-      if (terminalSeen) {
+    if (terminalSeen) {
         // Любой success / ignored / archived сбрасывает счётчик (§8.2).
         if (this._failedRuns !== 0) {
-          this._failedRuns = 0;
-          await this._persistFlags();
+            this._failedRuns = 0;
+            await this._persistFlags();
         }
-      } else if (networkFailure || serverReject) {
+    } else if (networkFailure || serverReject) {
         // Только фактическая неудача. Серверные failed владеет
         // retry_count команды — здесь их не считаем.
         this._failedRuns += 1;
         if (this._failedRuns >= MAX_FAILED_RUNS && !this._manualMode) {
-          this._manualMode = true;
-          notify.warning(
-            "Синхронизация приостановлена. Нажмите «Синхронизировать»",
-            { timeout: 0, persistent: true, once: true },
-          );
-          logHistoryAction(
-            "Синхронизация приостановлена: 3 запуска без успешных команд.",
-          );
+            this._manualMode = true;
+            notify.warning(
+                "Синхронизация приостановлена. Нажмите «Синхронизировать»",
+                { timeout: 0, persistent: true, once: true },
+            );
+            logHistoryAction(
+                "Синхронизация приостановлена: 3 запуска без успешных команд.",
+            );
         }
         await this._persistFlags();
-      } else if (done === 0) {
-        // Ни одной отправки и ни одной ошибки — ждём backoff точным таймером.
-        await this._scheduleBackoffWake();
-      }
     }
+
+    // Точный будильник нужен и когда часть команд обработана:
+    // failed-команда с backoff 30 с не должна ждать периодики 60 с.
+    // Простой (всё в backoff / заблокировано) счётчики не трогаем.
+    if (!networkFailure && !serverReject && !this._manualMode) {
+        await this._scheduleBackoffWake();
+    }
+}
+    
 
     window.dispatchEvent(new Event("refreshSyncState"));
 

@@ -103,19 +103,17 @@ export const ticketRepository = {
         "details-read",
       );
 
-      // Отмена по abortTag (уход со страницы) — не ошибка.
-      if (!resp || resp.code === "aborted") {
+     
+      // Отмена по abortTag (уход со страницы) — не ошибка, экран не рисуем.
+      if (resp && resp.code === "aborted" && resp.reason !== "timeout") {
         return { ok: false, data: null, errorType: "aborted" };
       }
-      if (resp._authLost) {
+      if (resp && resp._authLost) {
         return { ok: false, data: null, errorType: "aborted" };
       }
-      if (resp.status !== "ok") {
-        console.warn(
-          "[TicketRepo] Ошибка загрузки заявки:",
-          resp.code,
-          resp.message,
-        );
+       // Таймаут и не-JSON — сетевая неопределённость, а не отмена:
+      // экран ошибки с кнопкой повтора вместо пустой карточки.
+      if (!resp || resp.offline === true) {
         return { ok: false, data: null, errorType: "network" };
       }
 

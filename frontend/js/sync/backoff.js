@@ -20,7 +20,3 @@ export function isRetryExhausted(retryCount) {
 return (Number(retryCount) || 0) >= MAX_RETRIES;
 }
 
-export function getDelayMs(attempt) {
-const idx = Math.min(Math.max(attempt, 1), MAX_RETRIES) - 1;
-return BACKOFF_SECONDS[idx] * 1000;
-}

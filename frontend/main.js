@@ -192,37 +192,44 @@ window.addEventListener("db:upgrade-required", () => {
 // --- 1.23: полный teardown приложения ---
 let tornDown = false;
 function teardownApp() {
-  if (tornDown) return;
-  tornDown = true;
+    if (tornDown) return;
+    tornDown = true;
 
- leaveAll();
+    leaveAll();
 
-  try {
-    detailsCtrl.destroy?.();
-  } catch (e) {
-    console.warn("[App] detailsCtrl.destroy:", e);
-  }
+    try {
+        detailsCtrl.destroy?.();
+    } catch (e) {
+        console.warn("[App] detailsCtrl.destroy:", e);
+    }
 
-  try {
-    themeCtrl?.unmount?.();
-  } catch (e) {
-    console.warn("[App] ThemeController.unmount:", e);
-  }
-  themeCtrl = null;
+    try {
+        syncManager?.stop();
+    } catch (e) {
+        console.warn("[App] syncManager.stop:", e);
+    }
+    syncManager = null;
 
-  try {
-    notifPoller?.stop();
-  } catch (e) {
-    console.warn("[App] notifPoller.stop:", e);
-  }
-  notifPoller = null;
+    try {
+        themeCtrl?.unmount?.();
+    } catch (e) {
+        console.warn("[App] ThemeController.unmount:", e);
+    }
+    themeCtrl = null;
+window.syncManagerInstance = null; 
+    try {
+        notifPoller?.stop();
+    } catch (e) {
+        console.warn("[App] notifPoller.stop:", e);
+    }
+    notifPoller = null;
 
-  try {
-    inactivityTracker?.stopTracking();
-  } catch (e) {
-    console.warn("[App] inactivityTracker.stopTracking:", e);
-  }
-  inactivityTracker = null;
+    try {
+        inactivityTracker?.stopTracking();
+    } catch (e) {
+        console.warn("[App] inactivityTracker.stopTracking:", e);
+    }
+    inactivityTracker = null;
 }
 
 // bfcache: persisted=true — страница вернётся живой, рвать нельзя.
@@ -609,27 +616,13 @@ window.addEventListener("sync:fetch_closed_tickets", async (e) => {
       historyWrapper.classList.toggle("is-collapsed");
   }
 
-  syncManager = new SyncManager(
-    api,
-    router,
-    (newTickets) => {
-      const safeTickets = Array.isArray(newTickets) ? newTickets : [];
-      openTicketsArray.splice(0, openTicketsArray.length, ...safeTickets);
-      if (openTicketsCtrl._isActive)
-        openTicketsCtrl.refreshFromMemory(openTicketsArray);
-      refreshSyncUi();
-    },
-    {
-      onDuplicateDetected: (record, existingTickets) =>
+syncManager = new SyncManager(api, router, {
+    onDuplicateDetected: (record, existingTickets) =>
         duplicateTicketModal.show(record, existingTickets),
-    },
-  );
+});
 
-  window.syncManagerInstance = syncManager;
+window.syncManagerInstance = syncManager;
 
-  if (navigator.onLine) {
-    setTimeout(() => syncManager.startSync(), 1000);
-  }
 
   const runFailedCleanup = () => {
     if (window.syncManagerInstance?.isSyncing) {
