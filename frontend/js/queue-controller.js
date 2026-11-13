@@ -45,7 +45,10 @@ export class QueueController {
     this.router = router;
     this._refreshHandler = null;
     this._syncingSyncBtn = null;
-  }
+    this._isActive = false;
+    this._mountId = 0;
+    this._renderSeq = 0;
+}
 
   async mount() {
     const $ = (id) => document.getElementById(id);

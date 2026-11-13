@@ -677,8 +677,10 @@ final class ApiController
                 $uuid,
                 $batchId,
                 $type,
-                $reason,
-                $message,
+                // Обрезка по фактической ширине колонок: длинный текст
+                // SQL-ошибки иначе даст 1406 Data too long → откат пачки.
+                mb_substr($reason, 0, 64),
+                mb_substr($message, 0, 500),
                 (string) json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
             ]
         );
