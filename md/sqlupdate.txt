@@ -474,3 +474,26 @@ ALTER TABLE `lift_calls` ADD UNIQUE KEY IF NOT EXISTS `uq_calls_offline_uuid` (`
 -- Строку 'tickets' в lift_dict_versions НЕ удаляем (решение п.8).
 -- Сиды open_tickets / closed_tickets из скрипта 1.0 — штатная часть развёртывания БД.
 -- EVENT cleanup_offline_tables НЕ удаляем (решение п.4), остаётся неактивным.
+
+-- 1. Проверка дублей: если запрос вернёт строки — СТОП, пришлите вывод,
+--    дам схлопывание. Иначе ALTER упадёт и индекс не создастся.
+SELECT dict_name, COUNT(*) AS cnt
+FROM lift_dict_versions
+GROUP BY dict_name
+HAVING cnt > 1;
+
+-- 2. UNIQUE обязателен: без него INSERT ... ON DUPLICATE KEY UPDATE
+--    не сработает как upsert, и два параллельных запроса вставят две строки
+--    с одним ключом — инкременты начнут теряться.
+ALTER TABLE lift_dict_versions
+    ADD UNIQUE KEY uniq_dict_name (dict_name);
+
+-- 3. Сид всех пяти ключей. Идемпотентно благодаря UNIQUE.
+--    version = 0, чтобы первый же реальный инкремент дал 1 и клиенты
+--    с версией 0 увидели outdated.
+INSERT IGNORE INTO lift_dict_versions (dict_name, version, updated_at) VALUES
+    ('staff',          0, UNIX_TIMESTAMP()),
+    ('dicts',          0, UNIX_TIMESTAMP()),
+    ('addresses',      0, UNIX_TIMESTAMP()),
+    ('open_tickets',   0, UNIX_TIMESTAMP()),
+    ('closed_tickets', 0, UNIX_TIMESTAMP());
