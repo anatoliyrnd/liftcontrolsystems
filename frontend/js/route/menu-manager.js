@@ -34,74 +34,52 @@ export class MenuManager {
         return s;
     }
 async initialize() {
-  if (this._configLoading) {
-    this._pendingReload = true;
-    return this._configLoading;
-  }
-
-  this._configLoading = this._doInitialize();
-  try {
-    await this._configLoading;
-  } catch (e) {
-    // _doInitialize уже отрисовала fallback-меню.
-  } finally {
-    this._configLoading = null;
-  }
-
-  while (this._pendingReload) {
-    this._pendingReload = false;
+    if (this._configLoading) {
+        this._pendingReload = true;
+        return this._configLoading;      // вернёт boolean первого запуска
+    }
+    let ok;
     this._configLoading = this._doInitialize();
-    try {
-      await this._configLoading;
-    } catch (e) {
-      /* fallback */
-    } finally {
-      this._configLoading = null;
+    try { ok = await this._configLoading; }
+    finally { this._configLoading = null; }
+    while (this._pendingReload) {
+        this._pendingReload = false;
+        this._configLoading = this._doInitialize();
+        try { ok = await this._configLoading; }
+        finally { this._configLoading = null; }
     }
-  }
+    return ok;
 }
-    async _doInitialize() {
-        try {
-            const responseData = await this.api.get(
-                { data: 'config' },
-                'Генерация интерфейса навигации...'
-            );
 
-            // УДАЛЕНО: Блок с AUTH.TOKEN_STORAGE_KEY и localStorage
-            // Токен теперь управляется исключительно через authStore и httpOnly cookie.
-
-            // Справочник механиков — в глобальный стор
-            staffStore.setList(responseData && responseData.staff_list);
-
-            // Справочники отдел / запрос / группа — в глобальный стор
-            if (responseData) {
-                dictStore.set('department', responseData.department);
-                dictStore.set('request', responseData.request);
-                dictStore.set('group', responseData.group);
-            }
-
-            // Роль и ID пользователя — в глобальный стор.
-            const perms = (responseData && responseData.user_permissions) || {};
-            userStore.setRole(perms.role);
-
-            // ДОБАВЛЕНО: fallback на authStore, если сервер не прислал user_id
-            const effectiveUserId = perms.user_id ?? (authStore.getUser()?.id ?? null);
-            userStore.setUserId(effectiveUserId);
-
-            if (responseData && Array.isArray(responseData.menu_structure)) {
-                this.renderMenu(responseData.menu_structure, perms);
-                return;
-            }
-
-            console.warn('[MenuManager] Нетипичная структура конфига. Задействован fallback.');
-            this._renderDefaultFallbackMenu();
-
-        } catch (error) {
-            console.error('[MenuManager] Ошибка сети при сборке меню:', error);
-            this._renderDefaultFallbackMenu();
+async _doInitialize() {
+    try {
+        const responseData = await this.api.get(
+            { data: 'config' },
+            'Генерация интерфейса навигации...'
+        );
+        staffStore.setList(responseData && responseData.staff_list);
+        if (responseData) {
+            dictStore.set('department', responseData.department);
+            dictStore.set('request', responseData.request);
+            dictStore.set('group', responseData.group);
         }
+        const perms = (responseData && responseData.user_permissions) || {};
+        userStore.setRole(perms.role);
+        const effectiveUserId = perms.user_id ?? (authStore.getUser()?.id ?? null);
+        userStore.setUserId(effectiveUserId);
+        if (responseData && Array.isArray(responseData.menu_structure)) {
+            this.renderMenu(responseData.menu_structure, perms);
+            return true;
+        }
+        console.warn('[MenuManager] Нетипичная структура конфига. Задействован fallback.');
+        this._renderDefaultFallbackMenu();
+        return false;
+    } catch (error) {
+        console.error('[MenuManager] Ошибка сети при сборке меню:', error);
+        this._renderDefaultFallbackMenu();
+        return false;
     }
-
+}
     renderMenu(menuStructure, userPermissions = {}) {
         if (!this.container) return;
 
