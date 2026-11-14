@@ -1,100 +1,106 @@
-import { tableSettings } from './settings.js';
+import { tableSettings, setWidth } from "./settings.js";
 
 /**
- * Логика изменения ширины колонок мышью с учётом minWidth.
- * Корректно завершает ресайз, если mouseup произошёл за пределами окна
- * (через window.blur) или если пользователь ушёл на другую вкладку.
+ * Изменение ширины колонки мышью с учётом minWidth.
+ * 3.2/3.3: ширина хранится per-user/per-scope и только локально.
+ * Глобальный ключ tableColumnWidths больше не используется.
  */
 export function setupResizableColumn(th, resizer) {
-    let startX, startWidth;
-    let cachedCells = null;
-    let cachedAddressCells = null;
-    const colId = th.getAttribute('data-id');
+  let startX, startWidth;
+  let cachedCells = null;
+  let cachedAddressCells = null;
 
-    const colConfig = tableSettings.columns.find(c => c.id === colId);
-    const minAllowedWidth = colConfig ? colConfig.minWidth : 90;
+  const colId = th.getAttribute("data-id");
+  const colConfig = tableSettings.columns.find((c) => c.id === colId);
+  const minAllowedWidth = colConfig ? colConfig.minWidth : 90;
 
-    function onMouseMove(e) {
-        const width = startWidth + (e.clientX - startX);
+  const table = th.closest("table");
+  const scope =
+    table?.getAttribute("data-scope") ||
+    table?.getAttribute("data-mode") ||
+    tableSettings.scope;
 
-        if (width >= minAllowedWidth) {
-            const widthPx = `${width}px`;
+  function onMouseMove(e) {
+    const width = startWidth + (e.clientX - startX);
+    if (width >= minAllowedWidth) {
+      const widthPx = `${width}px`;
+      th.style.width = widthPx;
+      th.style.maxWidth = widthPx;
 
-            th.style.width = widthPx;
-            th.style.maxWidth = widthPx;
+      const cells =
+        cachedCells ||
+        th
+          .closest("table")
+          ?.querySelectorAll(`tbody td[data-col-id="${colId}"]`);
+      if (cells) {
+        cells.forEach((td) => {
+          td.style.width = widthPx;
+          td.style.maxWidth = widthPx;
+        });
+      }
 
-           // Кэш заполняется в mousedown — querySelectorAll больше не на каждом кадре.
-const cells = cachedCells || th.closest('table')?.querySelectorAll(`tbody td[data-col-id="${colId}"]`);
-if (cells) {
-    cells.forEach(td => {
-        td.style.width = widthPx;
-        td.style.maxWidth = widthPx;
-    });
-}
-
-if (colId === 'id') {
-    const addrCells = cachedAddressCells
-        || th.closest('table')?.querySelectorAll(`th[data-id="address"], td[data-col-id="address"]`);
-    if (addrCells) {
-        addrCells.forEach(el => { el.style.left = widthPx; });
-    }
-}
-            if (colConfig) colConfig.width = widthPx;
+      if (colId === "id") {
+        const addrCells =
+          cachedAddressCells ||
+          th
+            .closest("table")
+            ?.querySelectorAll(
+              `th[data-id="address"], td[data-col-id="address"]`,
+            );
+        if (addrCells) {
+          addrCells.forEach((el) => {
+            el.style.left = widthPx;
+          });
         }
+      }
+
+      if (colConfig) colConfig.width = widthPx;
+    }
+  }
+
+  function onMouseUp() {
+    if (!resizer.classList.contains("resizing")) return;
+
+    // 3.3: сохраняем ширину в per-user кэш своего scope.
+    if (colConfig && colConfig.width) {
+      setWidth(scope, colId, parseInt(colConfig.width, 10));
     }
 
-    function onMouseUp() {
-        // Защита от повторного вызова (mouseup + blur одновременно)
-        if (!resizer.classList.contains('resizing')) return;
+    resizer.classList.remove("resizing");
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    window.removeEventListener("blur", onMouseUp);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
 
-        const currentWidths = JSON.parse(localStorage.getItem('tableColumnWidths') || '{}');
-        if (colConfig && colConfig.width) {
-            currentWidths[colId] = colConfig.width;
-            localStorage.setItem('tableColumnWidths', JSON.stringify(currentWidths));
-        }
+    cachedCells = null;
+    cachedAddressCells = null;
+  }
 
-        if (colConfig && colConfig.movable) {
-            th.setAttribute('draggable', 'true');
-        }
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") onMouseUp();
+  }
 
-       resizer.classList.remove('resizing');
-document.removeEventListener('mousemove', onMouseMove);
-document.removeEventListener('mouseup', onMouseUp);
-window.removeEventListener('blur', onMouseUp);
-document.removeEventListener('visibilitychange', onVisibilityChange);
+  resizer.addEventListener("mousedown", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    resizer.classList.add("resizing");
+    startX = e.clientX;
+    startWidth = th.offsetWidth;
 
-// Освобождаем NodeList
-cachedCells = null;
-cachedAddressCells = null;
+    const tbl = th.closest("table");
+    if (tbl) {
+      cachedCells = tbl.querySelectorAll(`tbody td[data-col-id="${colId}"]`);
+      cachedAddressCells =
+        colId === "id"
+          ? tbl.querySelectorAll(
+              `th[data-id="address"], td[data-col-id="address"]`,
+            )
+          : null;
     }
 
-    function onVisibilityChange() {
-        // Если вкладка ушла в фон во время ресайза — принудительно завершаем
-        if (document.visibilityState === 'hidden') onMouseUp();
-    }
-
-    resizer.addEventListener('mousedown', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-
-        th.setAttribute('draggable', 'false');
-        resizer.classList.add('resizing');
-
-        startX = e.clientX;
-        startWidth = th.offsetWidth;
-
-      // ОДИН раз на drag собираем NodeList — дальше onMouseMove только читает.
-const table = th.closest('table');
-if (table) {
-    cachedCells = table.querySelectorAll(`tbody td[data-col-id="${colId}"]`);
-    cachedAddressCells = (colId === 'id')
-        ? table.querySelectorAll(`th[data-id="address"], td[data-col-id="address"]`)
-        : null;
-}
-
-document.addEventListener('mousemove', onMouseMove);
-document.addEventListener('mouseup', onMouseUp);
-window.addEventListener('blur', onMouseUp);
-document.addEventListener('visibilitychange', onVisibilityChange);
-    });
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("blur", onMouseUp);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  });
 }
