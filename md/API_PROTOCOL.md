@@ -1,4 +1,3 @@
-
 # 📋 API_PROTOCOL.md — v4.3
 
 **Версия:** 4.3
@@ -9,21 +8,21 @@
 
 ## Изменения от v4.2
 
-| # | Изменение | Причина |
-|---|---|---|
-| 1 | Добавлен раздел «Соглашения о форме ответа» | `Response::ok` делает плоское слияние, обёртки `data` в большинстве экшенов нет |
-| 2 | `config`: убраны `user_position`, `can_manage_dispatchers`, `elevator_groups` из фактических; добавлены `staff`, `repair_time` | не возвращаются / возвращаются, но не были описаны |
-| 3 | `config`: добавлен `user_position` как обязательный к внедрению | нужен для правила «прораб фильтрует отчёты по ответственному» |
-| 4 | `loadAddress`: убран `include_hidden` и поля скрытых лифтов | не реализовано |
-| 5 | `callnew`: `generated_id` → `call_id`; `vis=0` не блокирует создание | фактическое поведение |
-| 6 | Добавлено правило UTC для `repair_time` | Unix-метка абсолютна, серверных конвертаций нет |
-| 7 | Ошибки: таблица приведена к 15 фактическим кодам; убрана обёртка `error`/`details`; добавлено поле `reason` | 9 документированных кодов не существуют |
-| 8 | Сводная таблица: добавлен `id`; `note` — массив; уточнены отсутствующие поля | списки и карточка отдавали разные идентификаторы |
-| 9 | Профиль: `column_settings` в разрезе scope | per-user настройки для трёх экранов |
-| 10 | Отчёты: новый контракт на основе `reportsfront.md` + `columns` | три несовместимых контракта сведены к одному |
-| 11 | Мультитенантность: только `Host` | `X-Tenant`, JWT `tenant_id`, `org_key` в резолве не участвуют |
-| 12 | Добавлен раздел «Аутентификация» | ранее вынесен в отдельный документ, не соответствовал коду |
-| 13 | Легаси (`is_legacy`, `nav`) вынесен в приложение | вне области нового API |
+| #   | Изменение                                                                                                                      | Причина                                                                         |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| 1   | Добавлен раздел «Соглашения о форме ответа»                                                                                    | `Response::ok` делает плоское слияние, обёртки `data` в большинстве экшенов нет |
+| 2   | `config`: убраны `user_position`, `can_manage_dispatchers`, `elevator_groups` из фактических; добавлены `staff`, `repair_time` | не возвращаются / возвращаются, но не были описаны                              |
+| 3   | `config`: добавлен `user_position` как обязательный к внедрению                                                                | нужен для правила «прораб фильтрует отчёты по ответственному»                   |
+| 4   | `loadAddress`: убран `include_hidden` и поля скрытых лифтов                                                                    | не реализовано                                                                  |
+| 5   | `callnew`: `generated_id` → `call_id`; `vis=0` не блокирует создание                                                           | фактическое поведение                                                           |
+| 6   | Добавлено правило UTC для `repair_time`                                                                                        | Unix-метка абсолютна, серверных конвертаций нет                                 |
+| 7   | Ошибки: таблица приведена к 15 фактическим кодам; убрана обёртка `error`/`details`; добавлено поле `reason`                    | 9 документированных кодов не существуют                                         |
+| 8   | Сводная таблица: добавлен `id`; `note` — массив; уточнены отсутствующие поля                                                   | списки и карточка отдавали разные идентификаторы                                |
+| 9   | Профиль: `column_settings` в разрезе scope                                                                                     | per-user настройки для трёх экранов                                             |
+| 10  | Отчёты: новый контракт на основе `reportsfront.md` + `columns`                                                                 | три несовместимых контракта сведены к одному                                    |
+| 11  | Мультитенантность: только `Host`                                                                                               | `X-Tenant`, JWT `tenant_id`, `org_key` в резолве не участвуют                   |
+| 12  | Добавлен раздел «Аутентификация»                                                                                               | ранее вынесен в отдельный документ, не соответствовал коду                      |
+| 13  | Легаси (`is_legacy`, `nav`) вынесен в приложение                                                                               | вне области нового API                                                          |
 
 ---
 
@@ -31,38 +30,38 @@
 
 ### 0.1. Ключ запроса
 
-| Ключ | Назначение | Примеры |
-|---|---|---|
-| `data` | чтение | `config`, `open`, `close`, `ticket`, `loadAddress`, `notifications`, `get_user_settings`, `check_org_key`, `get_org_users` |
-| `action` | команды | `callnew`, `calledit`, `callClose`, `callnote`, `syncCommands`, `save_user_settings`, `reports_*` |
+| Ключ     | Назначение | Примеры                                                                                                                    |
+| -------- | ---------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `data`   | чтение     | `config`, `open`, `close`, `ticket`, `loadAddress`, `notifications`, `get_user_settings`, `check_org_key`, `get_org_users` |
+| `action` | команды    | `callnew`, `calledit`, `callClose`, `callnote`, `syncCommands`, `save_user_settings`, `reports_*`                          |
 
 Оба ключа равнозначны для маршрутизации: `Request` берёт `action ?? data`.
 
 ### 0.2. Соединение
 
-| Параметр | Значение |
-|---|---|
-| Метод | `POST` |
-| Content-Type | `application/json; charset=utf-8` |
-| Accept | `application/json` |
-| HTTP-статус | **всегда 200**, ошибки в теле |
-| Таймаут клиента | 15 с (`AbortController`); для `syncCommands` — 30 с |
-| Авторизация | `Authorization: Bearer <access_token>` |
-| Cookie | `lift_refresh` — HttpOnly, Secure, SameSite=Strict, path=/ |
+| Параметр        | Значение                                                   |
+| --------------- | ---------------------------------------------------------- |
+| Метод           | `POST`                                                     |
+| Content-Type    | `application/json; charset=utf-8`                          |
+| Accept          | `application/json`                                         |
+| HTTP-статус     | **всегда 200**, ошибки в теле                              |
+| Таймаут клиента | 15 с (`AbortController`); для `syncCommands` — 30 с        |
+| Авторизация     | `Authorization: Bearer <access_token>`                     |
+| Cookie          | `lift_refresh` — HttpOnly, Secure, SameSite=Strict, path=/ |
 
 ### 0.3. Форма ответа ✅
 
 `Response::ok($payload)` выполняет `['status' => 'ok'] + $payload` — **плоское слияние ключей**. Обёртка `data` появляется только там, где она передана явно.
 
-| Тип | Форма | Пример |
-|---|---|---|
-| Списки | голый массив, без `status` | `[ {...}, {...} ]` |
-| Одиночная сущность | `{status, data}` | `ticket`, `get_tenant_info` |
-| Команды | `{status, ...поля}` | `{status:"ok", call_id:35733, message:"..."}` |
-| Конфигурация | `{status, ...поля}` | `config`, `loadAddress`, `notifications` |
-| Пачка команд | `{status, data:{...}}` | `syncCommands` ⚠️ сейчас плоско |
-| Отчёты | `{status, data:{...}}` | `reports_*` 🆕 |
-| Ошибка | `{status:"error", code, message, reason?}` | без обёртки `error` |
+| Тип                | Форма                                      | Пример                                        |
+| ------------------ | ------------------------------------------ | --------------------------------------------- |
+| Списки             | голый массив, без `status`                 | `[ {...}, {...} ]`                            |
+| Одиночная сущность | `{status, data}`                           | `ticket`, `get_tenant_info`                   |
+| Команды            | `{status, ...поля}`                        | `{status:"ok", call_id:35733, message:"..."}` |
+| Конфигурация       | `{status, ...поля}`                        | `config`, `loadAddress`, `notifications`      |
+| Пачка команд       | `{status, data:{...}}`                     | `syncCommands` ⚠️ сейчас плоско               |
+| Отчёты             | `{status, data:{...}}`                     | `reports_*` 🆕                                |
+| Ошибка             | `{status:"error", code, message, reason?}` | без обёртки `error`                           |
 
 **Правило:** обёртка `data` — для одиночной сущности, результата пачки и отчётов. Остальное плоско.
 
@@ -78,12 +77,12 @@
 
 Все даты — **Unix timestamp, целое число секунд**.
 
-| Тип поля | Формат | Пример |
-|---|---|---|
-| Дата + время | Unix timestamp (с) | `1761214500` |
-| Числовые ID | Integer | `35732` |
-| `alert_level` | Integer 1–3 | `3` |
-| Флаг заметок | String | `"Есть заметки (3)"` или `"—"` |
+| Тип поля      | Формат             | Пример                         |
+| ------------- | ------------------ | ------------------------------ |
+| Дата + время  | Unix timestamp (с) | `1761214500`                   |
+| Числовые ID   | Integer            | `35732`                        |
+| `alert_level` | Integer 1–3        | `3`                            |
+| Флаг заметок  | String             | `"Есть заметки (3)"` или `"—"` |
 
 ### 1.2. Правило часового пояса
 
@@ -103,16 +102,16 @@
 
 ### 1.3. Каналы уведомления (`notify_status`)
 
-| Код | Канал | Суффикс в UI |
-|---|---|---|
-| 0 | не уведомлён | «Не уведомлен» |
-| 1 | 📞 Телефон | « - по телефону» |
-| 2 | 🖥 WEB | « - онлайн» |
-| 3 | ✈️ Telegram | « - в телеграм» |
-| 4 | 💬 Max | « - в макс» |
-| 5 | 🔵 VK | « - в вк» |
-| 6 | 📱 SMS | « - по смс» |
-| 7 | ✉️ Email | « - по email» |
+| Код | Канал        | Суффикс в UI     |
+| --- | ------------ | ---------------- |
+| 0   | не уведомлён | «Не уведомлен»   |
+| 1   | 📞 Телефон   | « - по телефону» |
+| 2   | 🖥 WEB       | « - онлайн»      |
+| 3   | ✈️ Telegram  | « - в телеграм»  |
+| 4   | 💬 Max       | « - в макс»      |
+| 5   | 🔵 VK        | « - в вк»        |
+| 6   | 📱 SMS       | « - по смс»      |
+| 7   | ✉️ Email     | « - по email»    |
 
 ---
 
@@ -134,27 +133,44 @@
   },
   "menu_structure": [],
   "staff_list": [
-    { "id": 3, "name": "Сергеенко Сергей", "phone": "+7...", "role": "engineer", "position": "mechanic" }
+    {
+      "id": 3,
+      "name": "Сергеенко Сергей",
+      "phone": "+7...",
+      "role": "engineer",
+      "position": "mechanic"
+    }
   ],
   "department": { "22": "1.Электромеханики", "23": "2.Аварийная служба" },
-  "request":    { "1": "1.Срочная", "2": "2.Обычная" },
-  "group":      { "4": "1.Застревание", "8": "5.Длительный ремонт" },
-  "staff":      { "31": "..." },
-  "repair_time": ["не указан","30 мин","Сегодня","Завтра","Три дня","7 дней","10 дней","15 дней","1 месяц","3 месяца"]
+  "request": { "1": "1.Срочная", "2": "2.Обычная" },
+  "group": { "4": "1.Застревание", "8": "5.Длительный ремонт" },
+  "staff": { "31": "..." },
+  "repair_time": [
+    "не указан",
+    "30 мин",
+    "Сегодня",
+    "Завтра",
+    "Три дня",
+    "7 дней",
+    "10 дней",
+    "15 дней",
+    "1 месяц",
+    "3 месяца"
+  ]
 }
 ```
 
 ### 2.1. `user_permissions`
 
-| Поле | Тип | Правило | Статус |
-|---|---|---|---|
-| `role` | string | из `AuthService::formatUser`, см. §19.5 | ⚠️ требует нормализации |
-| `user_id` | int | ID текущего пользователя | ✅ |
-| `user_position` | string \| null | `lift_users.user_position` | 🆕 обязательно |
-| `can_add_ticket` | bool | `admin \|\| dispatcher \|\| user_add_call` | ⚠️ см. 2.2 |
-| `can_view_reports` | bool | `admin \|\| dispatcher` | ✅ |
-| `can_view_settings` | bool | `admin` | ✅ |
-| `can_manage_dispatchers` | bool | `admin` | 🆕 опционально |
+| Поле                     | Тип            | Правило                                    | Статус                  |
+| ------------------------ | -------------- | ------------------------------------------ | ----------------------- |
+| `role`                   | string         | из `AuthService::formatUser`, см. §19.5    | ⚠️ требует нормализации |
+| `user_id`                | int            | ID текущего пользователя                   | ✅                      |
+| `user_position`          | string \| null | `lift_users.user_position`                 | 🆕 обязательно          |
+| `can_add_ticket`         | bool           | `admin \|\| dispatcher \|\| user_add_call` | ⚠️ см. 2.2              |
+| `can_view_reports`       | bool           | `admin \|\| dispatcher`                    | ✅                      |
+| `can_view_settings`      | bool           | `admin`                                    | ✅                      |
+| `can_manage_dispatchers` | bool           | `admin`                                    | 🆕 опционально          |
 
 **`user_position` обязателен к внедрению:** правило отчётов «фильтр по ответственному доступен dispatcher / admin / foreman» опирается на `position`, а не на `role`. Без этого поля прораб на фронте не отличим от диспетчера.
 
@@ -168,13 +184,13 @@
 
 ### 2.3. Роли
 
-| Роль | Описание |
-|---|---|
-| `administrator` | полные права |
-| `dispatcher` | создаёт и редактирует заявки, закрывает, комментирует |
-| `engineer` | механик; видит свои заявки, закрывает и комментирует их |
-| `guest` | только чтение |
-| `reserved` | резерв, права гостя |
+| Роль            | Описание                                                |
+| --------------- | ------------------------------------------------------- |
+| `administrator` | полные права                                            |
+| `dispatcher`    | создаёт и редактирует заявки, закрывает, комментирует   |
+| `engineer`      | механик; видит свои заявки, закрывает и комментирует их |
+| `guest`         | только чтение                                           |
+| `reserved`      | резерв, права гостя                                     |
 
 **Допустимы только эти пять значений.** Клиент нормализует всё неизвестное в `guest`.
 
@@ -182,15 +198,15 @@
 
 ### 2.4. `menu_structure` ✅
 
-| id | target_hash | Условие | Роут на фронте |
-|---|---|---|---|
-| `create` | `#/create` | `can_add_ticket` | ✅ |
-| `open_tickets` | `#/` | всегда | ✅ |
-| `closed_tickets` | `#/closed` | всегда | ✅ |
-| `reports` | `#/reports` | admin / dispatcher | 🆕 в разработке |
-| `addresses` | `#/addresses` | admin / dispatcher | ⚠️ не зарегистрирован |
-| `settings` | `#/settings` | admin | ✅ |
-| `more` | `#/more` | всегда | ⚠️ не зарегистрирован |
+| id               | target_hash   | Условие            | Роут на фронте        |
+| ---------------- | ------------- | ------------------ | --------------------- |
+| `create`         | `#/create`    | `can_add_ticket`   | ✅                    |
+| `open_tickets`   | `#/`          | всегда             | ✅                    |
+| `closed_tickets` | `#/closed`    | всегда             | ✅                    |
+| `reports`        | `#/reports`   | admin / dispatcher | 🆕 в разработке       |
+| `addresses`      | `#/addresses` | admin / dispatcher | ⚠️ не зарегистрирован |
+| `settings`       | `#/settings`  | admin              | ✅                    |
+| `more`           | `#/more`      | всегда             | ⚠️ не зарегистрирован |
 
 Элемент: `{ id, title, type: "nav-link"|"icon-button", target_hash, icon_svg?, required_permission?, is_default? }`.
 
@@ -202,12 +218,12 @@
 
 Диспетчеры в список не попадают и не могут быть назначены ответственными.
 
-| Поле | Тип |
-|---|---|
-| `id` | int |
-| `name` | string |
-| `phone` | string \| null |
-| `role` | string \| null |
+| Поле       | Тип            |
+| ---------- | -------------- |
+| `id`       | int            |
+| `name`     | string         |
+| `phone`    | string \| null |
+| `role`     | string \| null |
 | `position` | string \| null |
 
 `position` — для подписи должности, `role` — для прав. Словарь подписей на клиенте: `mechanic` → Механик, `foreman` → Прораб, `signalman` → Связист, `electronic-engineer` → Инженер-наладчик, `director` → Директор, `dispatcher` → Диспетчер, `admin` → Администратор, `auditor` → Аудитор. Неизвестное → «Сотрудник».
@@ -240,12 +256,12 @@
 
 **Request:** `{ "data": "close", "period": "1" }`
 
-| `period` | Период |
-|---|---|
-| `"1"` | 24 часа |
-| `"2"` | 2 дня |
-| `"3"` | 3 дня |
-| `"7"` | 7 дней |
+| `period` | Период  |
+| -------- | ------- |
+| `"1"`    | 24 часа |
+| `"2"`    | 2 дня   |
+| `"3"`    | 3 дня   |
+| `"7"`    | 7 дней  |
 
 Максимум 7 дней, значение ограничивается сервером.
 
@@ -270,28 +286,57 @@
     "call_number": "35732",
     "type": "open",
     "fullAddress": "г. Ростов-на-Дону, ул. Ленина, д.5, п.1 пасс.",
-    "city_id": 1, "street_id": 2, "home_id": 3, "object_id": 11,
+    "city_id": 1,
+    "street_id": 2,
+    "home_id": 3,
+    "object_id": 11,
     "details": "Застревание пассажира",
     "date": 1761214200,
     "repair_time": 1761220800,
-    "department": "1.Электромеханики", "department_id": "22",
-    "group": "1.Застревание", "group_id": "4",
-    "request": "1.Срочная", "request_id": "1",
-    "elevator_group_id": null, "elevator_group_name": null,
-    "alert_level": 3, "is_emergency": true,
-    "other": "Есть заметки (2)", "note_num": 2,
-    "staff_id": 3, "staff_name": "Сергеенко Сергей", "staff_phone": "+7...",
-    "notify_status": 1, "notify_date": 1761215000,
-    "staff_id2": null, "staff_name2": null, "staff_phone2": null,
-    "notify_status2": null, "notify_date2": null,
-    "staff_id3": null, "staff_name3": null, "staff_phone3": null,
-    "notify_status3": null, "notify_date3": null,
-    "solution": "—", "close_name": "—", "close_date": null,
+    "department": "1.Электромеханики",
+    "department_id": "22",
+    "group": "1.Застревание",
+    "group_id": "4",
+    "request": "1.Срочная",
+    "request_id": "1",
+    "elevator_group_id": null,
+    "elevator_group_name": null,
+    "alert_level": 3,
+    "is_emergency": true,
+    "other": "Есть заметки (2)",
+    "note_num": 2,
+    "staff_id": 3,
+    "staff_name": "Сергеенко Сергей",
+    "staff_phone": "+7...",
+    "notify_status": 1,
+    "notify_date": 1761215000,
+    "staff_id2": null,
+    "staff_name2": null,
+    "staff_phone2": null,
+    "notify_status2": null,
+    "notify_date2": null,
+    "staff_id3": null,
+    "staff_name3": null,
+    "staff_phone3": null,
+    "notify_status3": null,
+    "notify_date3": null,
+    "solution": "—",
+    "close_name": "—",
+    "close_date": null,
     "full_history": "[02.11.2026 14:30] Заявка создана пользователем Иванов И.",
     "note": [
-      { "id": 144, "user": "Петров П.", "body": "Выехал", "date": 1761214500, "type": 0, "is_offline": 0 }
+      {
+        "id": 144,
+        "user": "Петров П.",
+        "body": "Выехал",
+        "date": 1761214500,
+        "type": 0,
+        "is_offline": 0
+      }
     ],
-    "can_edit": true, "can_close": true, "can_comment": true,
+    "can_edit": true,
+    "can_close": true,
+    "can_comment": true,
     "closureallowed": 0
   }
 }
@@ -315,12 +360,12 @@
 
 ### 5.4. Права ⚠️
 
-| Поле | Правило (целевое) |
-|---|---|
-| `can_edit` | `type = open` И (`admin` ИЛИ `dispatcher`) |
-| `can_close` | `type = open` И (`admin` ИЛИ `dispatcher` ИЛИ (`engineer` И назначен)) |
-| `can_comment` | `type = open` И (`admin` ИЛИ `dispatcher` ИЛИ (`engineer` И назначен)) |
-| `closureallowed` | определить судьбу: отдавать осмысленно или удалить |
+| Поле             | Правило (целевое)                                                      |
+| ---------------- | ---------------------------------------------------------------------- |
+| `can_edit`       | `type = open` И (`admin` ИЛИ `dispatcher`)                             |
+| `can_close`      | `type = open` И (`admin` ИЛИ `dispatcher` ИЛИ (`engineer` И назначен)) |
+| `can_comment`    | `type = open` И (`admin` ИЛИ `dispatcher` ИЛИ (`engineer` И назначен)) |
+| `closureallowed` | определить судьбу: отдавать осмысленно или удалить                     |
 
 Сейчас `can_close` разрешает любому `engineer` без назначенности, `can_edit` — назначенному `engineer`. Both расходятся с матрицей `API_syncCommands.md` §2.2. `closureallowed` захардкожен в 0.
 
@@ -328,12 +373,12 @@
 
 ### 5.5. Особые случаи ✅
 
-| Ситуация | Ответ |
-|---|---|
-| Заявка не найдена | `{status:"ok", data:null}` |
-| Нет прав на просмотр | `{status:"ok", data:null}` |
-| `call_id = 0` или отсутствует | `{status:"ok", data:null}` |
-| ID начинается с `offline_` | клиент не отправляет запрос, читает из `offlineDB` |
+| Ситуация                      | Ответ                                              |
+| ----------------------------- | -------------------------------------------------- |
+| Заявка не найдена             | `{status:"ok", data:null}`                         |
+| Нет прав на просмотр          | `{status:"ok", data:null}`                         |
+| `call_id = 0` или отсутствует | `{status:"ok", data:null}`                         |
+| ID начинается с `offline_`    | клиент не отправляет запрос, читает из `offlineDB` |
 
 ---
 
@@ -348,10 +393,12 @@
   "status": "ok",
   "action": "loadAddress",
   "message": {
-    "city":   [{ "id": 1, "city_name": "г. Ростов-на-Дону" }],
+    "city": [{ "id": 1, "city_name": "г. Ростов-на-Дону" }],
     "street": [{ "id": 2, "street_name": "ул. Ленина", "city_id": 1 }],
-    "home":   [{ "id": 5, "home_name": "5", "street_id": 2 }],
-    "object": [{ "id": 209, "object_name": "п.1 пасс.", "home_id": 5, "group_id": 1 }]
+    "home": [{ "id": 5, "home_name": "5", "street_id": 2 }],
+    "object": [
+      { "id": 209, "object_name": "п.1 пасс.", "home_id": 5, "group_id": 1 }
+    ]
   }
 }
 ```
@@ -373,9 +420,14 @@
 ```json
 {
   "action": "callnew",
-  "city_id": 1, "street_id": 2, "home_id": 3, "object_id": 11,
+  "city_id": 1,
+  "street_id": 2,
+  "home_id": 3,
+  "object_id": 11,
   "fullAddress": "г. Ростов-на-Дону, ул. Ленина, д.5, п.1 пасс.",
-  "group_id": "4", "request_id": "1", "department_id": "22",
+  "group_id": "4",
+  "request_id": "1",
+  "department_id": "22",
   "repair_time": 1761220800,
   "details": "Застревание пассажира. Кабина на 3 этаже.",
   "staff_id": 3,
@@ -383,15 +435,15 @@
 }
 ```
 
-| Поле | Обязательность | Примечание |
-|---|---|---|
-| `city_id`, `street_id`, `home_id`, `object_id` | ✅ | адрес должен разрешаться одним JOIN |
-| `fullAddress` | ✅ | текст для отображения |
-| `group_id`, `request_id`, `department_id` | ✅ | ID из справочников |
-| `details` | ✅ | минимум 6 символов |
-| `repair_time` | ✅ | Unix timestamp, не в прошлом |
-| `staff_id` | ❌ | 0 / отсутствует = не назначен |
-| `force_create` | ❌ | обход проверки дублей после подтверждения |
+| Поле                                           | Обязательность | Примечание                                |
+| ---------------------------------------------- | -------------- | ----------------------------------------- |
+| `city_id`, `street_id`, `home_id`, `object_id` | ✅             | адрес должен разрешаться одним JOIN       |
+| `fullAddress`                                  | ✅             | текст для отображения                     |
+| `group_id`, `request_id`, `department_id`      | ✅             | ID из справочников                        |
+| `details`                                      | ✅             | минимум 6 символов                        |
+| `repair_time`                                  | ✅             | Unix timestamp, не в прошлом              |
+| `staff_id`                                     | ❌             | 0 / отсутствует = не назначен             |
+| `force_create`                                 | ❌             | обход проверки дублей после подтверждения |
 
 ### 7.1. `repair_time` ⚠️
 
@@ -403,13 +455,13 @@
 
 ### 7.2. Проверки ✅
 
-| Условие | Результат |
-|---|---|
-| `details` < 6 символов | `invalid_input`, reason `details_too_short` |
-| `repair_time` > 0 и < `time()` | `invalid_input`, reason `repair_time_in_past` |
-| Адрес не разрешается | `not_found`, reason `object_not_found` |
+| Условие                                                          | Результат                                             |
+| ---------------------------------------------------------------- | ----------------------------------------------------- |
+| `details` < 6 символов                                           | `invalid_input`, reason `details_too_short`           |
+| `repair_time` > 0 и < `time()`                                   | `invalid_input`, reason `repair_time_in_past`         |
+| Адрес не разрешается                                             | `not_found`, reason `object_not_found`                |
 | Активная заявка на тот же объект **и отдел**, без `force_create` | `invalid_input`, reason `duplicate_detected` + список |
-| Роль без права создания | `forbidden` ⚠️ проверка не реализована |
+| Роль без права создания                                          | `forbidden` ⚠️ проверка не реализована                |
 
 **`object.vis = 0` не блокирует создание.** Заявка создаётся, в `lift_history` пишется пометка «объект выведен из обслуживания на момент синхронизации». Код `contract_terminated` для этого случая не используется.
 
@@ -435,13 +487,13 @@
 
 ### 7.4. Вычисляемые поля ✅
 
-| Поле | Правило |
-|---|---|
-| `alert_level` | `department_id = 23` → 3; `request_id = 1` → 2; иначе 1 |
-| `call_date` | `time()` |
-| `call_status` | 0 |
-| `call_user` | ID создателя |
-| `call_first_name` | имя создателя |
+| Поле              | Правило                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `alert_level`     | `department_id = 23` → 3; `request_id = 1` → 2; иначе 1 |
+| `call_date`       | `time()`                                                |
+| `call_status`     | 0                                                       |
+| `call_user`       | ID создателя                                            |
+| `call_first_name` | имя создателя                                           |
 
 **Response ⚠️:**
 
@@ -461,9 +513,13 @@
 {
   "action": "calledit",
   "call_id": 35732,
-  "staff_id": 3, "notify_status": 1,
-  "staff_id2": 1, "notify_status2": 2,
-  "group_id": "9", "department_id": "23", "request_id": "2",
+  "staff_id": 3,
+  "notify_status": 1,
+  "staff_id2": 1,
+  "notify_status2": 2,
+  "group_id": "9",
+  "department_id": "23",
+  "request_id": "2",
   "repair_time": 1761230000,
   "details": "Дополнение к описанию"
 }
@@ -473,13 +529,13 @@
 
 ### 8.1. Ограничения
 
-| Правило | Статус |
-|---|---|
-| Адрес менять нельзя | ✅ |
-| Закрытие через `calledit` запрещено | ✅ |
-| Заявка закрыта → отказ | ✅ `closed`, reason `ticket_already_closed` |
-| Одно назначение или снятие ответственного за запрос | 🆕 не реализовано |
-| Проверка роли | ⚠️ не реализована |
+| Правило                                             | Статус                                      |
+| --------------------------------------------------- | ------------------------------------------- |
+| Адрес менять нельзя                                 | ✅                                          |
+| Закрытие через `calledit` запрещено                 | ✅                                          |
+| Заявка закрыта → отказ                              | ✅ `closed`, reason `ticket_already_closed` |
+| Одно назначение или снятие ответственного за запрос | 🆕 не реализовано                           |
+| Проверка роли                                       | ⚠️ не реализована                           |
 
 ### 8.2. Поведение полей ✅
 
@@ -540,7 +596,13 @@
 {
   "data": "notifications",
   "since_id": 142857,
-  "versions": { "staff": 15, "dicts": 8, "addresses": 3, "open_tickets": 42, "closed_tickets": 17 }
+  "versions": {
+    "staff": 15,
+    "dicts": 8,
+    "addresses": 3,
+    "open_tickets": 42,
+    "closed_tickets": 17
+  }
 }
 ```
 
@@ -562,34 +624,40 @@
     }
   ],
   "last_id": 142859,
-  "versions": { "staff": 15, "dicts": 8, "addresses": 3, "open_tickets": 42, "closed_tickets": 17 },
+  "versions": {
+    "staff": 15,
+    "dicts": 8,
+    "addresses": 3,
+    "open_tickets": 42,
+    "closed_tickets": 17
+  },
   "outdated": []
 }
 ```
 
 ### 11.1. Поля события
 
-| Поле | Тип | Статус |
-|---|---|---|
-| `id` | int | ✅ |
-| `event_type` | string | ⚠️ см. 11.2 |
-| `ticket_id` | int \| null | ✅ |
-| `actor_id` | int | ⚠️ **не отдаётся** — колонка `user_id` не выбрана |
-| `text` | string | ✅ |
-| `sound` | bool | ✅ |
-| `timeout` | int \| null | ✅ |
-| `created_at` | int | ⚠️ не отдаётся |
+| Поле         | Тип         | Статус                                            |
+| ------------ | ----------- | ------------------------------------------------- |
+| `id`         | int         | ✅                                                |
+| `event_type` | string      | ⚠️ см. 11.2                                       |
+| `ticket_id`  | int \| null | ✅                                                |
+| `actor_id`   | int         | ⚠️ **не отдаётся** — колонка `user_id` не выбрана |
+| `text`       | string      | ✅                                                |
+| `sound`      | bool        | ✅                                                |
+| `timeout`    | int \| null | ✅                                                |
+| `created_at` | int         | ⚠️ не отдаётся                                    |
 
 **`actor_id` критичен:** клиент фильтрует собственные действия по нему. Без поля фильтрация не работает, и пользователь получает тосты о своих же операциях, включая звуковые.
 
 ### 11.2. Типы событий ⚠️
 
-| Генерируется | Ожидается клиентом |
-|---|---|
-| `ticket_created` | ✅ совпадает |
-| `ticket_closed` | ✅ совпадает |
-| `ticket_edited` | нет в словаре клиента |
-| `ticket_note` | `note_added` |
+| Генерируется     | Ожидается клиентом    |
+| ---------------- | --------------------- |
+| `ticket_created` | ✅ совпадает          |
+| `ticket_closed`  | ✅ совпадает          |
+| `ticket_edited`  | нет в словаре клиента |
+| `ticket_note`    | `note_added`          |
 
 Типы `ticket_reassigned`, `staff_accepted`, `ticket_overdue`, `emergency`, `staff_unassigned` описаны, но не генерируются. Требуется синхронизация словаря.
 
@@ -597,13 +665,13 @@
 
 Сервер отдаёт числовые версии слоёв данных. Клиент передаёт свои; сервер возвращает `outdated` — список слоёв, где серверная версия больше клиентской.
 
-| Ключ | Инкремент при |
-|---|---|
-| `staff` | изменении справочника сотрудников |
-| `dicts` | изменении отделов / типов / групп |
-| `addresses` | изменении адресного справочника |
-| `open_tickets` | `callnew` (открытая), `calledit`, `callnote`, `callClose` |
-| `closed_tickets` | `callnew` (сразу закрытая), `callClose` |
+| Ключ             | Инкремент при                                             |
+| ---------------- | --------------------------------------------------------- |
+| `staff`          | изменении справочника сотрудников                         |
+| `dicts`          | изменении отделов / типов / групп                         |
+| `addresses`      | изменении адресного справочника                           |
+| `open_tickets`   | `callnew` (открытая), `calledit`, `callnote`, `callClose` |
+| `closed_tickets` | `callnew` (сразу закрытая), `callClose`                   |
 
 **Сейчас существует единственный ключ `tickets`**, а клиент отправляет `open_tickets`. Сравнение всегда идёт с нулём → `outdated` непустой на каждом ответе → полный список открытых перезапрашивается каждые 120 секунд независимо от изменений.
 
@@ -621,14 +689,14 @@
 
 Универсальный эндпоинт офлайн-синхронизации. Полная спецификация — `API_syncCommands.md` v5.3.
 
-| Параметр | Значение |
-|---|---|
-| Максимум команд в пачке | 20 |
-| Максимальный вес пачки | 3.5 МБ (JSON) |
-| Максимальный размер запроса | 10 МБ |
-| Атомарность | частичный успех |
-| Идемпотентность | `batch_id` + `command_uuid` |
-| Таймаут клиента | 30 с |
+| Параметр                    | Значение                    |
+| --------------------------- | --------------------------- |
+| Максимум команд в пачке     | 20                          |
+| Максимальный вес пачки      | 3.5 МБ (JSON)               |
+| Максимальный размер запроса | 10 МБ                       |
+| Атомарность                 | частичный успех             |
+| Идемпотентность             | `batch_id` + `command_uuid` |
+| Таймаут клиента             | 30 с                        |
 
 Типы команд: `CreateTicket`, `EditTicket`, `CloseTicket`, `AddComment`. `AcceptTicket` зарезервирован для мобильного клиента.
 
@@ -640,7 +708,13 @@
   "data": {
     "batch_id": "batch_1761234567_xyz789",
     "results": [],
-    "summary": { "success": 0, "archived": 0, "ignored": 0, "failed": 0, "duplicate_detected": 0 },
+    "summary": {
+      "success": 0,
+      "archived": 0,
+      "ignored": 0,
+      "failed": 0,
+      "duplicate_detected": 0
+    },
     "created_tickets": {}
   }
 }
@@ -673,9 +747,15 @@
     "role": "dispatcher"
   },
   "column_settings": {
-    "open":   { "order": ["id","address","details","staff_name"], "hidden": ["staff_name2"] },
-    "close":  { "order": ["id","address","solution","close_date"], "hidden": [] },
-    "report": { "order": ["id","address","department"], "hidden": ["other"] }
+    "open": {
+      "order": ["id", "address", "details", "staff_name"],
+      "hidden": ["staff_name2"]
+    },
+    "close": {
+      "order": ["id", "address", "solution", "close_date"],
+      "hidden": []
+    },
+    "report": { "order": ["id", "address", "department"], "hidden": ["other"] }
   }
 }
 ```
@@ -690,8 +770,8 @@
   "profile": { "surname": "Иванов", "name": "Иван", "patronymic": "Иванович" },
   "password": { "old": "old_pass", "new": "new_pass" },
   "column_settings": {
-    "open":  { "order": ["id","address"], "hidden": [] },
-    "close": { "order": ["id","address"], "hidden": [] }
+    "open": { "order": ["id", "address"], "hidden": [] },
+    "close": { "order": ["id", "address"], "hidden": [] }
   }
 }
 ```
@@ -748,16 +828,16 @@
 
 ### 15.1. Общие фильтры
 
-| Поле | Тип | Примечание |
-|---|---|---|
-| `date_from`, `date_to` | int | обязательны, Unix timestamp |
-| `date_type` | `"created"` \| `"closed"` | по какой дате фильтровать |
-| `city_id`, `street_id`, `home_id`, `object_id` | int \| null | адресный фильтр |
-| `department_ids` | string[] | **включающий** фильтр, минимум один |
-| `status` | `"all"` \| `"open"` \| `"close"` | |
-| `is_emergency` | bool | только аварийные |
-| `staff_id` | int \| null | фильтр по ответственному |
-| `details_text`, `solution_text` | string | поиск по описанию / решению, AND |
+| Поле                                           | Тип                              | Примечание                          |
+| ---------------------------------------------- | -------------------------------- | ----------------------------------- |
+| `date_from`, `date_to`                         | int                              | обязательны, Unix timestamp         |
+| `date_type`                                    | `"created"` \| `"closed"`        | по какой дате фильтровать           |
+| `city_id`, `street_id`, `home_id`, `object_id` | int \| null                      | адресный фильтр                     |
+| `department_ids`                               | string[]                         | **включающий** фильтр, минимум один |
+| `status`                                       | `"all"` \| `"open"` \| `"close"` |                                     |
+| `is_emergency`                                 | bool                             | только аварийные                    |
+| `staff_id`                                     | int \| null                      | фильтр по ответственному            |
+| `details_text`, `solution_text`                | string                           | поиск по описанию / решению, AND    |
 
 Комбинация `date_type = "closed"` + `status = "open"` даёт пустой результат — у открытых нет даты закрытия.
 
@@ -775,7 +855,9 @@
 {
   "status": "ok",
   "data": {
-    "total": 100, "open": 20, "closed": 80,
+    "total": 100,
+    "open": 20,
+    "closed": 80,
     "emergency_tickets": 5,
     "avg_close_time_seconds": 3600,
     "by_department": [{ "name": "1.Электромеханики", "count": 50 }],
@@ -795,9 +877,27 @@
   "status": "ok",
   "data": {
     "columns": [
-      { "id": "id", "name": "№", "type": "number", "sortable": true, "default_visible": true },
-      { "id": "address", "name": "Адрес", "type": "string", "sortable": true, "default_visible": true },
-      { "id": "close_date", "name": "Дата закрытия", "type": "timestamp", "sortable": true, "default_visible": true }
+      {
+        "id": "id",
+        "name": "№",
+        "type": "number",
+        "sortable": true,
+        "default_visible": true
+      },
+      {
+        "id": "address",
+        "name": "Адрес",
+        "type": "string",
+        "sortable": true,
+        "default_visible": true
+      },
+      {
+        "id": "close_date",
+        "name": "Дата закрытия",
+        "type": "timestamp",
+        "sortable": true,
+        "default_visible": true
+      }
     ],
     "items": [],
     "pagination": { "total_items": 150, "current_page": 1, "total_pages": 3 }
@@ -823,13 +923,13 @@
 
 ### 15.6. Права
 
-| Роль / позиция | Видимость | Фильтр по ответственному |
-|---|---|---|
-| `administrator` | все заявки | ✅ |
-| `dispatcher` | заявки своих групп | ✅ |
-| `position = foreman` | заявки своих групп | ✅ |
-| `engineer` | только свои (`call_staff*`) | ❌ |
-| `guest` | доступа нет | ❌ |
+| Роль / позиция       | Видимость                   | Фильтр по ответственному |
+| -------------------- | --------------------------- | ------------------------ |
+| `administrator`      | все заявки                  | ✅                       |
+| `dispatcher`         | заявки своих групп          | ✅                       |
+| `position = foreman` | заявки своих групп          | ✅                       |
+| `engineer`           | только свои (`call_staff*`) | ❌                       |
+| `guest`              | доступа нет                 | ❌                       |
 
 Правило для прораба требует `user_position` в `config` (§2.1).
 
@@ -858,34 +958,34 @@
 
 ### 16.2. Коды (`ErrorCode`, 15 значений) ✅
 
-| code | Когда | Обработка клиентом |
-|---|---|---|
-| `invalid_input` | валидация payload / параметров | показывает `message` |
-| `forbidden` | нет прав | показывает `message` |
-| `not_found` | сущность не найдена | 404-экран или `message` |
-| `closed` | заявка уже закрыта | `message` |
-| `token_expired` | access истёк | refresh → повтор запроса |
-| `missing_token` | токен не передан | refresh → повтор запроса |
-| `token_invalid` | токен недействителен | refresh → повтор запроса |
-| `device_mismatch` | см. 16.4 | `auth:lost` → логин |
-| `user_blocked` | учётная запись заблокирована | `auth:lost` → логин |
-| `invalid_credentials` | неверный логин / пароль | текст на форме входа |
-| `internal_error` | внутренняя ошибка | generic |
-| `unknown_action` | неизвестный экшен | generic |
-| `method_not_allowed` | не-POST | generic |
-| `tenant_not_found` | домен не привязан к организации | заглушка на логине |
-| `rate_limited` | превышен лимит | cooldown по `retry_after` |
+| code                  | Когда                           | Обработка клиентом        |
+| --------------------- | ------------------------------- | ------------------------- |
+| `invalid_input`       | валидация payload / параметров  | показывает `message`      |
+| `forbidden`           | нет прав                        | показывает `message`      |
+| `not_found`           | сущность не найдена             | 404-экран или `message`   |
+| `closed`              | заявка уже закрыта              | `message`                 |
+| `token_expired`       | access истёк                    | refresh → повтор запроса  |
+| `missing_token`       | токен не передан                | refresh → повтор запроса  |
+| `token_invalid`       | токен недействителен            | refresh → повтор запроса  |
+| `device_mismatch`     | см. 16.4                        | `auth:lost` → логин       |
+| `user_blocked`        | учётная запись заблокирована    | `auth:lost` → логин       |
+| `invalid_credentials` | неверный логин / пароль         | текст на форме входа      |
+| `internal_error`      | внутренняя ошибка               | generic                   |
+| `unknown_action`      | неизвестный экшен               | generic                   |
+| `method_not_allowed`  | не-POST                         | generic                   |
+| `tenant_not_found`    | домен не привязан к организации | заглушка на логине        |
+| `rate_limited`        | превышен лимит                  | cooldown по `retry_after` |
 
 ### 16.3. Коды из v4.2, отсутствующие в реализации
 
-| Документировался | Фактически |
-|---|---|
-| `call_already_closed` | `code: "closed"`, reason `ticket_already_closed` |
-| `invalid_key`, `invalid_password`, `invalid_batch_id`, `commands_empty`, `commands_too_many`, `duplicate_command_uuid`, `invalid_action` | `code: "invalid_input"`, конкретика в `reason` |
-| `unauthorized` | `code: "missing_token"` |
-| `token_revoked` | не выдаётся |
-| `contract_terminated` | не выдаётся; для `object.vis = 0` не применяется |
-| `tenant_not_resolved`, `tenant_suspended` | не выдаются |
+| Документировался                                                                                                                         | Фактически                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `call_already_closed`                                                                                                                    | `code: "closed"`, reason `ticket_already_closed` |
+| `invalid_key`, `invalid_password`, `invalid_batch_id`, `commands_empty`, `commands_too_many`, `duplicate_command_uuid`, `invalid_action` | `code: "invalid_input"`, конкретика в `reason`   |
+| `unauthorized`                                                                                                                           | `code: "missing_token"`                          |
+| `token_revoked`                                                                                                                          | не выдаётся                                      |
+| `contract_terminated`                                                                                                                    | не выдаётся; для `object.vis = 0` не применяется |
+| `tenant_not_resolved`, `tenant_suspended`                                                                                                | не выдаются                                      |
 
 ### 16.4. Известные пробелы ⚠️
 
@@ -897,14 +997,14 @@
 
 ### 16.5. Поведение клиента
 
-| Ситуация | UI |
-|---|---|
-| `status: "error"` (кроме auth-кодов) | LED красный, строка в «Истории» с `message` |
-| `token_expired` / `missing_token` / `token_invalid` | мьютекс-refresh, повтор; при неудаче `auth:lost` → логин |
-| `device_mismatch` / `user_blocked` | `auth:lost` немедленно |
-| Таймаут > 15 с | LED красный, «Превышено время ожидания» |
-| Ответ не JSON | `invalid_response`, признак offline, cooldown синхронизации |
-| Сеть недоступна | `network_error`, признак offline |
+| Ситуация                                            | UI                                                          |
+| --------------------------------------------------- | ----------------------------------------------------------- |
+| `status: "error"` (кроме auth-кодов)                | LED красный, строка в «Истории» с `message`                 |
+| `token_expired` / `missing_token` / `token_invalid` | мьютекс-refresh, повтор; при неудаче `auth:lost` → логин    |
+| `device_mismatch` / `user_blocked`                  | `auth:lost` немедленно                                      |
+| Таймаут > 15 с                                      | LED красный, «Превышено время ожидания»                     |
+| Ответ не JSON                                       | `invalid_response`, признак offline, cooldown синхронизации |
+| Сеть недоступна                                     | `network_error`, признак offline                            |
 
 При ошибке загрузки уже отображённые данные **не очищаются** — пользователь продолжает видеть последнее успешное состояние.
 
@@ -912,42 +1012,42 @@
 
 ## 17. Сводная таблица полей заявки
 
-| Поле | Тип | open | close | ticket | Статус |
-|---|---|---|---|---|---|
-| `id` | int | ✓ | ✓ | ✓ | ⚠️ нет в ticket |
-| `call_id` | int | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `call_number` | string | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `type` | `"open"` \| `"close"` | ✓ | ✓ | ✓ | ✅ |
-| `fullAddress` | string | ✓ | ✓ | ✓ | ✅ |
-| `city_id` / `street_id` / `home_id` / `object_id` | int | ✓ | ✓ | ✓ | ✅ |
-| `details` | string | ✓ | ✓ | ✓ | ✅ |
-| `staff_id` | int \| null | ✓ | ✓ | ✓ | ✅ |
-| `staff_name` | string \| null | ✓ | ✓ | ✓ | ✅ |
-| `staff_phone` | string \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `notify_status` | int \| null | ✓ | ✓ | ✓ | ✅ |
-| `notify_date` | int \| null | ✓ | ✓ | ✓ | ✅ |
-| `staff_id2` / `staff_id3` | int \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `staff_name2` / `staff_name3` | string \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `staff_phone2` / `staff_phone3` | string \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `notify_status2` / `notify_status3` | int \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `notify_date2` / `notify_date3` | int \| null | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `department` / `department_id` | string | ✓ | ✓ | ✓ | ✅ |
-| `group` / `group_id` | string | ✓ | ✓ | ✓ | ✅ |
-| `request` / `request_id` | string | ✓ | ✓ | ✓ | ✅ |
-| `elevator_group_id` / `elevator_group_name` | int \| null / string \| null | ✓ | ✓ | ✓ | 🆕 заглушки |
-| `date` | int | ✓ | ✓ | ✓ | ✅ |
-| `repair_time` | int \| null | ✓ | ✓ | ✓ | ⚠️ см. §7.1 |
-| `solution` | string | `"—"` | ✓ | ✓ | ✅ |
-| `close_name` | string | `"—"` | ✓ | ✓ | ✅ |
-| `close_date` | int \| null | null | ✓ | ✓ | ✅ |
-| `full_history` | string \| null | null | ✓ | ✓ | ✅ |
-| `alert_level` | int 1–3 | ✓ | ✓ | ✓ | ✅ |
-| `is_emergency` | bool | ✓ | ✓ | ✓ | ✅ |
-| `other` | string | ✓ | ✓ | ✓ | ⚠️ для close всегда «—» |
-| `note_num` | int | ✓ | ✓ | ✓ | ⚠️ для close всегда 0 |
-| `note` | **array** | ✓ | пусто | ✓ | ⚠️ списки отдают объект |
-| `can_edit` / `can_close` / `can_comment` | bool | ✓ | ✓ | ✓ | ⚠️ нет в списках |
-| `closureallowed` | int 0 \| 1 | ✓ | — | ✓ | ⚠️ захардкожен 0 |
+| Поле                                              | Тип                          | open  | close | ticket | Статус                  |
+| ------------------------------------------------- | ---------------------------- | ----- | ----- | ------ | ----------------------- |
+| `id`                                              | int                          | ✓     | ✓     | ✓      | ⚠️ нет в ticket         |
+| `call_id`                                         | int                          | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `call_number`                                     | string                       | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `type`                                            | `"open"` \| `"close"`        | ✓     | ✓     | ✓      | ✅                      |
+| `fullAddress`                                     | string                       | ✓     | ✓     | ✓      | ✅                      |
+| `city_id` / `street_id` / `home_id` / `object_id` | int                          | ✓     | ✓     | ✓      | ✅                      |
+| `details`                                         | string                       | ✓     | ✓     | ✓      | ✅                      |
+| `staff_id`                                        | int \| null                  | ✓     | ✓     | ✓      | ✅                      |
+| `staff_name`                                      | string \| null               | ✓     | ✓     | ✓      | ✅                      |
+| `staff_phone`                                     | string \| null               | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `notify_status`                                   | int \| null                  | ✓     | ✓     | ✓      | ✅                      |
+| `notify_date`                                     | int \| null                  | ✓     | ✓     | ✓      | ✅                      |
+| `staff_id2` / `staff_id3`                         | int \| null                  | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `staff_name2` / `staff_name3`                     | string \| null               | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `staff_phone2` / `staff_phone3`                   | string \| null               | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `notify_status2` / `notify_status3`               | int \| null                  | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `notify_date2` / `notify_date3`                   | int \| null                  | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `department` / `department_id`                    | string                       | ✓     | ✓     | ✓      | ✅                      |
+| `group` / `group_id`                              | string                       | ✓     | ✓     | ✓      | ✅                      |
+| `request` / `request_id`                          | string                       | ✓     | ✓     | ✓      | ✅                      |
+| `elevator_group_id` / `elevator_group_name`       | int \| null / string \| null | ✓     | ✓     | ✓      | 🆕 заглушки             |
+| `date`                                            | int                          | ✓     | ✓     | ✓      | ✅                      |
+| `repair_time`                                     | int \| null                  | ✓     | ✓     | ✓      | ⚠️ см. §7.1             |
+| `solution`                                        | string                       | `"—"` | ✓     | ✓      | ✅                      |
+| `close_name`                                      | string                       | `"—"` | ✓     | ✓      | ✅                      |
+| `close_date`                                      | int \| null                  | null  | ✓     | ✓      | ✅                      |
+| `full_history`                                    | string \| null               | null  | ✓     | ✓      | ✅                      |
+| `alert_level`                                     | int 1–3                      | ✓     | ✓     | ✓      | ✅                      |
+| `is_emergency`                                    | bool                         | ✓     | ✓     | ✓      | ✅                      |
+| `other`                                           | string                       | ✓     | ✓     | ✓      | ⚠️ для close всегда «—» |
+| `note_num`                                        | int                          | ✓     | ✓     | ✓      | ⚠️ для close всегда 0   |
+| `note`                                            | **array**                    | ✓     | пусто | ✓      | ⚠️ списки отдают объект |
+| `can_edit` / `can_close` / `can_comment`          | bool                         | ✓     | ✓     | ✓      | ⚠️ нет в списках        |
+| `closureallowed`                                  | int 0 \| 1                   | ✓     | —     | ✓      | ⚠️ захардкожен 0        |
 
 **Отсутствие `staff_id2` / `staff_id3` в списках — функциональный баг:** клиент проверяет назначенность по всем трём слотам. Механик, назначенный вторым или третьим, видит заявку (SQL-фильтр пропускает), но кнопки «Закрыть» и «Комментировать» скрыты.
 
@@ -962,6 +1062,7 @@
 **Единственный способ — заголовок `Host`.** Ни `X-Tenant`, ни JWT `tenant_id`, ни `org_key` в резолве не участвуют.
 
 Алгоритм:
+
 1. `HTTP_HOST`, отбросить порт, привести к нижнему регистру.
 2. Разделить по `.`, требуется не менее трёх частей.
 3. Поддомен = первая часть.
@@ -973,12 +1074,12 @@
 
 ### 18.2. Ошибки
 
-| Ситуация | Код | Статус |
-|---|---|---|
-| Неверный формат домена | `tenant_not_found` | ⚠️ сейчас `internal_error` |
-| Зарезервированный поддомен | `tenant_not_found` | ⚠️ сейчас `internal_error` |
-| Организация не найдена | `tenant_not_found` | ⚠️ сейчас `internal_error` |
-| Публичный `get_tenant_info`, те же случаи | `tenant_not_found` | ✅ |
+| Ситуация                                  | Код                | Статус                     |
+| ----------------------------------------- | ------------------ | -------------------------- |
+| Неверный формат домена                    | `tenant_not_found` | ⚠️ сейчас `internal_error` |
+| Зарезервированный поддомен                | `tenant_not_found` | ⚠️ сейчас `internal_error` |
+| Организация не найдена                    | `tenant_not_found` | ⚠️ сейчас `internal_error` |
+| Публичный `get_tenant_info`, те же случаи | `tenant_not_found` | ✅                         |
 
 ### 18.3. `get_tenant_info` ✅
 
@@ -1003,7 +1104,13 @@
 **Request:** `POST /auth.php?action=login`
 
 ```json
-{ "name": "dispatcher", "pname": "123456", "webGL": "<fingerprint>", "user_id": 3, "autoLogin": true }
+{
+  "name": "dispatcher",
+  "pname": "123456",
+  "webGL": "<fingerprint>",
+  "user_id": 3,
+  "autoLogin": true
+}
 ```
 
 `user_id` опционален: при передаче поиск по ID, иначе по `name`. Если `name` содержит `@` — поиск по `user_email`, иначе по `user_login`. Пароль обязателен.
@@ -1017,7 +1124,13 @@
   "status": "ok",
   "access_token": "<64 hex>",
   "expires_at": 1761221700,
-  "user": { "id": 3, "name": "Иванов Иван", "surname": null, "patronymic": null, "role": "dispatcher" }
+  "user": {
+    "id": 3,
+    "name": "Иванов Иван",
+    "surname": null,
+    "patronymic": null,
+    "role": "dispatcher"
+  }
 }
 ```
 
@@ -1043,11 +1156,11 @@
 
 Колонку пишет только `updateApiToken`, вызываемый **один раз при логине**. В `handleRefresh` вызов закомментирован.
 
-| Момент | `lift_users.api_token_expires` | `lift_access_tokens.expires_at` | Результат |
-|---|---|---|---|
-| логин, t=0 | 7200 | t0+7200 | ok |
-| refresh, t=7000 | 7200 | t0+14000 | ok |
-| refresh, t=7300 | 7200 | t0+14300 | **TokenExpired** |
+| Момент          | `lift_users.api_token_expires` | `lift_access_tokens.expires_at` | Результат        |
+| --------------- | ------------------------------ | ------------------------------- | ---------------- |
+| логин, t=0      | 7200                           | t0+7200                         | ok               |
+| refresh, t=7000 | 7200                           | t0+14000                        | ok               |
+| refresh, t=7300 | 7200                           | t0+14300                        | **TokenExpired** |
 
 **Через 2 часа после логина любой refresh падает**, несмотря на валидный 30-дневный refresh-токен. Пользователь вынужден входить заново каждые 2 часа.
 
@@ -1055,26 +1168,27 @@
 
 ### 19.4. Прочие дефекты ⚠️
 
-| Дефект | Следствие |
-|---|---|
-| Refresh не ротируется | украденный токен действует 30 дней, повторное использование не обнаруживается |
-| Logout не отзывает access-токены | токен работает до 2 часов после выхода |
-| Двойная генерация access в `login` и `refresh` | лишний токен в БД, мусорный код |
-| DATETIME через `date()` vs `NOW()` | срок сдвигается при расхождении PHP TZ и MySQL TZ |
-| `surname` / `patronymic` = null | ФИО не восстанавливается после перезагрузки |
+| Дефект                                         | Следствие                                                                     |
+| ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| Refresh не ротируется                          | украденный токен действует 30 дней, повторное использование не обнаруживается |
+| Logout не отзывает access-токены               | токен работает до 2 часов после выхода                                        |
+| Двойная генерация access в `login` и `refresh` | лишний токен в БД, мусорный код                                               |
+| DATETIME через `date()` vs `NOW()`             | срок сдвигается при расхождении PHP TZ и MySQL TZ                             |
+| `surname` / `patronymic` = null                | ФИО не восстанавливается после перезагрузки                                   |
 
 ### 19.5. Вычисление роли ⚠️
 
 Берётся `user_role`. Если пуст или `guest`, применяется fallback:
 
-| Условие | Роль |
-|---|---|
-| `user_localadmin` истинно или `user_level = 0` | `administrator` |
-| `user_disppermission` истинно или `user_level = 3` | `dispatcher` |
-| `user_level = 2` | `engineer` |
-| иначе | `guest` |
+| Условие                                            | Роль            |
+| -------------------------------------------------- | --------------- |
+| `user_localadmin` истинно или `user_level = 0`     | `administrator` |
+| `user_disppermission` истинно или `user_level = 3` | `dispatcher`    |
+| `user_level = 2`                                   | `engineer`      |
+| иначе                                              | `guest`         |
 
 **Требуется:**
+
 - нормализация `mechanic → engineer`, `foreman → dispatcher`;
 - убрать `user_level = 0 → administrator` (необнулённый уровень даёт админа);
 - возвращать реальные `surname` / `patronymic`.
@@ -1095,10 +1209,10 @@
 
 ### 19.8. Сроки жизни
 
-| Сущность | TTL | Хранение |
-|---|---|---|
-| access | 7200 с (2 ч) | `lift_access_tokens`; на клиенте только в памяти |
-| refresh | 30 дней | `lift_refresh_tokens` + HttpOnly cookie |
+| Сущность | TTL          | Хранение                                         |
+| -------- | ------------ | ------------------------------------------------ |
+| access   | 7200 с (2 ч) | `lift_access_tokens`; на клиенте только в памяти |
+| refresh  | 30 дней      | `lift_refresh_tokens` + HttpOnly cookie          |
 
 Клиент не хранит access в `localStorage`. При перезагрузке сессия восстанавливается через `refresh`.
 
@@ -1106,18 +1220,18 @@
 
 ## 20. Технический долг
 
-| Пункт | Раздел |
-|---|---|
-| Проверка прав в online-пути отсутствует | §7–10 |
-| `can_*` мягче матрицы прав | §5.4 |
-| `device_mismatch` не реализован | §16.4 |
-| Фото в `callnote` игнорируется | §10 |
-| Rate-limiting не реализован | §16.1, §18.3 |
-| `elevator_group_*` — заглушки | §17 |
-| `results[].changes` и `archive_id` не возвращаются | §12 |
-| Ограничение попыток входа отсутствует | §19.1 |
-| Одно назначение/снятие за запрос не проверяется | §8.1 |
-| `include_hidden` не поддержан | §6 |
+| Пункт                                              | Раздел       |
+| -------------------------------------------------- | ------------ |
+| Проверка прав в online-пути отсутствует            | §7–10        |
+| `can_*` мягче матрицы прав                         | §5.4         |
+| `device_mismatch` не реализован                    | §16.4        |
+| Фото в `callnote` игнорируется                     | §10          |
+| Rate-limiting не реализован                        | §16.1, §18.3 |
+| `elevator_group_*` — заглушки                      | §17          |
+| `results[].changes` и `archive_id` не возвращаются | §12          |
+| Ограничение попыток входа отсутствует              | §19.1        |
+| Одно назначение/снятие за запрос не проверяется    | §8.1         |
+| `include_hidden` не поддержан                      | §6           |
 
 ---
 
@@ -1135,3 +1249,68 @@
 **Конец `API_PROTOCOL.md` v4.3.**
 
 ---
+
+Дельта к API_PROTOCOL.md
+Точечные правки, переиздавать документ не нужно.
+§11.1 — уточнить семантику timeout
+Заменить строку таблицы:
+Поле
+Тип
+Статус
+timeout
+int | null
+✅ 0 = persistent, не закрывать по таймеру; null = дефолт клиента
+Добавить абзац после таблицы:
+timeout: 0 означает persistent. Клиент не закрывает такое уведомление по таймеру — только по действию пользователя. Значение принадлежит серверу; per-type override на клиенте не делается, иначе появляется второй источник истины.
+Persistent не означает долговременное хранение. Окно свежести событий — 30 минут (§11.4). Если вкладка закрыта дольше, событие из ленты исчезает. Лента — best-effort канал для открытой вкладки; долговременные каналы для интеграционных сбоев — таблица spult_events (30 дней) и письмо администратору.
+§11.2 — добавить тип
+В таблицу типов событий:
+Генерируется
+Ожидается клиентом
+spult_error
+🆕 требуется внести в словарь клиента
+Добавить подраздел:
+11.2.1. spult_error 🆕
+Сигнал пульта СПульт не обработан либо обработан с расхождением данных. Генерируется только sp.php, не связан с действиями пользователя.
+Поле
+Значение
+event_type
+"spult_error"
+ticket_id
+int — заявка создана; null — сигнал потерян
+actor_id
+0 — системный автор, никогда не фильтруется как «своё действие»
+text
+готовый текст с причиной и адресом, формирует сервер
+sound
+true при ticket_id === null, иначе false
+timeout
+0 — persistent
+created_at
+Unix timestamp
+Обработка клиентом:
+ticket_id !== null → ссылка «Открыть →» на #/ticket/<id>;
+ticket_id === null → ссылки нет, только текст. Адрес и причина уже в text;
+собственный per-type таймаут не применять.
+Причины (значения spult_events.kind, в ленту не передаются, только в тексте):
+guid_mismatch, guid_conflict, spult_id_conflict, address_unresolved, org_mismatch, pult_guid_mismatch, bad_xml, duplicate_note_failed, fatal.
+Полная диагностика — в spult_events и файле спула. Лента несёт только человекочитаемый текст.
+§11.4 — уточнить окно свежести
+Дописать к существующему абзацу:
+Для spult_error окно 30 минут означает, что закрытая вкладка событие не увидит. Интеграционные сбои дополнительно фиксируются в spult_events (TTL 30 дней) и отправляются администратору письмом — эти каналы от состояния вкладки не зависят.
+Что нужно от фронтенда
+
+#
+
+Правка
+Файл
+1
+Внести spult_error в словарь типов
+notifications-poller.js
+2
+Рендер: ссылка по наличию ticket_id, без per-type таймаута
+обработчик уведомлений
+3
+Заодно закрыть расхождение ticket_note → note_added (§11.2, P3)
+там же
+Без пункта 1 событие дойдёт до браузера и будет отброшено как неизвестный тип.
