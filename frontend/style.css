@@ -69,7 +69,9 @@ body {
     flex-direction: column;
     overflow: hidden;
 }
-
+#dataTable tbody tr {
+    cursor: pointer;
+}
 .navbar {
     display: flex;
     justify-content: space-between;
@@ -213,10 +215,11 @@ th::after {
     background-color: rgba(255, 255, 255, 0.03) !important;
 }
 
-#dataTable tbody tr:hover {
-    background-color: rgba(138, 43, 226, 0.08) !important;
+/* Hover — через ту же переменную, что и row-level.
+   :not() — чтобы hover не затирал цвет тревожных строк. */
+#dataTable tbody tr:hover:not(.row-level-2):not(.row-level-3) {
+    --row-bg: rgba(138, 43, 226, 0.08);
 }
-
 /* Стилизация динамической подсветки строк с сервера */
 tbody tr[style*="background-color"] {
     transition: filter 0.15s ease;
@@ -231,7 +234,7 @@ tbody tr[style*="background-color"]:hover {
 /* Поддержка зебры для липких колонок */
 #dataTable tbody tr:nth-child(even) td[data-col-id="id"],
 #dataTable tbody tr:nth-child(even) td[data-col-id="address"] {
-    background-color: var(--bg-secondary) !important;
+    /* background-color: var(--bg-secondary) !important; */
 }
 
 /* Фиксация колонок по горизонтали (Заморозка № и Адрес) */
@@ -252,13 +255,17 @@ tbody tr[style*="background-color"]:hover {
     position: sticky !important;
     left: 0;
     z-index: 25; /* Выше обычных ячеек td */
-    background-color: var(--bg-secondary) !important;
+   #dataTable td[data-col-id="address"] {
+    background-color: var(--row-bg, var(--bg-secondary)) !important;
+}
 }
 
 #dataTable td[data-col-id="address"] {
     position: sticky !important;
     z-index: 25;
-    background-color: var(--bg-secondary) !important;
+   #dataTable td[data-col-id="address"] {
+    background-color: var(--row-bg, var(--bg-secondary)) !important;
+}
 }
 /* ==========================================================================
    УРОВНИ ТРЕВОГИ (alert_level) — фон строки и sticky-ячеек
