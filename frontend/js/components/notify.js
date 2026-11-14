@@ -22,21 +22,21 @@
  */
 
 const CONFIG = {
-    MAX_STACK: 3,
-    TIMEOUT: {
-        success: 3000,
-        info:    4000,
-        warning: 6000,
-        error:   8000
-    },
-    ANIM_IN_MS:  150,
-    ANIM_OUT_MS: 500,
-    MAX_TEXT_LENGTH: 200,
-    SOUND_THROTTLE_MS: 10000,
-    DEBUG: false
+  MAX_STACK: 3,
+  TIMEOUT: {
+    success: 3000,
+    info: 4000,
+    warning: 6000,
+    error: 8000,
+  },
+  ANIM_IN_MS: 150,
+  ANIM_OUT_MS: 500,
+  MAX_TEXT_LENGTH: 200,
+  SOUND_THROTTLE_MS: 10000,
+  DEBUG: false,
 };
 
-const SESSION_SHOWN_KEY = 'notifyShownIds';
+const SESSION_SHOWN_KEY = "notifyShownIds";
 
 let container = null;
 const stack = [];
@@ -52,61 +52,67 @@ let lastSoundAt = 0;
 // ============================================================================
 
 function log(...args) {
-    if (CONFIG.DEBUG) console.log('[notify]', ...args);
+  if (CONFIG.DEBUG) console.log("[notify]", ...args);
 }
 
 function ensureContainer() {
-    if (container && document.body.contains(container)) return container;
+  if (container && document.body.contains(container)) return container;
 
-    container = document.getElementById('toastContainer');
-    if (!container) {
-        container = document.createElement('div');
-        container.id = 'toastContainer';
-        container.setAttribute('aria-live', 'polite');
-        document.body.appendChild(container);
-        log('Контейнер создан динамически');
-    }
-    return container;
+  container = document.getElementById("toastContainer");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toastContainer";
+    container.setAttribute("aria-live", "polite");
+    document.body.appendChild(container);
+    log("Контейнер создан динамически");
+  }
+  return container;
 }
 
-function normalizeText(text) {
-    if (text == null) return '';
-    let s = String(text).trim();
-    s = s.replace(/[\r\n\t]+/g, ' ');
-    s = s.replace(/\s{2,}/g, ' ');
-    if (s.length > CONFIG.MAX_TEXT_LENGTH) {
-        s = s.slice(0, CONFIG.MAX_TEXT_LENGTH - 3) + '...';
-    }
-    return s;
+function normalizeText(text, maxLength = CONFIG.MAX_TEXT_LENGTH) {
+  if (text == null) return "";
+  let s = String(text).trim();
+  s = s.replace(/[\r\n\t]+/g, " ");
+  s = s.replace(/\s{2,}/g, " ");
+  const limit =
+    Number.isFinite(maxLength) && maxLength > 0
+      ? maxLength
+      : CONFIG.MAX_TEXT_LENGTH;
+  if (s.length > limit) {
+    s = s.slice(0, limit - 3) + "...";
+  }
+  return s;
 }
 
 function isPriority(type) {
-    return type === 'error' || type === 'warning';
+  return type === "error" || type === "warning";
 }
 
 function loadShownIds() {
-    try {
-        const raw = sessionStorage.getItem(SESSION_SHOWN_KEY);
-        return raw ? new Set(JSON.parse(raw)) : new Set();
-    } catch (e) {
-        return new Set();
-    }
+  try {
+    const raw = sessionStorage.getItem(SESSION_SHOWN_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) {
+    return new Set();
+  }
 }
 
 function saveShownIds(set) {
-    try {
-        sessionStorage.setItem(SESSION_SHOWN_KEY, JSON.stringify([...set]));
-    } catch (e) { /* игнорируем */ }
+  try {
+    sessionStorage.setItem(SESSION_SHOWN_KEY, JSON.stringify([...set]));
+  } catch (e) {
+    /* игнорируем */
+  }
 }
 
 function ensureEscapeHandler() {
-    if (escapeHandlerAttached) return;
-    escapeHandlerAttached = true;
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && stack.length > 0) {
-            closeToast(stack[0]);
-        }
-    });
+  if (escapeHandlerAttached) return;
+  escapeHandlerAttached = true;
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && stack.length > 0) {
+      closeToast(stack[0]);
+    }
+  });
 }
 
 // ============================================================================
@@ -118,21 +124,21 @@ function ensureEscapeHandler() {
  * браузеры блокируют воспроизведение до первого user activation.
  */
 function unlockAudio() {
-    if (audioCtx) return;
-    try {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return;
-        audioCtx = new Ctx();
-        log('AudioContext создан');
-    } catch (e) {
-        console.warn('[notify] Не удалось создать AudioContext:', e);
-    }
+  if (audioCtx) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    audioCtx = new Ctx();
+    log("AudioContext создан");
+  } catch (e) {
+    console.warn("[notify] Не удалось создать AudioContext:", e);
+  }
 }
 
 function ensureAudioUnlockListener() {
-    document.addEventListener('click', unlockAudio, { once: true });
-    document.addEventListener('keydown', unlockAudio, { once: true });
-    document.addEventListener('touchstart', unlockAudio, { once: true });
+  document.addEventListener("click", unlockAudio, { once: true });
+  document.addEventListener("keydown", unlockAudio, { once: true });
+  document.addEventListener("touchstart", unlockAudio, { once: true });
 }
 
 /**
@@ -140,41 +146,41 @@ function ensureAudioUnlockListener() {
  * Throttling: не чаще одного раза в SOUND_THROTTLE_MS.
  */
 function playSound() {
-    const now = Date.now();
-    if (now - lastSoundAt < CONFIG.SOUND_THROTTLE_MS) {
-        log('Звук пропущен (throttle)');
-        return;
-    }
-    lastSoundAt = now;
+  const now = Date.now();
+  if (now - lastSoundAt < CONFIG.SOUND_THROTTLE_MS) {
+    log("Звук пропущен (throttle)");
+    return;
+  }
+  lastSoundAt = now;
 
-    if (!audioCtx) {
-        // Ещё не разбудили — попробуем создать сейчас (сработает, если был user activation)
-        unlockAudio();
-    }
-    if (!audioCtx) {
-        log('Звук пропущен (audio не активирован)');
-        return;
-    }
+  if (!audioCtx) {
+    // Ещё не разбудили — попробуем создать сейчас (сработает, если был user activation)
+    unlockAudio();
+  }
+  if (!audioCtx) {
+    log("Звук пропущен (audio не активирован)");
+    return;
+  }
 
-    try {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
 
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, audioCtx.currentTime);     // A5
-        osc.frequency.setValueAtTime(1100, audioCtx.currentTime + 0.08); // C#6
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+    osc.frequency.setValueAtTime(1100, audioCtx.currentTime + 0.08); // C#6
 
-        gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.15, audioCtx.currentTime + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.15, audioCtx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
 
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.3);
-    } catch (e) {
-        console.warn('[notify] Ошибка воспроизведения звука:', e);
-    }
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.3);
+  } catch (e) {
+    console.warn("[notify] Ошибка воспроизведения звука:", e);
+  }
 }
 
 // ============================================================================
@@ -182,16 +188,16 @@ function playSound() {
 // ============================================================================
 
 function findSame(type, text) {
-    let found = stack.find(t => t.type === type && t.text === text);
-    if (found) return found;
-    return queue.find(t => t.type === type && t.text === text) || null;
+  let found = stack.find((t) => t.type === type && t.text === text);
+  if (found) return found;
+  return queue.find((t) => t.type === type && t.text === text) || null;
 }
 
 function findVictimInStack() {
-    for (let i = stack.length - 1; i >= 0; i--) {
-        if (!isPriority(stack[i].type)) return stack[i];
-    }
-    return null;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (!isPriority(stack[i].type)) return stack[i];
+  }
+  return null;
 }
 
 // ============================================================================
@@ -199,158 +205,166 @@ function findVictimInStack() {
 // ============================================================================
 
 function show(type, text, opts = {}) {
-    const cleanText = normalizeText(text);
-    if (!cleanText) {
-        log('Пустой текст — тост не показан');
-        return null;
+  const cleanText = normalizeText(text, opts.maxLength);
+  const fullText = normalizeText(text, Number.MAX_SAFE_INTEGER);
+  if (!cleanText) {
+    log("Пустой текст — тост не показан");
+    return null;
+  }
+  if (opts.once) {
+    const key = opts.id || "text:" + type + ":" + cleanText;
+    const shown = loadShownIds();
+    if (shown.has(key)) {
+      log("Тост уже показан в этой сессии:", key);
+      return null;
     }
-    if (opts.once) {
-        const key = opts.id || ('text:' + type + ':' + cleanText);
-        const shown = loadShownIds();
-        if (shown.has(key)) {
-            log('Тост уже показан в этой сессии:', key);
-            return null;
-        }
-        shown.add(key);
-        saveShownIds(shown);
-    }
-    const existing = findSame(type, cleanText);
-    if (existing) {
-        existing.count = (existing.count || 1) + 1;
-        updateCountBadge(existing);
-        log('Схлопнуто:', cleanText, '×' + existing.count);
-        return { dismiss: () => closeToast(existing) };
-    }
-    const toastData = {
-        id: 'toast_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-        type,
-        text: cleanText,
-        ticketId: opts.ticketId || null,
-        timeout: typeof opts.timeout === 'number' ? opts.timeout : CONFIG.TIMEOUT[type],
-        persistent: !!opts.persistent || opts.timeout === 0,
-        sound: !!opts.sound,
-        count: 1,
-        element: null,
-        timerId: null,
-        closing: false,
-        actionText: opts.actionText || null,
-        actionCallback: opts.onAction || null
-    };
-    ensureEscapeHandler();
-    if (stack.length >= CONFIG.MAX_STACK) {
-        if (isPriority(type)) {
-            const victim = findVictimInStack();
-            if (victim) {
-                closeToast(victim);
-                renderToast(toastData);
-                return { dismiss: () => closeToast(toastData) };
-            }
-        }
-        queue.push(toastData);
-        updateQueueIndicator();
-        updateCloseAllButton();
-        log('В очередь:', cleanText);
-    } else {
+    shown.add(key);
+    saveShownIds(shown);
+  }
+  const existing = findSame(type, cleanText);
+  if (existing) {
+    existing.count = (existing.count || 1) + 1;
+    updateCountBadge(existing);
+    log("Схлопнуто:", cleanText, "×" + existing.count);
+    return { dismiss: () => closeToast(existing) };
+  }
+  const toastData = {
+    id: "toast_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
+    type,
+    text: cleanText,
+    fulltext: fullText,
+    ticketId: opts.ticketId || null,
+    timeout:
+      typeof opts.timeout === "number" ? opts.timeout : CONFIG.TIMEOUT[type],
+    persistent: !!opts.persistent || opts.timeout === 0,
+    sound: !!opts.sound,
+    count: 1,
+    element: null,
+    timerId: null,
+    closing: false,
+    actionText: opts.actionText || null,
+    actionCallback: opts.onAction || null,
+  };
+  ensureEscapeHandler();
+  if (stack.length >= CONFIG.MAX_STACK) {
+    if (isPriority(type)) {
+      const victim = findVictimInStack();
+      if (victim) {
+        closeToast(victim);
         renderToast(toastData);
+        return { dismiss: () => closeToast(toastData) };
+      }
     }
-    return { dismiss: () => closeToast(toastData) };
+    queue.push(toastData);
+    updateQueueIndicator();
+    updateCloseAllButton();
+    log("В очередь:", cleanText);
+  } else {
+    renderToast(toastData);
+  }
+  return { dismiss: () => closeToast(toastData) };
 }
 // ============================================================================
 // РЕНДЕР
 // ============================================================================
 
 function renderToast(data) {
-    const box = ensureContainer();
+  const box = ensureContainer();
 
-    const el = document.createElement('div');
-    el.className = 'toast toast-' + data.type;
-    el.setAttribute('role', data.type === 'error' ? 'alert' : 'status');
-    el.dataset.toastId = data.id;
+  const el = document.createElement("div");
+  el.className = "toast toast-" + data.type;
+  el.setAttribute("role", data.type === "error" ? "alert" : "status");
+  el.dataset.toastId = data.id;
 
-    const textEl = document.createElement('div');
-    textEl.className = 'toast-text';
-    textEl.textContent = data.text;
-    el.appendChild(textEl);
+  const textEl = document.createElement("div");
+  textEl.className = "toast-text";
+  textEl.textContent = data.text;
+  // Обрезанный текст раскрывается по наведению: адрес и причина СПульта
+  // должны быть доступны целиком, даже если не влезли в тост.
+  if (data.fullText && data.fullText !== data.text) {
+    textEl.title = data.fullText;
+  }
+  el.appendChild(textEl);
 
-    const countEl = document.createElement('span');
-    countEl.className = 'toast-count';
-    countEl.style.display = 'none';
-    el.appendChild(countEl);
+  const countEl = document.createElement("span");
+  countEl.className = "toast-count";
+  countEl.style.display = "none";
+  el.appendChild(countEl);
 
-    if (data.ticketId) {
-        const link = document.createElement('a');
-        link.className = 'toast-open-link';
-        link.href = '#/ticket/' + data.ticketId;
-        link.textContent = 'Открыть →';
-        link.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (appRouter) appRouter.navigate('#/ticket/' + data.ticketId);
-            closeToast(data);
-        });
-        el.appendChild(link);
-    }
-    // НОВЫЙ БЛОК: Кнопка действия (например, "Обновить")
-    if (data.actionText && data.actionCallback) {
-        const actionBtn = document.createElement('button');
-        actionBtn.type = 'button';
-        actionBtn.className = 'toast-action-btn';
-        actionBtn.textContent = data.actionText;
-        actionBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            data.actionCallback(); // Вызываем коллбэк
-            closeToast(data);      // Закрываем тост
-        });
-        el.appendChild(actionBtn);
-    }
-
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'toast-close';
-    closeBtn.setAttribute('aria-label', 'Закрыть уведомление');
-    closeBtn.textContent = '×';
-    closeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        closeToast(data);
+  if (data.ticketId) {
+    const link = document.createElement("a");
+    link.className = "toast-open-link";
+    link.href = "#/ticket/" + data.ticketId;
+    link.textContent = "Открыть →";
+    link.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (appRouter) appRouter.navigate("#/ticket/" + data.ticketId);
+      closeToast(data);
     });
-    el.appendChild(closeBtn);
+    el.appendChild(link);
+  }
+  // НОВЫЙ БЛОК: Кнопка действия (например, "Обновить")
+  if (data.actionText && data.actionCallback) {
+    const actionBtn = document.createElement("button");
+    actionBtn.type = "button";
+    actionBtn.className = "toast-action-btn";
+    actionBtn.textContent = data.actionText;
+    actionBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      data.actionCallback(); // Вызываем коллбэк
+      closeToast(data); // Закрываем тост
+    });
+    el.appendChild(actionBtn);
+  }
 
-    if (data.timeout > 0 && !data.persistent) {
-        const progress = document.createElement('div');
-        progress.className = 'toast-progress';
-        progress.style.animationDuration = data.timeout + 'ms';
-        el.appendChild(progress);
-    }
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "toast-close";
+  closeBtn.setAttribute("aria-label", "Закрыть уведомление");
+  closeBtn.textContent = "×";
+  closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeToast(data);
+  });
+  el.appendChild(closeBtn);
 
-    data.element = el;
-    stack.unshift(data);
-    box.insertBefore(el, box.firstChild);
+  if (data.timeout > 0 && !data.persistent) {
+    const progress = document.createElement("div");
+    progress.className = "toast-progress";
+    progress.style.animationDuration = data.timeout + "ms";
+    el.appendChild(progress);
+  }
 
-    requestAnimationFrame(() => el.classList.add('toast-visible'));
+  data.element = el;
+  stack.unshift(data);
+  box.insertBefore(el, box.firstChild);
 
-    if (data.timeout > 0 && !data.persistent) {
-        data.timerId = setTimeout(() => closeToast(data), data.timeout);
-    }
+  requestAnimationFrame(() => el.classList.add("toast-visible"));
 
-    // Звук — только если сервер попросил
-    if (data.sound) {
-        playSound();
-    }
+  if (data.timeout > 0 && !data.persistent) {
+    data.timerId = setTimeout(() => closeToast(data), data.timeout);
+  }
 
-    updateCloseAllButton();
-    log('Показан:', data.type, data.text, data.sound ? '🔔' : '');
+  // Звук — только если сервер попросил
+  if (data.sound) {
+    playSound();
+  }
+
+  updateCloseAllButton();
+  log("Показан:", data.type, data.text, data.sound ? "🔔" : "");
 }
 
 function updateCountBadge(data) {
-    if (!data.element) return;
-    const countEl = data.element.querySelector('.toast-count');
-    if (!countEl) return;
+  if (!data.element) return;
+  const countEl = data.element.querySelector(".toast-count");
+  if (!countEl) return;
 
-    if (data.count > 1) {
-        countEl.textContent = '×' + data.count;
-        countEl.style.display = 'inline-block';
-    } else {
-        countEl.style.display = 'none';
-    }
+  if (data.count > 1) {
+    countEl.textContent = "×" + data.count;
+    countEl.style.display = "inline-block";
+  } else {
+    countEl.style.display = "none";
+  }
 }
 
 // ============================================================================
@@ -358,55 +372,55 @@ function updateCountBadge(data) {
 // ============================================================================
 
 function closeToast(data, silent = false) {
-    if (!data || data.closing) return;
-    data.closing = true;
+  if (!data || data.closing) return;
+  data.closing = true;
 
-    if (data.timerId) {
-        clearTimeout(data.timerId);
-        data.timerId = null;
-    }
+  if (data.timerId) {
+    clearTimeout(data.timerId);
+    data.timerId = null;
+  }
 
-    const idx = stack.indexOf(data);
-    if (idx !== -1) stack.splice(idx, 1);
-//убираем из очереди, если тост ещё не рендерился.
-const qi = queue.indexOf(data);
-if (qi !== -1) queue.splice(qi, 1);
-    if (data.element) {
-        const el = data.element;
-        el.classList.remove('toast-visible');
-        el.classList.add('toast-closing');
-        el.style.pointerEvents = 'none';
+  const idx = stack.indexOf(data);
+  if (idx !== -1) stack.splice(idx, 1);
+  //убираем из очереди, если тост ещё не рендерился.
+  const qi = queue.indexOf(data);
+  if (qi !== -1) queue.splice(qi, 1);
+  if (data.element) {
+    const el = data.element;
+    el.classList.remove("toast-visible");
+    el.classList.add("toast-closing");
+    el.style.pointerEvents = "none";
 
-        setTimeout(() => {
-            el.remove();
-            if (!silent) {
-                moveQueue();
-                updateCloseAllButton();
-                updateQueueIndicator();
-            }
-        }, CONFIG.ANIM_OUT_MS);
-    } else if (!silent) {
+    setTimeout(() => {
+      el.remove();
+      if (!silent) {
         moveQueue();
         updateCloseAllButton();
         updateQueueIndicator();
-    }
+      }
+    }, CONFIG.ANIM_OUT_MS);
+  } else if (!silent) {
+    moveQueue();
+    updateCloseAllButton();
+    updateQueueIndicator();
+  }
 
-    log('Закрыт:', data.type, data.text);
+  log("Закрыт:", data.type, data.text);
 }
 
 function moveQueue() {
-    if (queue.length === 0) return;
-    if (stack.length >= CONFIG.MAX_STACK) return;
-    const next = queue.shift();
-    renderToast(next);
+  if (queue.length === 0) return;
+  if (stack.length >= CONFIG.MAX_STACK) return;
+  const next = queue.shift();
+  renderToast(next);
 }
 
 function clear() {
-    [...stack].forEach(t => closeToast(t, true));
-    queue.length = 0;
-    updateQueueIndicator();
-    updateCloseAllButton();
-    log('Все тосты закрыты');
+  [...stack].forEach((t) => closeToast(t, true));
+  queue.length = 0;
+  updateQueueIndicator();
+  updateCloseAllButton();
+  log("Все тосты закрыты");
 }
 
 // ============================================================================
@@ -414,41 +428,41 @@ function clear() {
 // ============================================================================
 
 function updateQueueIndicator() {
-    const box = ensureContainer();
-    let indicator = box.querySelector('.toast-queue-indicator');
+  const box = ensureContainer();
+  let indicator = box.querySelector(".toast-queue-indicator");
 
-    if (queue.length === 0) {
-        if (indicator) indicator.remove();
-        return;
-    }
+  if (queue.length === 0) {
+    if (indicator) indicator.remove();
+    return;
+  }
 
-    if (!indicator) {
-        indicator = document.createElement('div');
-        indicator.className = 'toast-queue-indicator';
-        box.appendChild(indicator);
-    }
-    indicator.textContent = '+' + queue.length + ' в очереди';
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.className = "toast-queue-indicator";
+    box.appendChild(indicator);
+  }
+  indicator.textContent = "+" + queue.length + " в очереди";
 }
 
 function updateCloseAllButton() {
-    const box = ensureContainer();
-    let btn = box.querySelector('.toast-close-all');
+  const box = ensureContainer();
+  let btn = box.querySelector(".toast-close-all");
 
-    const shouldShow = stack.length >= 2;
+  const shouldShow = stack.length >= 2;
 
-    if (!shouldShow) {
-        if (btn) btn.remove();
-        return;
-    }
+  if (!shouldShow) {
+    if (btn) btn.remove();
+    return;
+  }
 
-    if (!btn) {
-        btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'toast-close-all';
-        btn.textContent = 'Закрыть все';
-        btn.addEventListener('click', clear);
-        box.appendChild(btn);
-    }
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-close-all";
+    btn.textContent = "Закрыть все";
+    btn.addEventListener("click", clear);
+    box.appendChild(btn);
+  }
 }
 
 // ============================================================================
@@ -460,62 +474,67 @@ function updateCloseAllButton() {
  * Вызывается один раз в main.js.
  */
 export function setRouter(router) {
-    appRouter = router;
+  appRouter = router;
 }
 
 export const notify = {
-    success: (text, opts) => show('success', text, opts),
-    error:   (text, opts) => show('error',   text, opts),
-    warning: (text, opts) => show('warning', text, opts),
-    info:    (text, opts) => show('info',    text, opts),
-    clear,
-    batch,
+  success: (text, opts) => show("success", text, opts),
+  error: (text, opts) => show("error", text, opts),
+  warning: (text, opts) => show("warning", text, opts),
+  info: (text, opts) => show("info", text, opts),
+  clear,
+  batch,
 
-    /** Действие сохранено локально. */
-    offline: (text, opts = {}) =>
-        show('warning', text, { timeout: opts.timeout ?? 5000, ...opts }),
+  /** Действие сохранено локально. */
+  offline: (text, opts = {}) =>
+    show("warning", text, { timeout: opts.timeout ?? 5000, ...opts }),
 
-    /** Частичный успех синхронизации (архивация/игнор). */
-    syncPartial: ({ archived = 0, message } = {}) => {
-        if (!archived) return;
-        show('warning', message || `Действия в архив: ${archived}`, { timeout: 8000 });
-    },
+  /** Частичный успех синхронизации (архивация/игнор). */
+  syncPartial: ({ archived = 0, message } = {}) => {
+    if (!archived) return;
+    show("warning", message || `Действия в архив: ${archived}`, {
+      timeout: 8000,
+    });
+  },
 
-    /** Синхронизация завершена успешно. */
-    syncSuccess: ({ success = 0 } = {}) => {
-        if (!success) return;
-        show('success', `Синхронизировано действий: ${success}`, { timeout: 4000 });
-    },
+  /** Синхронизация завершена успешно. */
+  syncSuccess: ({ success = 0 } = {}) => {
+    if (!success) return;
+    show("success", `Синхронизировано действий: ${success}`, { timeout: 4000 });
+  },
 
-    /** Ошибка синхронизации (5+ retry или rate-limit). */
-    syncError: ({ reason, retryAfter } = {}) => {
-        const suffix = retryAfter ? ` Повторите через ${retryAfter}с.` : '';
-        show('error', `Синхронизация не удалась: ${reason || 'неизвестная ошибка'}.${suffix}`,
-            { timeout: 8000 });
-    }
+  /** Ошибка синхронизации (5+ retry или rate-limit). */
+  syncError: ({ reason, retryAfter } = {}) => {
+    const suffix = retryAfter ? ` Повторите через ${retryAfter}с.` : "";
+    show(
+      "error",
+      `Синхронизация не удалась: ${reason || "неизвестная ошибка"}.${suffix}`,
+      { timeout: 8000 },
+    );
+  },
 };
 /**
  * Массовая загрузка уведомлений (обычно с сервера).
  * @param {Array<{id?, type, text, ticketId?, timeout?, once?, persistent?, sound?}>} list
  */
 function batch(list) {
-    if (!Array.isArray(list)) return;
-    list.forEach(item => {
-        if (!item || !item.type || !item.text) return;
-        const fn = notify[item.type];
-        if (typeof fn !== 'function') {
-            log('Неизвестный тип уведомления:', item.type);
-            return;
-        }
-        fn(item.text, {
-            id: item.id,
-            once: item.once,
-            timeout: item.timeout,
-            persistent: item.persistent,
-            ticketId: item.ticketId,
-            sound: item.sound
-        });
+  if (!Array.isArray(list)) return;
+  list.forEach((item) => {
+    if (!item || !item.type || !item.text) return;
+    const fn = notify[item.type];
+    if (typeof fn !== "function") {
+      log("Неизвестный тип уведомления:", item.type);
+      return;
+    }
+    fn(item.text, {
+      id: item.id,
+      once: item.once,
+      timeout: item.timeout,
+      persistent: item.persistent,
+      ticketId: item.ticketId,
+      sound: item.sound,
     });
+  });
 }
 
 // ============================================================================
