@@ -33,7 +33,37 @@ const LAYER_EVENT = {
   dicts: "sync:fetch_dicts",
   addresses: "sync:fetch_addresses",
 };
+/**
+ * §11.2: сервер генерирует ticket_note, клиент исторически ждёт note_added.
+ * Алиас здесь — словарь в config.js остаётся единственным источником типов.
+ */
+const EVENT_ALIASES = {
+  ticket_note: "note_added",
+};
 
+/** Диагностика дрейфа словаря: один раз на тип за сессию. */
+const _unknownEventTypes = new Set();
+
+/**
+ * Неизвестный тип не отбрасывается: показываем как info и пишем в историю,
+ * чтобы расхождение словарей было видно, а не молча деградировало.
+ */
+function resolveToastType(eventType) {
+  const key = EVENT_ALIASES[eventType] || eventType;
+  const mapped = TYPE_MAP[key];
+  if (mapped) return mapped;
+  if (!_unknownEventTypes.has(eventType)) {
+    _unknownEventTypes.add(eventType);
+    console.warn(
+      "[NotificationsPoller] Тип события отсутствует в словаре:",
+      eventType,
+    );
+    logHistoryAction(
+      `Событие «${eventType}» не распознано клиентом и показано как информационное.`,
+    );
+  }
+  return "info";
+}
 function emptyVersions() {
   const o = {};
   for (const l of LAYERS) o[l] = 0;
@@ -185,12 +215,17 @@ export class NotificationsPoller {
 
       const toasts = filtered.map((ev) => ({
         id: "ntf_" + ev.id,
-        type: TYPE_MAP[ev.event_type] || "info",
+        type: resolveToastType(ev.event_type),
         text: ev.text,
-        ticketId: ev.ticket_id || null,
+        // §11.1: ссылка по наличию ticket_id, не по типу события.
+        // У карантина СПульта заявки нет — ticket_id null, ссылки не будет.
+        ticketId: ev.ticket_id ?? null,
         once: false,
         sound: !!ev.sound,
         timeout: typeof ev.timeout === "number" ? ev.timeout : undefined,
+        // Текст СПульта несёт адрес и причину для передачи голосом —
+        // общий лимит 200 символов его режет. Нужна правка 3.
+        maxLength: 500,
       }));
 
       filtered.forEach((ev) => {
