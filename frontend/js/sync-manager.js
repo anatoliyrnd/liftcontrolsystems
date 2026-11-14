@@ -19,9 +19,16 @@ import { outboxQueue } from "./outbox-queue.js";
 import { notify } from "./components/notify.js";
 import { logHistoryAction } from "./history-logger.js";
 import { buildCommand } from "./sync/batch-builder.js";
-import { MAX_RETRIES, getNextRetryAt, isRetryExhausted } from "./sync/backoff.js";
+import {
+  MAX_RETRIES,
+  getNextRetryAt,
+  isRetryExhausted,
+} from "./sync/backoff.js";
 import { generateBatchId } from "./utils/uuid.js";
-
+import {
+  buildDuplicateCommentLine,
+  appendOfflineComment,
+} from "./utils/duplicate-marker.js";
 const CMD_LOCK = "lift-sync-command";
 
 const CFG_MANUAL = "sync_manual_mode";
@@ -55,7 +62,8 @@ function nowSec() {
 
 /** Ключ блокировки заявки: ticket_id ?? offline_uuid (§7.3). */
 function lockKeyOf(cmd) {
-  if (cmd.ticket_id != null && cmd.ticket_id !== "") return String(cmd.ticket_id);
+  if (cmd.ticket_id != null && cmd.ticket_id !== "")
+    return String(cmd.ticket_id);
   if (cmd.offline_uuid) return String(cmd.offline_uuid);
   return "cmd:" + cmd.command_uuid;
 }
@@ -67,10 +75,14 @@ function lockKeyOf(cmd) {
  */
 async function withCommandLock(fn) {
   if (!navigator.locks?.request) return fn();
-  return navigator.locks.request(CMD_LOCK, { ifAvailable: true }, async (lock) => {
-    if (!lock) return { skipped: true };
-    return fn();
-  });
+  return navigator.locks.request(
+    CMD_LOCK,
+    { ifAvailable: true },
+    async (lock) => {
+      if (!lock) return { skipped: true };
+      return fn();
+    },
+  );
 }
 
 export class SyncManager {
@@ -171,7 +183,7 @@ export class SyncManager {
     }, DELAY_VISIBILITY);
   }
 
-/**
+  /**
    * Кнопка «Синхронизировать» (offline-banner, queue-controller).
    * Единственный триггер, который сбрасывает ручной режим (п. 2.10).
    * Программный вызов может opt-out: dispatchEvent(new CustomEvent(
@@ -198,10 +210,13 @@ export class SyncManager {
       if (now < this._cooldownUntil || now < this._notBefore) {
         const wait = Math.max(this._cooldownUntil, this._notBefore) - now;
         if (!this._startTimer) {
-          this._startTimer = setTimeout(() => {
-            this._startTimer = null;
-            this.startSync();
-          }, Math.max(wait, 1) * 1000);
+          this._startTimer = setTimeout(
+            () => {
+              this._startTimer = null;
+              this.startSync();
+            },
+            Math.max(wait, 1) * 1000,
+          );
         }
         return;
       }
@@ -283,54 +298,52 @@ export class SyncManager {
     }
 
     if (!authLost) {
-    if (terminalSeen) {
+      if (terminalSeen) {
         // Любой success / ignored / archived сбрасывает счётчик (§8.2).
         if (this._failedRuns !== 0) {
-            this._failedRuns = 0;
-            await this._persistFlags();
+          this._failedRuns = 0;
+          await this._persistFlags();
         }
-    } else if (networkFailure || serverReject) {
+      } else if (networkFailure || serverReject) {
         // Только фактическая неудача. Серверные failed владеет
         // retry_count команды — здесь их не считаем.
         this._failedRuns += 1;
         if (this._failedRuns >= MAX_FAILED_RUNS && !this._manualMode) {
-            this._manualMode = true;
-            notify.warning(
-                "Синхронизация приостановлена. Нажмите «Синхронизировать»",
-                { timeout: 0, persistent: true, once: true },
-            );
-            logHistoryAction(
-                "Синхронизация приостановлена: 3 запуска без успешных команд.",
-            );
+          this._manualMode = true;
+          notify.warning(
+            "Синхронизация приостановлена. Нажмите «Синхронизировать»",
+            { timeout: 0, persistent: true, once: true },
+          );
+          logHistoryAction(
+            "Синхронизация приостановлена: 3 запуска без успешных команд.",
+          );
         }
         await this._persistFlags();
-    }
+      }
 
-    // Точный будильник нужен и когда часть команд обработана:
-    // failed-команда с backoff 30 с не должна ждать периодики 60 с.
-    // Простой (всё в backoff / заблокировано) счётчики не трогаем.
-    if (!networkFailure && !serverReject && !this._manualMode) {
+      // Точный будильник нужен и когда часть команд обработана:
+      // failed-команда с backoff 30 с не должна ждать периодики 60 с.
+      // Простой (всё в backoff / заблокировано) счётчики не трогаем.
+      if (!networkFailure && !serverReject && !this._manualMode) {
         await this._scheduleBackoffWake();
+      }
     }
-}
-    
 
     window.dispatchEvent(new Event("refreshSyncState"));
 
-   if (touchedTickets) {
-  // 2.27: сбрасываем applied, чтобы следующий _tick подтянул свежие
-  // версии. Без этого poller продолжит слать старые applied и получать
-  // тот же outdated.
-  window.dispatchEvent(
-    new CustomEvent("sync:applied_reset", {
-      detail: { layers: ["open_tickets", "closed_tickets"] },
-    }),
-  );
-  // 2.27: один тик поллера сразу, а не через 120 сек.
-  window.notificationsPollerInstance?._tick?.();
-}
+    if (touchedTickets) {
+      // 2.27: сбрасываем applied, чтобы следующий _tick подтянул свежие
+      // версии. Без этого poller продолжит слать старые applied и получать
+      // тот же outdated.
+      window.dispatchEvent(
+        new CustomEvent("sync:applied_reset", {
+          detail: { layers: ["open_tickets", "closed_tickets"] },
+        }),
+      );
+      // 2.27: один тик поллера сразу, а не через 120 сек.
+      window.notificationsPollerInstance?._tick?.();
+    }
   }
-
 
   /** Кнопка «Синхронизировать»: сбрасывает ручной режим и счётчик. */
   async syncNow() {
@@ -389,56 +402,51 @@ export class SyncManager {
     }
   }
 
-
-
- // --- Прогресс (§13.4) ---
-_publishProgress(done, total, active) {
+  // --- Прогресс (§13.4) ---
+  _publishProgress(done, total, active) {
     this._progress = { done, total, active };
     window.dispatchEvent(
-        new CustomEvent("sync:progress", { detail: { ...this._progress } }),
+      new CustomEvent("sync:progress", { detail: { ...this._progress } }),
     );
-}
-  
+  }
 
- 
+  // --- Одна команда ---
 
- // --- Одна команда ---
+  async _sendOne(cmd, blockedKeys) {
+    const user = authStore.getUser();
+    const batchId = await this._batchIdFor(cmd);
 
- async _sendOne(cmd, blockedKeys) {
-  const user = authStore.getUser();
-  const batchId = await this._batchIdFor(cmd);
-
-  let command;
-  try {
-    command = buildCommand(cmd, user, {
-      forceCreate: cmd.confirmed === true,
-    });
-  } catch (err) {
-    if (err.name === "CommandBuildError") {
-      await offlineDB.updateOutboxCommand(cmd.command_uuid, {
-        status: "rejected",
-        reason: err.reason,
-        last_error: err.message,
+    let command;
+    try {
+      command = buildCommand(cmd, user, {
+        forceCreate: cmd.confirmed === true,
       });
-      logHistoryAction(
-        `Команда ${cmd.command_uuid} отклонена клиентом: ${err.reason}`,
-      );
-      return { kind: "done", terminal: true, touchedTickets: false };
+    } catch (err) {
+      if (err.name === "CommandBuildError") {
+        await offlineDB.updateOutboxCommand(cmd.command_uuid, {
+          status: "rejected",
+          reason: err.reason,
+          last_error: err.message,
+        });
+        logHistoryAction(
+          `Команда ${cmd.command_uuid} отклонена клиентом: ${err.reason}`,
+        );
+        return { kind: "done", terminal: true, touchedTickets: false };
+      }
+      throw err;
     }
-    throw err;
-  }
 
-  let resp;
-  try {
-    resp = await this.api.post(
-      { action: "syncCommands", batch_id: batchId, commands: [command] },
-      null,
-      "sync",
-    );
-  } catch (e) {
-    console.warn("[SyncManager] Сеть недоступна:", e);
-    return { kind: "network" }
-  }
+    let resp;
+    try {
+      resp = await this.api.post(
+        { action: "syncCommands", batch_id: batchId, commands: [command] },
+        null,
+        "sync",
+      );
+    } catch (e) {
+      console.warn("[SyncManager] Сеть недоступна:", e);
+      return { kind: "network" };
+    }
 
     if (!resp) return { kind: "network" };
     if (resp._authLost) return { kind: "auth" };
@@ -480,7 +488,7 @@ _publishProgress(done, total, active) {
     return batchId;
   }
 
- async _applyResult(cmd, result, data, blockedKeys) {
+  async _applyResult(cmd, result, data, blockedKeys) {
     const status = result.status;
     const reason = this._reasonOf(result);
     const message = result.message || "";
@@ -605,7 +613,6 @@ _publishProgress(done, total, active) {
     return raw;
   }
 
-
   // --- Для экрана очереди ---
 
   /**
@@ -625,10 +632,25 @@ _publishProgress(done, total, active) {
           m.duplicateTicketModal.show(record, existing),
         ));
 
-    const confirmed = await show(cmd, cmd.existing_tickets || []);
+    const existing = cmd.existing_tickets || [];
+    const confirmed = await show(cmd, existing);
     if (!confirmed) return false;
 
+    // Пометка о дубликате — в comments создаваемой заявки (§9.2).
+    // Тот же текст, что в онлайн-пути, поэтому диспетчер видит одинаковую
+    // формулировку независимо от того, где подтвердил дубликат.
+    const user = authStore.getUser();
+    const authorName = user?.surname
+      ? `${user.surname} ${user.name || ""}`.trim()
+      : user?.name;
+    const payload = { ...(cmd.payload || {}) };
+    payload.comments = appendOfflineComment(
+      payload.comments,
+      buildDuplicateCommentLine(existing, authorName),
+    );
+
     await offlineDB.updateOutboxCommand(commandUuid, {
+      payload,
       status: "pending",
       confirmed: true,
       next_retry_at: 0,
@@ -653,7 +675,7 @@ _publishProgress(done, total, active) {
     window.dispatchEvent(new Event("refreshSyncState"));
     this.syncNow();
   }
-   /**
+  /**
    * Точный будильник по ближайшему next_retry_at.
    * Без него backoff 30 с округляется периодическим тиком до 60 с.
    * Записи с уже наступившим сроком не учитываем: они заблокированы
