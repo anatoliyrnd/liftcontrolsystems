@@ -7,6 +7,8 @@ import { createCreateFormView } from "./create/views/create-form-view.js";
 import { createRepository } from "./create/create-repository.js";
 import { duplicateTicketModal } from "./components/duplicate-ticket-modal.js";
 import { authStore } from "./auth-store.js";
+import { outboxQueue } from "./outbox-queue.js";
+import { buildDuplicateNoteText } from "./utils/duplicate-marker.js";
 
 /** Ключ черновика формы (зеркалит DRAFT_KEY в create-form-view). */
 const DRAFT_KEY = "create_draft";
@@ -22,9 +24,8 @@ const DRAFT_KEY = "create_draft";
  * превращается в сообщение об отказе — иначе диспетчер отправит форму
  * повторно и получит дубликат. Пост-коммитный UI изолирован по шагам.
  *
- * Офлайн-ветка только при отказе канала (resp.offline === true:
- * network_error, aborted/timeout, invalid_response) либо при отсутствии
- * сети. Произвольное исключение при живой сети — сбой кода, не канала.
+ * Подтверждённый дубликат отмечается комментарием к новой заявке
+ * (_markDuplicate): lift_history виден только админу, комментарий — всем.
  */
 export class CreateController {
   constructor(apiInstance, routerInstance) {
@@ -144,10 +145,7 @@ export class CreateController {
     const myMountId = this._mountId;
     const isStale = () => this._mountId !== myMountId || !this.formView;
 
-    // Этап — для диагностики: в консоли видно, где именно упало.
     let stage = "validate";
-    // Коммит: сервер подтвердил создание. С этого момента показывать
-    // «не удалось создать» нельзя ни при каких обстоятельствах.
     let committed = false;
     let commitMessage = "Заявка зарегистрирована.";
 
@@ -241,7 +239,6 @@ export class CreateController {
       console.error(`[CreateController] Save error на этапе «${stage}»:`, err);
 
       if (committed) {
-        // Заявка создана. Сбой интерфейса не выглядит как отказ.
         logHistoryAction(
           "Заявка создана, но интерфейс не обновился: " +
             (err?.message || String(err)),
@@ -270,7 +267,6 @@ export class CreateController {
         this._scheduleUnlock();
       }
     } finally {
-      // Не сбрасываем _saving нового запуска, если этот уже устарел.
       if (this._mountId === myMountId) this._saving = false;
     }
   }
@@ -333,6 +329,12 @@ export class CreateController {
         committed = true;
         commitMessage = forceResponse.message || commitMessage;
         stage = "post-commit-ui";
+        this._safeUi("кнопка", () => this._setSaveBtnState("success"));
+        // Пометка пишется в фоне: заявка уже создана, держать
+        // кнопку в loading ещё один сетевой запрос незачем.
+        this._markDuplicate(forceResponse, existingTickets).catch((e) =>
+          console.warn("[CreateController] markDuplicate:", e),
+        );
         await this._finishSuccess(
           commitMessage,
           globalTicketsArrayRef,
@@ -400,6 +402,72 @@ export class CreateController {
     }
   }
 
+  /**
+   * Комментарий-пометка к только что созданной заявке-дубликату.
+   * Пост-коммитная операция: сбой не отменяет создание и не выглядит
+   * как отказ. Отказ канала → outbox (доставится при синхронизации),
+   * отказ сервера → только «История» (повтор бессмысленен).
+   * Тег не задаём: запрос не должен отменяться при уходе с экрана.
+   */
+  async _markDuplicate(response, existingTickets) {
+    const text = buildDuplicateNoteText(existingTickets);
+    const callId =
+      response?.call_id ??
+      response?.data?.call_id ??
+      response?.ticket_id ??
+      null;
+
+    if (callId == null) {
+      logHistoryAction(
+        `${text} Номер новой заявки сервер не вернул — пометка не привязана.`,
+      );
+      console.warn("[CreateController] force_create без call_id:", response);
+      return;
+    }
+
+    try {
+      const resp = await this.api.post(
+        { action: "callnote", call_id: callId, note: text },
+        null,
+        null,
+      );
+
+      if (resp && resp.status === "ok") {
+        logHistoryAction(`Заявка №${callId}: ${text}`);
+        return;
+      }
+
+      if (resp && (resp.offline === true || resp._authLost)) {
+        await outboxQueue.enqueueComment(callId, text);
+        logHistoryAction(
+          `Заявка №${callId}: пометка о дубликате сохранена локально.`,
+        );
+        return;
+      }
+
+      logHistoryAction(
+        `Заявка №${callId}: пометка о дубликате не сохранена — ` +
+          `${resp?.message || "отказ сервера"}. ${text}`,
+      );
+    } catch (e) {
+      console.warn("[CreateController] Пометка о дубликате не отправлена:", e);
+      try {
+        await outboxQueue.enqueueComment(callId, text);
+        logHistoryAction(
+          `Заявка №${callId}: пометка о дубликате сохранена локально.`,
+        );
+      } catch (e2) {
+        console.error(
+          "[CreateController] Пометка не сохранена и локально:",
+          e2,
+        );
+        logHistoryAction(
+          `${text} Заявка №${callId}. Пометку сохранить не удалось.`,
+        );
+      }
+    }
+  }
+
   async _handleOfflineSave(
     payload,
     globalTicketsArrayRef,
@@ -407,8 +475,6 @@ export class CreateController {
     networkResp = null,
   ) {
     const isStale = () => this._mountId !== myMountId || !this.formView;
-    // network_error — запрос точно не дошёл. aborted / invalid_response —
-    // сервер мог применить запрос, но результат не подтверждён.
     const uncertain =
       networkResp != null && networkResp.code !== "network_error";
 
@@ -434,8 +500,7 @@ export class CreateController {
       return;
     }
 
-    // КОММИТ: запись в outbox состоялась. Дальше только UI —
-    // его сбой не имеет права выглядеть как отказ записи.
+    // КОММИТ: запись в outbox состоялась. Дальше только UI.
     if (uncertain) {
       this._safeUi("уведомление", () =>
         notify.offline(
@@ -445,7 +510,8 @@ export class CreateController {
       );
       this._safeUi("история", () =>
         logHistoryAction(
-          `Заявка сохранена локально: сервер не подтвердил создание (${networkResp.code}). При синхронизации возможна проверка дубликата.`,
+          `Заявка сохранена локально (${result.offlineUuid}), сервер не подтвердил создание: ${networkResp.code}. ` +
+            `Адрес: ${payload.fullAddress || payload.address || "—"}. При синхронизации возможна проверка дубликата.`,
         ),
       );
     } else {
