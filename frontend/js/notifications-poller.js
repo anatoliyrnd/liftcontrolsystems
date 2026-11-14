@@ -225,7 +225,7 @@ export class NotificationsPoller {
         timeout: typeof ev.timeout === "number" ? ev.timeout : undefined,
         // Текст СПульта несёт адрес и причину для передачи голосом —
         // общий лимит 200 символов его режет. Нужна правка 3.
-        maxLength: 500,
+        ...(ev.event_type === "spult_error" ? { maxLength: 500 } : {}),
       }));
 
       filtered.forEach((ev) => {
