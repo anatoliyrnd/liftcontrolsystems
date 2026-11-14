@@ -5,7 +5,7 @@
     --bg-primary: #edf2f7;
     --bg-secondary: #f8fafc;
     --border-color: #cbd5e1;
-
+ --row-hover-bg: #f4f1fe; /* непрозрачный светло-фиолетовый (смесь белого и акцента) */
     --text-primary: #0f172a;
     --text-secondary: #475569;
 
@@ -26,15 +26,15 @@
 [data-theme="dark"] {
     --bg-primary: #0b0f19;
     --bg-secondary: #121b2c;
-    --border-color: #2a3a55;              /* ← было #a3e635 (лайм). Стало: приглушённый серо-синий */
-
-    --text-primary: #cbd5e1;              /* ← было #f8fafc. Стало: мягкий светло-серый */
-    --text-secondary: #7c8ba1;            /* ← было #94a3b8. Стало: чуть темнее, спокойнее */
+    --border-color: #2a3a55;              /*  приглушённый серо-синий */
+ --row-hover-bg: #1c1a29; /* непрозрачный тёмно-фиолетовый (смесь тёмного фона и акцента) */
+    --text-primary: #cbd5e1;              /*  мягкий светло-серый */
+    --text-secondary: #7c8ba1;            /* чуть темнее, спокойнее */
 
     --accent: #a3e635;                    /* оставляем — акцент должен выделяться */
     --accent-hover: #84cc16;
 
-    --table-th-bg: #1a2438;               /* ← было #1e293b. Стало: чуть холоднее */
+    --table-th-bg: #1a2438;               /*Стало: чуть холоднее */
     --table-row-hover: #1a263d;
     --mark-bg: #84cc16;
     --mark-text: #0b0f19;
@@ -218,7 +218,7 @@ th::after {
 /* Hover — через ту же переменную, что и row-level.
    :not() — чтобы hover не затирал цвет тревожных строк. */
 #dataTable tbody tr:hover:not(.row-level-2):not(.row-level-3) {
-    --row-bg: rgba(138, 43, 226, 0.08);
+    --row-bg: var(--row-hover-bg);
 }
 /* Стилизация динамической подсветки строк с сервера */
 tbody tr[style*="background-color"] {
