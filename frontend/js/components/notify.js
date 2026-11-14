@@ -232,7 +232,7 @@ function show(type, text, opts = {}) {
     id: "toast_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
     type,
     text: cleanText,
-    fulltext: fullText,
+    fullText,
     ticketId: opts.ticketId || null,
     timeout:
       typeof opts.timeout === "number" ? opts.timeout : CONFIG.TIMEOUT[type],
@@ -533,6 +533,7 @@ function batch(list) {
       persistent: item.persistent,
       ticketId: item.ticketId,
       sound: item.sound,
+      maxLength: item.maxLength,
     });
   });
 }
