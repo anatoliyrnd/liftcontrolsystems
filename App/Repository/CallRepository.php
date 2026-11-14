@@ -485,5 +485,227 @@ final class CallRepository
             ['id' => $typeId]
         );
     }
+    // =======================================================================
+    // Привязка объектов к СПульт (миграция 1.2)
+    // =======================================================================
 
+    /**
+     * Каноническая форма GUID: 32 hex в верхнем регистре, без дефисов.
+     *
+     * Владелец формата — репозиторий: колонка char(32) ascii_bin,
+     * сравнение побайтовое, поэтому 'faaf…' и 'FAAF…' — разные значения.
+     * Нормализация обязательна до любого поиска и записи.
+     *
+     * @return string|null null = GUID отсутствует или невалиден
+     */
+    public static function normalizeGuid(?string $raw): ?string
+    {
+        $s = strtoupper(trim((string) $raw));
+        $s = str_replace(['-', ' ', "\t", "\r", "\n"], '', $s);
+
+        if ($s === '' || preg_match('/^[A-F0-9]{32}$/', $s) !== 1) {
+            return null;
+        }
+
+        return $s;
+    }
+
+    /**
+     * LIFT@ID — внешний идентификатор, не наше число.
+     * Колонка varchar(32): числовой тип давал отказ приёма сигнала
+     * на нечисловом или слишком большом значении.
+     */
+    public static function normalizeSpultId(?string $raw): ?string
+    {
+        $s = trim((string) $raw);
+        if ($s === '') {
+            return null;
+        }
+
+        return mb_substr($s, 0, 32);
+    }
+
+    /**
+     * Объект по GUID — одним JOIN до города.
+     *
+     * Первичный путь приёма сигнала: адрес из XML не резолвим вообще,
+     * все четыре id и название берём из БД. Переименование улицы или
+     * лифта в пульте больше не отправляет сигнал в карантин.
+     *
+     * JOIN намеренно INNER: при битой иерархии (осиротевший home)
+     * собрать адрес и city_id невозможно — возвращаем null, вызывающая
+     * сторона уходит в адресный путь и далее в карантин.
+     *
+     * Формат full_address совпадает с resolveAddress() дословно, чтобы
+     * оба пути давали одинаковую строку в заявке.
+     *
+     * @return array{object_id:int,home_id:int,street_id:int,city_id:int,
+     *               group_id:int,vis:bool,guid:string|null,spult_id:string|null,
+     *               full_address:string}|null
+     */
+    public function findObjectByGuid(string $guid): ?array
+    {
+        $normalized = self::normalizeGuid($guid);
+        if ($normalized === null) {
+            return null;
+        }
+
+        $row = $this->db->fetchOne(
+            "SELECT o.id AS object_id, o.object_name, o.home_id, o.group_id, o.vis,
+                    o.guid, o.spult_id,
+                    h.home_name, h.street_id,
+                    s.street_name, s.city_id,
+                    c.city_name
+             FROM lift_object o
+             JOIN lift_home   h ON h.id = o.home_id
+             JOIN lift_street s ON s.id = h.street_id
+             JOIN lift_city   c ON c.id = s.city_id
+             WHERE o.guid = :guid
+             LIMIT 1",
+            ['guid' => $normalized]
+        );
+
+        if (!$row) {
+            return null;
+        }
+
+        return [
+            'object_id'    => (int) $row['object_id'],
+            'home_id'      => (int) $row['home_id'],
+            'street_id'    => (int) $row['street_id'],
+            'city_id'      => (int) $row['city_id'],
+            'group_id'     => (int) $row['group_id'],
+            'vis'          => (bool) $row['vis'],
+            'guid'         => $row['guid'] !== null ? (string) $row['guid'] : null,
+            'spult_id'     => $row['spult_id'] !== null ? (string) $row['spult_id'] : null,
+            'full_address' => sprintf(
+                '%s, %s, д.%s, %s',
+                $row['city_name'],
+                $row['street_name'],
+                $row['home_name'],
+                $row['object_name']
+            ),
+        ];
+    }
+
+    /**
+     * Привязать GUID к объекту. Только если поле пустое.
+     *
+     * Чужая привязка не перезаписывается никогда: молчаливая подмена
+     * отправила бы заявки на другой лифт, и заметить это было бы нечем.
+     *
+     * UPDATE условный (AND guid IS NULL) — два параллельных сигнала
+     * не перетирают друг друга. DB::execute не отдаёт число затронутых
+     * строк, поэтому факт проверяем повторным чтением.
+     *
+     * UNIQUE(uq_object_guid) может сработать, если GUID успел привязаться
+     * к другому объекту — это не ошибка, а гонка: возвращаем статус
+     * и id владельца, вызывающая сторона создаст заявку на него.
+     *
+     * @return array{status:string,existing_guid:string|null,holder_object_id?:int|null}
+     *   status: bound | already_bound | conflict | guid_taken | lost_race
+     *           | invalid_guid | object_not_found
+     */
+    public function bindSpultGuid(int $objectId, string $guid, ?string $spultId = null): array
+    {
+        $normalized = self::normalizeGuid($guid);
+        if ($normalized === null) {
+            return ['status' => 'invalid_guid', 'existing_guid' => null];
+        }
+
+        $current = $this->db->fetchOne(
+            "SELECT guid, spult_id FROM lift_object WHERE id = :id",
+            ['id' => $objectId]
+        );
+
+        if (!$current) {
+            return ['status' => 'object_not_found', 'existing_guid' => null];
+        }
+
+        $existing = $current['guid'] !== null ? (string) $current['guid'] : null;
+
+        // Тот же GUID — идемпотентный повтор, только дозаполняем spult_id.
+        if ($existing === $normalized) {
+            $this->fillSpultId($objectId, $spultId);
+            return ['status' => 'already_bound', 'existing_guid' => $existing];
+        }
+
+        // Другой GUID — конфликт, привязку не трогаем.
+        if ($existing !== null && $existing !== '') {
+            return ['status' => 'conflict', 'existing_guid' => $existing];
+        }
+
+        try {
+            $this->db->execute(
+                "UPDATE lift_object SET guid = :guid WHERE id = :id AND guid IS NULL",
+                ['guid' => $normalized, 'id' => $objectId]
+            );
+        } catch (\Throwable $e) {
+            if (!$this->isDuplicateKey($e)) {
+                throw $e;   // не конфликт уникальности — наверх, это реальный сбой
+            }
+
+            $holder = $this->findObjectByGuid($normalized);
+
+            return [
+                'status'           => 'guid_taken',
+                'existing_guid'    => $normalized,
+                'holder_object_id' => $holder['object_id'] ?? null,
+            ];
+        }
+
+        $after   = $this->db->fetchOne(
+            "SELECT guid FROM lift_object WHERE id = :id",
+            ['id' => $objectId]
+        );
+        $nowGuid = ($after && $after['guid'] !== null) ? (string) $after['guid'] : null;
+
+        if ($nowGuid !== $normalized) {
+            // Условие не выполнилось: между чтением и записью поле заняли.
+            return ['status' => 'lost_race', 'existing_guid' => $nowGuid];
+        }
+
+        $this->fillSpultId($objectId, $spultId);
+
+        return ['status' => 'bound', 'existing_guid' => $normalized];
+    }
+
+    /**
+     * Дозаполнить spult_id, если он пуст. Существующее значение не меняем.
+     *
+     * @return bool true = поле теперь равно переданному значению
+     */
+    public function fillSpultId(int $objectId, ?string $spultId): bool
+    {
+        $normalized = self::normalizeSpultId($spultId);
+        if ($normalized === null) {
+            return false;
+        }
+
+        $this->db->execute(
+            "UPDATE lift_object SET spult_id = :sid
+             WHERE id = :id AND (spult_id IS NULL OR spult_id = '')",
+            ['sid' => $normalized, 'id' => $objectId]
+        );
+
+        $row = $this->db->fetchOne(
+            "SELECT spult_id FROM lift_object WHERE id = :id",
+            ['id' => $objectId]
+        );
+
+        return $row && (string) $row['spult_id'] === $normalized;
+    }
+
+    /**
+     * Отличить конфликт уникального индекса от настоящего сбоя БД.
+     * Обёртка DB может отдавать PDOException или свой класс — смотрим текст.
+     */
+    private function isDuplicateKey(\Throwable $e): bool
+    {
+        $msg = $e->getMessage();
+
+        return str_contains($msg, 'Duplicate entry')
+            || str_contains($msg, '1062')
+            || str_contains($msg, '23000');
+    }
 }
