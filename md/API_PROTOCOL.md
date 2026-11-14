@@ -1308,3 +1308,47 @@
 Клиентский throttle звука — 1 beep / 10 с, но persistent-тосты копятся
 в очереди и закрываются вручную. Агрегация массовых расхождений
 (одно событие на смену адреса, а не на лифт) — задача бэкенда.
+
+Дельта в API_PROTOCOL.md §2.2
+Заменить абзац про конфликт прав на:
+can_add_ticket и user_add_call — решение принято.
+Флаг lift_users.user_add_call уважается в обоих путях: online (callnew) и offline (syncCommands → CreateTicket). Инженер с флагом создаёт заявку офлайн — команда выполняется, а не уходит в archived: no_rights с потерей работы.
+Роль
+user_add_call = 0
+user_add_call = 1
+administrator
+✅
+✅
+dispatcher
+✅
+✅
+engineer
+❌
+✅
+прочая роль
+❌
+✅
+guest
+❌
+❌
+Единый источник истины — App\Support\CallPolicy::canCreate(). Его используют: ConfigService (выдача can_add_ticket), ApiController (sync-путь), CallService (online-путь). Дублирующих проверок роли быть не должно.
+Флаг прокидывается в $user через AuthService::formatUser() — иначе он недоступен в sync-пути, где $user приходит из validate().
+Дельта в bekend.md §9
+Открытое решение №1 закрыть:
+№1. can_add_ticket / user_add_call — ЗАКРЫТО. Флаг уважается в обоих путях через CallPolicy::canCreate(). Реализация: B3.1 + правка formatUser + правка checkCommandPermissions.
+Где флаг должен уважаться — четыре точки
+Точка
+Сейчас
+Станет
+ConfigService::getConfig
+✅ флаг читается, can_add_ticket выдаётся верно
+вызывает CallPolicy::canCreate()
+AuthService::formatUser
+❌ флаг не возвращается
+добавляет user_add_call в $user
+ApiController::checkCommandPermissions
+❌ только admin/dispatcher
+вызывает CallPolicy::canCreate()
+CallService::callnew (online)
+❌ проверок прав нет вовсе
+вызывает CallPolicy::canCreate()
