@@ -109,16 +109,26 @@ export const BUSINESS = {
     admin: "Администратор",
     auditor: "Аудитор",
   },
-  /** Маппинг event_type серверных событий → тип тоста */
+  /**
+   * Маппинг event_type серверных событий → тип тоста (API_PROTOCOL §11.2).
+   * Покрывает всё, что сервер генерирует или планирует генерировать.
+   * Алиасы имён (ticket_note → note_added) — в notifications-poller.js.
+   * Тип задаёт только оформление и дефолтный таймаут; sound и timeout
+   * приходят с сервера и здесь не переопределяются (§11.1).
+   */
   EVENT_TOAST_TYPE: {
-    ticket_closed: "success",
-    note_added: "info",
     ticket_created: "info",
+    ticket_closed: "success",
+    ticket_edited: "info",
+    note_added: "info",
     ticket_reassigned: "info",
     staff_accepted: "success",
+    staff_unassigned: "warning",
     ticket_overdue: "warning",
     emergency: "error",
-    staff_unassigned: "warning",
+    // СПульт: сигнал не обработан либо обработан с расхождением.
+    // ticket_id nullable, timeout: 0 и sound — с сервера.
+    spult_error: "error",
   },
 };
 // ============================================================================
