@@ -484,12 +484,24 @@ function removeDemoRow() {
 // =========================================================================
 
 async function loadDriver() {
+<<<<<<< HEAD
+    if (!driverLib) {
+        const mod = await import('driver.js');
+        driverLib = mod.driver;
+    }
+    if (!cssLoaded) {
+        await import('driver.js/dist/driver.css');
+        cssLoaded = true;
+    }
+    return driverLib;
+=======
   if (!driverLib) {
     const mod = await import("driver.js");
     driverLib = mod.driver;
   }
   // CSS уже импортирован статически в начале файла
   return driverLib;
+>>>>>>> 3864c5800864bca73b94bd8061505624f9f3fa98
 }
 
 function filterAvailable(steps) {
