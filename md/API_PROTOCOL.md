@@ -1352,3 +1352,9 @@ ApiController::checkCommandPermissions
 CallService::callnew (online)
 ❌ проверок прав нет вовсе
 вызывает CallPolicy::canCreate()
+
+Сейчас character_set_client/connection/results = utf8mb4, но если это даёт конфиг хостера, он может молча поменяться. Сделать явным в точке подключения:
+// PDO
+$pdo = new PDO("mysql:host=$host;dbname=$db;charset=utf8mb4", $user, $pass, $opts);
+// mysqli
+mysqli_set_charset($link, 'utf8mb4');

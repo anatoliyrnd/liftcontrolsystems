@@ -231,11 +231,6 @@ tbody tr[style*="background-color"]:hover {
     filter: brightness(1.15);
 }
 
-/* Поддержка зебры для липких колонок */
-#dataTable tbody tr:nth-child(even) td[data-col-id="id"],
-#dataTable tbody tr:nth-child(even) td[data-col-id="address"] {
-    /* background-color: var(--bg-secondary) !important; */
-}
 
 /* Фиксация колонок по горизонтали (Заморозка № и Адрес) */
 #dataTable th[data-id="id"] {

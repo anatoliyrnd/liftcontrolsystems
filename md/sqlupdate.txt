@@ -562,3 +562,10 @@ CREATE TABLE IF NOT EXISTS `spult_events` (
     KEY `idx_ticket` (`ticket_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='События интеграции СПульт для админ-панели';
+
+  ALTER TABLE `lift_calls` CHANGE `call_details` `call_details` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;
+
+  ALTER TABLE lift_calls DROP INDEX uq_calls_offline_uuid;
+  ALTER TABLE `lift_calls` CHANGE `call_solution` `call_solution` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;
+  
+ALTER TABLE `lift_calls` CHANGE `call_fullhistory` `call_fullhistory` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '\'\'' COMMENT 'История после закрытия';
