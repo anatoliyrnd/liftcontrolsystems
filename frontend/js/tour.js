@@ -619,21 +619,26 @@ async function beginScenario(state, notify) {
     steps: available.map(({ s }) => s),
     onHighlightStarted: (_el, step) => updateGlobalProgress(step),
 
-    // ИСПРАВЛЕНО: используем onNextClick и onPrevClick
     onNextClick: (_el, step) => {
+      // 1. Проверяем гейт (например, выбран ли город)
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
-        return false;
+        return false; // Блокируем, если не выполнено
       }
-      // hasNextStep() — единственный надёжный способ определить последний
-      // шаг в driver.js v1. isLastStep() не существует → TypeError.
-      // Возврат undefined разрешает переход — флаг advancing нужен onDestroyed.
-      if (driverObj && !driverObj.hasNextStep()) {
+
+      // 2. Если это последний шаг сценария — ставим флаг для перехода на новую страницу
+      if (driverObj && driverObj.isLastStep()) {
         advancing = true;
       }
+
+      // 3. ВАЖНО: Явно переключаем на следующий шаг!
+      driverObj.moveNext();
     },
-    onPrevClick: () => true,
-    onPrevClick: () => true,
+
+    onPrevClick: () => {
+      // То же самое для кнопки "Назад" — нужно вызывать явно
+      driverObj.movePrevious();
+    },
 
     onDestroyed: () => {
       driverObj = null;
