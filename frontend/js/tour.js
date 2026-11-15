@@ -1,6 +1,8 @@
 /**
  * Сквозной обучающий тур по системе (driver.js).
  */
+// СТАТИЧЕСКИЙ ИМПОРТ CSS — Vite обработает на этапе сборки
+import "driver.js/dist/driver.css";
 
 const STATE_KEY = "lift_tour_state";
 
@@ -486,10 +488,7 @@ async function loadDriver() {
     const mod = await import("driver.js");
     driverLib = mod.driver;
   }
-  if (!cssLoaded) {
-    await import("driver.js/dist/driver.css");
-    cssLoaded = true;
-  }
+  // CSS уже импортирован статически в начале файла
   return driverLib;
 }
 
