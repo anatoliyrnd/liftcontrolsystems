@@ -4,8 +4,9 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Database\DB;
+use App\Support\CallPolicy;
+use App\Support\CallScope;
 use App\Support\Period;
-
 final class CallRepository
 {
     public function __construct(private readonly DB $db)
@@ -77,7 +78,7 @@ final class CallRepository
      */
     public function listOpen(array $user): array
     {
-        $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
+
 
         $sql = "SELECT c.*,
                COALESCE((d.type_report = 0), 0) AS is_emergency,
@@ -96,15 +97,9 @@ final class CallRepository
         LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
         WHERE c.call_status = 0 ";
 
-        $params = [];
-
-        if (!$readAll) {
-            $sql .= " AND (c.call_staff = :uid OR c.call_staff2 = :uid OR c.call_staff3 = :uid) ";
-            $params['uid'] = $user['id'];
-        }
-
+              $params = [];
+        $sql .= $this->ownershipFilter($user, $params);
         $sql .= " ORDER BY c.call_id DESC";
-
         $calls = $this->db->fetchAll($sql, $params);
         return $this->formatList($calls, 'open');
     }
@@ -115,7 +110,7 @@ final class CallRepository
     public function listClosed(array $user, string|int|null $period): array
     {
         $dateClose = Period::resolve($period);
-        $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
+
 
         $sql = "SELECT c.*,
                COALESCE((d.type_report = 0), 0) AS is_emergency,
@@ -135,16 +130,44 @@ final class CallRepository
         WHERE c.call_status = 1 AND c.call_date2 >= :date_close ";
 
         $params = ['date_close' => $dateClose];
-
-        if (!$readAll) {
-            $sql .= " AND (c.call_staff = :uid OR c.call_staff2 = :uid OR c.call_staff3 = :uid) ";
-            $params['uid'] = $user['id'];
-        }
-
+        $sql .= $this->ownershipFilter($user, $params);
         $sql .= " ORDER BY c.call_date2 DESC";
 
         $calls = $this->db->fetchAll($sql, $params);
         return $this->formatList($calls, 'close');
+    }
+
+       /**
+     * SQL-фильтр «только свои заявки» — один на оба списка.
+     *
+     * Решение принимает CallScope, здесь только перевод в WHERE: раньше
+     * одинаковый фильтр был вписан в listOpen и listClosed отдельно, и
+     * правка одного списка забывалась во втором.
+     *
+     * Пустая строка = видит всё. Параметр uid добавляется только когда
+     * фильтр нужен: лишний параметр дал бы ошибку привязки в fetchAll.
+     *
+     * РАСШИРЕНИЕ (группы лифтов): сюда добавится условие по
+     * elevator_group_id, когда появится CallScope::allowedGroupIds().
+     */
+    private function ownershipFilter(array $user, array &$params): string
+    {
+        if (CallScope::readAll($user)) {
+            return '';
+        }
+
+        $uid = (int) ($user['id'] ?? 0);
+
+        // Битая сессия без id: «call_staff = 0» совпал бы с каждой
+        // неназначенной заявкой. Пустой список честнее и совпадает
+        // с CallScope::isAssigned(), который при id 0 тоже отказывает.
+        if ($uid <= 0) {
+            return ' AND 1 = 0 ';
+        }
+
+        $params['uid'] = $uid;
+
+        return ' AND (c.call_staff = :uid OR c.call_staff2 = :uid OR c.call_staff3 = :uid) ';
     }
 
     /**
@@ -367,13 +390,12 @@ final class CallRepository
             return null;
         }
 
-        // Проверка прав доступа
-        $readAll = ($user['role'] === 'administrator' || $user['role'] === 'dispatcher');
-        if (!$readAll) {
-            $assigned = [(int)$call['call_staff'], (int)$call['call_staff2'], (int)$call['call_staff3']];
-            if (!in_array((int)$user['id'], $assigned)) {
-                return null; // Нет прав
-            }
+              // Видимость карточки = видимость в списке. Своя проверка здесь
+        // уже расходилась с фильтром списка: механик открывал по ссылке
+        // заявку, которой не было в его списке.
+        // Отказ — null (§12.2), не 403: существование заявки не раскрываем.
+        if (!CallScope::canView($user, $call)) {
+            return null;
         }
 
         // Загрузка заметок
@@ -420,13 +442,21 @@ final class CallRepository
             ];
         }
 
-        // Вычисление прав
+           // Права считает CallPolicy — тот же предикат, что отвечает на само
+        // действие. Иначе кнопка есть, а сервер даёт 403: can_edit пускал
+        // назначенного инженера, can_comment — вообще любого, включая гостя.
+        //
+        // Область чтения здесь НЕ участвует: флаг user_read_all_calls даёт
+        // просмотр, а не право записи. Закрытая заявка финальна — can_* ложны.
+        //
+        // WARNING (согласовано, тест): назначенность engineer не проверяется,
+        // поэтому механик с флагом чтения закрывает и комментирует чужие
+        // заявки. Закрывается точкой C в CallPolicy — $call уже передаётся.
+        // См. API_syncCommands §15.
         $isOpen = (int)$call['call_status'] === 0;
-        $isAssigned = in_array((int)$user['id'], [(int)$call['call_staff'], (int)$call['call_staff2'], (int)$call['call_staff3']]);
-        $canEdit = $isOpen && ($readAll || $isAssigned);
-        $canClose = $isOpen && ($user['role'] === 'administrator' || $user['role'] === 'dispatcher' || $user['role'] === 'engineer' || $isAssigned);
-        $canComment = $isOpen;
-
+        $canEdit = $isOpen && CallPolicy::canEdit($user, $call);
+        $canClose = $isOpen && CallPolicy::canClose($user, $call);
+        $canComment = $isOpen && CallPolicy::canComment($user, $call);
         return [
             'id'          => (int) $call['call_id'],   // ← B1.1
             'call_id' => (int)$call['call_id'],
