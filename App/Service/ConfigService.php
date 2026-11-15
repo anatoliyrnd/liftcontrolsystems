@@ -101,22 +101,33 @@ final class ConfigService
             'repair_time'    => ['не указан', '30 мин', 'Сегодня', 'Завтра', 'Три дня', '7 дней', '10 дней', '15 дней', '1 месяц', '3 месяца'],
         ];
 
-        // Легаси-совместимость (Приложение A). Новый SPA эти поля не читает,
+               // Легаси-совместимость (Приложение A). Новый SPA эти поля не читает,
         // их использует прокси-слой. Состав и порядок 9 элементов не менять.
+        //
+        // Значения прав на заявки берём из CallPolicy, а не выводим из роли:
+        // легаси-UI показывал кнопку, на которую сервер отвечал 403 — механик
+        // не видел «Закрыть», гость видел «Комментарий». Контракт прокси —
+        // структура массива, а не конкретные значения.
+        //
+        // Контекст заявки здесь null: config сообщает возможность в принципе.
+        // Права на конкретную заявку считает карточка (findByIdDetailed)
+        // теми же предикатами, но уже с $call.
+        //
+        // Пункты 6–8 остаются ролевыми: это права на пользователей и объекты,
+        // для них политика ещё не заведена — подменять их заявочной нельзя.
         if ($this->tenant->legacyCompat) {
             $result['nav'] = [
-                $user['id'],           // 0: user_id
-                $readAll,              // 1: read_all
-                $isAdmin || $isDisp,   // 2: edit_call
-                $isAdmin || $isDisp,   // 3: close_call
-                true,                  // 4: note_call
-                $canAdd,               // 5: add_call
-                $isAdmin,              // 6: edit_user
-                $isAdmin,              // 7: edit_obj
-                $isAdmin,              // 8: local_admin
+                $user['id'],                    // 0: user_id
+                $readAll,                       // 1: read_all
+                CallPolicy::canEdit($user),     // 2: edit_call
+                CallPolicy::canClose($user),    // 3: close_call
+                CallPolicy::canComment($user),  // 4: note_call
+                $canAdd,                        // 5: add_call
+                $isAdmin,                       // 6: edit_user
+                $isAdmin,                       // 7: edit_obj
+                $isAdmin,                       // 8: local_admin
             ];
         }
-
         return $result;
     }
 
