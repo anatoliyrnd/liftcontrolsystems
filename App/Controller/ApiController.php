@@ -7,6 +7,7 @@ use App\Database\DB;
 use App\Http\{Request, Response, ErrorCode};
 use App\Tenant;
 use App\Exceptions\ApiException;
+use App\Support\CallPolicy;
 use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository};
 use App\Service\{
     AuthService,
@@ -463,38 +464,37 @@ final class ApiController
         }
     }
 
-    /**
-     * Контроль прав ролей к типам команд (§2.2).
+     /**
+     * Контроль прав на типы команд (§2.2) — через CallPolicy.
+     *
+     * Матрицу здесь не дублируем: те же предикаты обслуживают online-путь
+     * в CallService и can_* в карточке. Ролевая проверка не уважала
+     * user_add_call — инженер с правом получал archived: no_rights,
+     * и офлайн-работа терялась.
+     *
+     * Требует user_add_call в $user: поле отдаёт AuthService::formatUser,
+     * иначе флаг читается как 0 и право молча исчезает.
      *
      * B2.8: конкретика в reason, без префикса 'no_rights:' в message.
-     *
-     * Переходно: проверка остаётся ролевой. Флаг user_add_call сюда
-     * недоступен — AuthService::formatUser его не возвращает. Уважение
-     * флага делаем в B3 вместе с CallPolicy, чтобы не плодить третью
-     * копию логики прав (сейчас их две: здесь и can_* в репозитории).
+     * Неизвестный тип остаётся \InvalidArgumentException → failed:
+     * это дефект клиента, а не отказ в правах, и повтор тут не поможет.
      */
     private function checkCommandPermissions(array $user, string $type): void
     {
-        $role = (string) ($user['role'] ?? 'guest');
+        $allowed = match ($type) {
+            'CreateTicket' => CallPolicy::canCreate($user),
+            'EditTicket'   => CallPolicy::canEdit($user),
+            'CloseTicket'  => CallPolicy::canClose($user),
+            'AddComment'   => CallPolicy::canComment($user),
+            default        => throw new \InvalidArgumentException('unknown_command_type'),
+        };
 
-        if ($type === 'CreateTicket' || $type === 'EditTicket') {
-            if ($role !== 'administrator' && $role !== 'dispatcher') {
-                throw new ApiException(
-                    ErrorCode::Forbidden,
-                    'Роль не имеет прав на это действие',
-                    reason: 'no_rights'
-                );
-            }
-        } elseif ($type === 'CloseTicket' || $type === 'AddComment') {
-            if ($role !== 'administrator' && $role !== 'dispatcher' && $role !== 'engineer') {
-                throw new ApiException(
-                    ErrorCode::Forbidden,
-                    'Роль не имеет прав на это действие',
-                    reason: 'no_rights'
-                );
-            }
-        } else {
-            throw new \InvalidArgumentException('unknown_command_type');
+        if (!$allowed) {
+            throw new ApiException(
+                ErrorCode::Forbidden,
+                'Роль не имеет прав на это действие',
+                reason: 'no_rights'
+            );
         }
     }
 
