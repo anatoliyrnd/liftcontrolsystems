@@ -2703,7 +2703,20 @@ td.cell-alert-info {
     box-shadow: 0 0 0 4px var(--accent, #6366f1) !important;
 }
 
+/* Виртуальный пункт очереди */
+tr[data-demo="true"] {
+  background: rgba(249, 115, 22, 0.15) !important;
+}
 
+tr[data-demo="true"] td:first-child {
+  color: #f97316;
+  font-weight: 600;
+}
+
+.demo-btn, .demo-delete-btn {
+  opacity: 0.5;
+  cursor: not-allowed !important;
+}
 /* Адаптивность: на экранах уже 768px оставляем только иконку */
 @media (max-width: 768px) {
     .logo-text-group {
