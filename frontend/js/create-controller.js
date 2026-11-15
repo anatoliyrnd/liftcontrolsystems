@@ -13,6 +13,9 @@ import { buildDuplicateNoteText } from "./utils/duplicate-marker.js";
 /** Ключ черновика формы (зеркалит DRAFT_KEY в create-form-view). */
 const DRAFT_KEY = "create_draft";
 
+const CANCEL_LABEL_DEFAULT = "Отмена";
+const CANCEL_LABEL_RETURN = "Вернуться в журнал";
+
 /**
  * Экран создания заявки.
  *
@@ -24,8 +27,10 @@ const DRAFT_KEY = "create_draft";
  * превращается в сообщение об отказе — иначе диспетчер отправит форму
  * повторно и получит дубликат. Пост-коммитный UI изолирован по шагам.
  *
- * Подтверждённый дубликат отмечается комментарием к новой заявке
- * (_markDuplicate): lift_history виден только админу, комментарий — всем.
+ * После успешного сохранения кнопка «Отмена» меняет надпись на
+ * «Вернуться в журнал»: действие то же (переход в журнал), но теперь
+ * оно описывает то, что реально произойдёт. Исходное содержимое кнопки
+ * снимается в mount и возвращается при разблокировке формы.
  */
 export class CreateController {
   constructor(apiInstance, routerInstance) {
@@ -36,6 +41,9 @@ export class CreateController {
     this.formView = null;
     this._saving = false;
     this._mountId = 0;
+    // Исходное содержимое кнопки отмены из шаблона (иконка + текст).
+    this._cancelBtnNodes = null;
+    this._cancelBtnTitle = "";
   }
 
   mount(globalTicketsArrayRef) {
@@ -60,7 +68,14 @@ export class CreateController {
     this.formView.mount(prefilledAddress);
 
     const cancelBtn = document.getElementById("cancelFormBtn");
-    if (cancelBtn) cancelBtn.onclick = () => this.router.navigate("#/");
+    if (cancelBtn) {
+      // Снимаем узлы, а не innerHTML: иконка шаблона сохранится как есть.
+      this._cancelBtnNodes = Array.from(cancelBtn.childNodes);
+      this._cancelBtnTitle = cancelBtn.getAttribute("title") || "";
+      cancelBtn.onclick = () => this.router.navigate("#/");
+    }
+    this._setCancelBtnReturned(false);
+
     const saveBtn = document.getElementById("saveTicketBtn");
     if (saveBtn) saveBtn.onclick = () => this._onSave(globalTicketsArrayRef);
   }
@@ -115,6 +130,28 @@ export class CreateController {
   }
 
   /**
+   * Надпись кнопки отмены. После подтверждённого создания форма уже
+   * пуста, а клик ведёт в журнал — «Отмена» в этот момент врёт.
+   * Обработчик не меняется: он и так navigate("#/").
+   */
+  _setCancelBtnReturned(returned) {
+    const btn = document.getElementById("cancelFormBtn");
+    if (!btn) return;
+    if (returned) {
+      btn.textContent = CANCEL_LABEL_RETURN;
+      btn.title = "Вернуться к списку открытых заявок";
+      return;
+    }
+    if (this._cancelBtnNodes && this._cancelBtnNodes.length > 0) {
+      btn.replaceChildren(...this._cancelBtnNodes);
+    } else {
+      btn.textContent = CANCEL_LABEL_DEFAULT;
+    }
+    if (this._cancelBtnTitle) btn.title = this._cancelBtnTitle;
+    else btn.removeAttribute("title");
+  }
+
+  /**
    * Пост-коммитный UI после подтверждённого создания.
    * Ни один шаг не пробрасывает исключение наверх: заявка уже создана,
    * и сообщение об отказе здесь недопустимо.
@@ -122,7 +159,7 @@ export class CreateController {
   async _finishSuccess(message, globalTicketsArrayRef, myMountId) {
     const isStale = () => this._mountId !== myMountId || !this.formView;
 
-    this._safeUi("кнопка", () => this._setSaveBtnState("success"));
+    this._safeUi("кнопка сохранения", () => this._setSaveBtnState("success"));
     this._safeUi("история", () => logHistoryAction(message));
     this._safeUi("уведомление", () => notify.success(message));
 
@@ -137,6 +174,7 @@ export class CreateController {
     // Страховка: если reset упал на середине, черновик не должен
     // пережить уже созданную заявку — иначе следующий вход предложит дубль.
     this._safeUi("черновик", () => sessionStorage.removeItem(DRAFT_KEY));
+    this._safeUi("кнопка возврата", () => this._setCancelBtnReturned(true));
     this._safeUi("автовозврат", () => this._scheduleReturn());
   }
 
@@ -248,6 +286,7 @@ export class CreateController {
         });
         if (!isStale()) {
           this._setSaveBtnState("success");
+          this._setCancelBtnReturned(true);
           this._scheduleReturn();
         }
         return;
@@ -329,7 +368,9 @@ export class CreateController {
         committed = true;
         commitMessage = forceResponse.message || commitMessage;
         stage = "post-commit-ui";
-        this._safeUi("кнопка", () => this._setSaveBtnState("success"));
+        this._safeUi("кнопка сохранения", () =>
+          this._setSaveBtnState("success"),
+        );
         // Пометка пишется в фоне: заявка уже создана, держать
         // кнопку в loading ещё один сетевой запрос незачем.
         this._markDuplicate(forceResponse, existingTickets).catch((e) =>
@@ -381,6 +422,7 @@ export class CreateController {
         });
         if (!isStale()) {
           this._setSaveBtnState("success");
+          this._setCancelBtnReturned(true);
           this._scheduleReturn();
         }
         return;
@@ -405,8 +447,7 @@ export class CreateController {
   /**
    * Комментарий-пометка к только что созданной заявке-дубликату.
    * Пост-коммитная операция: сбой не отменяет создание и не выглядит
-   * как отказ. Отказ канала → outbox (доставится при синхронизации),
-   * отказ сервера → только «История» (повтор бессмысленен).
+   * как отказ. Отказ канала → outbox, отказ сервера → только «История».
    * Тег не задаём: запрос не должен отменяться при уходе с экрана.
    */
   async _markDuplicate(response, existingTickets) {
@@ -541,9 +582,10 @@ export class CreateController {
     });
 
     if (isStale()) return;
-    this._safeUi("кнопка", () => this._setSaveBtnState("success"));
+    this._safeUi("кнопка сохранения", () => this._setSaveBtnState("success"));
     this._safeUi("черновик", () => sessionStorage.removeItem(DRAFT_KEY));
     this._safeUi("сброс формы", () => this.formView.reset());
+    this._safeUi("кнопка возврата", () => this._setCancelBtnReturned(true));
     this._safeUi("автовозврат", () => this._scheduleReturn());
   }
 
@@ -558,6 +600,8 @@ export class CreateController {
     } else {
       btn.textContent = "Сохранить заявку";
       this.formView?.unlock();
+      // Форма снова редактируется — возвращаем исходную надпись отмены.
+      this._setCancelBtnReturned(false);
     }
   }
 
@@ -566,6 +610,8 @@ export class CreateController {
     this.formView?.destroy();
     this.formView = null;
     this._saving = false;
+    this._cancelBtnNodes = null;
+    this._cancelBtnTitle = "";
     this.api.abortTag("create");
     if (this.autoReturnTimer) {
       clearTimeout(this.autoReturnTimer);
