@@ -178,15 +178,15 @@ const tourTicket = [
  * При неудаче — выбрасывает ошибку, которую обработает startTour.
  */
 async function loadDriver() {
-  if (!driverLib) {
-    const mod = await import("../vendor/driver.js");
-    driverLib = mod.driver;
-  }
-  if (!cssLoaded) {
-    await import("../vendor/driver.css");
-    cssLoaded = true;
-  }
-  return driverLib;
+    if (!driverLib) {
+        const mod = await import('driver.js');
+        driverLib = mod.driver;
+    }
+    if (!cssLoaded) {
+        await import('driver.js/dist/driver.css');
+        cssLoaded = true;
+    }
+    return driverLib;
 }
 
 /**
