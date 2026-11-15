@@ -35,6 +35,7 @@ import { offlineBanner } from "./js/components/offline-banner.js";
 import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js";
 import { queuePageTemplate } from "./js/route/pages/queue.js";
 import { QueueController } from "./js/queue-controller.js";
+import { startTour, stopTour } from "./js/tour.js";
 
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
@@ -77,6 +78,7 @@ const SERVER_SETTINGS_ENABLED = false;
  * Вызывается ДО замены DOM, поэтому unmount видит старую разметку.
  */
 function leaveAll() {
+  stopTour(); // ← закрыть тур до замены DOM
   const targets = [
     ["openTicketsCtrl", openTicketsCtrl],
     ["closedTicketsCtrl", closedTicketsCtrl],
@@ -512,7 +514,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } catch (err) {
       window.dispatchEvent(
-        new CustomEvent("sync:apply_failed", { detail: { layer: "addresses" } }),
+        new CustomEvent("sync:apply_failed", {
+          detail: { layer: "addresses" },
+        }),
       );
     }
   });
@@ -605,7 +609,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     router.navigate("#/login");
     // Outbox сохраняем — синхронизация продолжится при следующем логине.
   });
-
+  const startTourMenuItem = document.getElementById("startTourMenuItem");
+  if (startTourMenuItem) {
+    startTourMenuItem.addEventListener("click", (e) => {
+      e.preventDefault();
+      // Закрываем dropdown пользователя, чтобы оверлей тура был поверх
+      userDropdown?.classList.remove("show");
+      userProfileWrapper?.classList.remove("open");
+      startTour();
+    });
+  }
   if (AUTH.BYPASS_AUTH) {
     authStore.setSession("mock-token", Date.now() + 86400000, {
       id: 1,
