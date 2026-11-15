@@ -187,9 +187,13 @@ final class ApiController
             ['batch_id' => $batchId]
         );
 
-        if ($cachedResponse && !empty($cachedResponse['response_payload'])) {
+              if ($cachedResponse && !empty($cachedResponse['response_payload'])) {
             $decoded = json_decode($cachedResponse['response_payload'], true);
-            if (is_array($decoded)) {
+            // Нетерминальный кэш не отдаём: batch_id переиспользуется при
+            // повторе команды (§11.2), иначе первый duplicate_detected
+            // вернулся бы навсегда и повтор с force_create не создал бы
+            // заявку — вопреки Retry-контракту §11.1.
+            if (is_array($decoded) && $this->isTerminalBatchResponse($decoded)) {
                 return $decoded;
             }
         }
@@ -228,15 +232,21 @@ final class ApiController
                 $context['created_tickets'] = $createdTicketsMap;
             }
 
-            // Слепок ответа для идемпотентности верхнего уровня.
+                       // Слепок ответа для идемпотентности верхнего уровня.
             // INVALID_UTF8_SUBSTITUTE: битая кодировка в payload не должна
             // валить json_encode в false — колонка имеет CHECK(json_valid),
             // и вся пачка откатилась бы из-за одного мусорного символа.
-            $this->upsertSyncLog(
-                $batchId,
-                (int) $user['id'],
-                (string) json_encode($context, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)
-            );
+            //
+            // Кэшируем только терминальные пачки: нетерминальный слепок
+            // «отравил» бы повтор с тем же batch_id. Перевыполнение пачки
+            // безопасно — успешные команды защищены командным логом.
+            if ($this->isTerminalBatchResponse($context)) {
+                $this->upsertSyncLog(
+                    $batchId,
+                    (int) $user['id'],
+                    (string) json_encode($context, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)
+                );
+            }
 
             $this->db->commit();
         } catch (\Throwable $e) {
@@ -684,6 +694,21 @@ final class ApiController
                 (string) json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
             ]
         );
+    }
+/**
+     * Все результаты пачки финальны (§6.1): success / archived / ignored.
+     *
+     * duplicate_detected и failed — «ждёт решения/повтора»: такой ответ
+     * нельзя ни отдавать из кэша, ни кэшировать. batch_id переиспользуется
+     * при повторе команды (§11.2), и первый нетерминальный ответ вернулся
+     * бы навсегда — повтор с force_create не создавал бы заявку.
+     */
+    private function isTerminalBatchResponse(array $response): bool
+    {
+        $summary = is_array($response['summary'] ?? null) ? $response['summary'] : [];
+
+        return (int) ($summary['duplicate_detected'] ?? 0) === 0
+            && (int) ($summary['failed'] ?? 0) === 0;
     }
 
     /**
