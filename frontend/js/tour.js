@@ -352,17 +352,22 @@ function stepsFor(key) {
     case "profile":
       return [
         {
-          element: SEL.profileList,
+          element: () =>
+            document
+              .querySelector(SEL.profileList)
+              ?.closest("details")
+              ?.querySelector("summary") || SEL.profileList,
           popover: {
-            title: "Настройки таблиц",
-            description: "Кликните по строке, чтобы менять порядок колонок.",
+            title: "Настройка таблицы",
+            description: "Нажмите «Далее», чтобы тур раскрыл этот блок.",
           },
         },
         {
-          element: SEL.profileList + " > div:first-child",
+          element: SEL.profileList,
           popover: {
             title: "Порядок колонок",
-            description: "Стрелки ↑ и ↓ меняют позицию.",
+            description:
+              "Стрелки ↑ и ↓ меняют позицию. Настройки сохраняются только для текущего пользователя.",
           },
         },
         {
@@ -400,13 +405,13 @@ function scenarioHash(key, state) {
 const TOTAL_STEPS = SCENARIO_ORDER.reduce((n, k) => n + stepsFor(k).length, 0);
 
 // =========================================================================
-// ПРОГРАММНЫЕ ДЕЙСТВИЯ (вместо кликов)
+// ПРОГРАММНЫЕ ДЕЙСТВИЯ
 // =========================================================================
 
 function autoFillCity() {
   const select = document.querySelector(SEL.citySelect);
   if (select && !select.value) {
-    select.selectedIndex = 1; // Выбираем первый город
+    select.selectedIndex = 1;
     select.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
@@ -414,13 +419,12 @@ function autoFillCity() {
 function autoFillStreet() {
   const input = document.querySelector(SEL.streetInput);
   if (input && !input.value) {
-    input.value = "Красноармейская"; // Тестовая улица
+    input.value = "Красноармейская";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   }
 }
 
 function autoSelectObject() {
-  // Ждем, пока прогрузится выпадающий список, и кликаем по первому элементу
   setTimeout(() => {
     const pill = document.querySelector(SEL.streetDropdown);
     if (pill) pill.click();
@@ -429,10 +433,7 @@ function autoSelectObject() {
 
 function insertDemoRow() {
   const tbody = document.querySelector(SEL.queueTable + " tbody");
-  if (!tbody) return;
-
-  // Если строка уже есть, ничего не делаем
-  if (document.querySelector(SEL.demoRow)) return;
+  if (!tbody || document.querySelector(SEL.demoRow)) return;
 
   const tr = document.createElement("tr");
   tr.setAttribute("data-demo-row", "true");
@@ -488,16 +489,11 @@ function removeDemoRow() {
   if (empty && tbody && tbody.children.length === 0) empty.style.display = "";
 }
 
-// Удерживаем строку, если queue-controller её сотрет
 function watchDemoRow() {
   const tbody = document.querySelector(SEL.queueTable + " tbody");
   if (!tbody || queueObserver) return;
-
   queueObserver = new MutationObserver(() => {
-    // Если таблица перерисовалась и стерла нашу строку — возвращаем
-    if (!document.querySelector(SEL.demoRow)) {
-      insertDemoRow();
-    }
+    if (!document.querySelector(SEL.demoRow)) insertDemoRow();
   });
   queueObserver.observe(tbody, { childList: true });
 }
@@ -518,7 +514,10 @@ function filterAvailable(steps) {
   return steps
     .map((s, i) => ({ s, i }))
     .filter(
-      ({ s }) => !s.element || document.querySelector(s.element) !== null,
+      ({ s }) =>
+        !s.element ||
+        typeof s.element === "function" ||
+        document.querySelector(s.element) !== null,
     );
 }
 
@@ -588,6 +587,12 @@ async function beginScenario(state, notify) {
     watchDemoRow();
   }
 
+  // Принудительно закрываем details в профиле для начала тура
+  if (key === "profile") {
+    const details = document.querySelector(SEL.profileList)?.closest("details");
+    if (details) details.open = false;
+  }
+
   const all = stepsFor(key).map((s, i) => ({
     ...s,
     origIndex: i,
@@ -611,8 +616,8 @@ async function beginScenario(state, notify) {
     nextBtnText: "Далее →",
     prevBtnText: "← Назад",
     doneBtnText: "Завершить",
-    disableActiveInteraction: true, // Блокируем клики
-    overlayClickBehavior: "none", // Запрещаем закрытие по фону
+    disableActiveInteraction: true,
+    overlayClickBehavior: "none",
     steps: available.map(({ s }) => s),
 
     onHighlightStarted: (_el, step) => {
@@ -620,7 +625,6 @@ async function beginScenario(state, notify) {
     },
 
     onNextClick: (_el, step) => {
-      // Программное выполнение действий перед переходом
       if (key === "create") {
         if (step.origIndex === 0) autoFillCity();
         if (step.origIndex === 1) autoFillStreet();
@@ -632,6 +636,14 @@ async function beginScenario(state, notify) {
         if (step.origIndex === 6)
           document.querySelector(SEL.cancelEditBtn)?.click();
         if (step.origIndex === 8) document.querySelector(SEL.closeBtn)?.click();
+      }
+
+      // Раскрываем details перед показом следующего шага в профиле
+      if (key === "profile" && step.origIndex === 0) {
+        const details = document
+          .querySelector(SEL.profileList)
+          ?.closest("details");
+        if (details) details.open = true;
       }
 
       if (driverObj && driverObj.isLastStep()) advancing = true;
@@ -706,7 +718,7 @@ function scheduleResume(state, notify) {
 
   const tick = async () => {
     if (document.querySelector(containerSel)) {
-      await new Promise((r) => setTimeout(r, 400)); // Ждем полной инициализации контроллера
+      await new Promise((r) => setTimeout(r, 400));
       await beginScenario(state, notify);
       return;
     }
