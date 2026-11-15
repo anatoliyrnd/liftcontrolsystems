@@ -621,14 +621,18 @@ async function beginScenario(state, notify) {
 
     // ИСПРАВЛЕНО: используем onNextClick и onPrevClick
     onNextClick: (_el, step) => {
-      console.log("[tour] Клик по Далее, текущий шаг:", step);
-
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
         return false;
       }
-      return true;
+      // hasNextStep() — единственный надёжный способ определить последний
+      // шаг в driver.js v1. isLastStep() не существует → TypeError.
+      // Возврат undefined разрешает переход — флаг advancing нужен onDestroyed.
+      if (driverObj && !driverObj.hasNextStep()) {
+        advancing = true;
+      }
     },
+    onPrevClick: () => true,
     onPrevClick: () => true,
 
     onDestroyed: () => {
