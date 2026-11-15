@@ -68,6 +68,21 @@ export function rebuildTableHeaders(
 
     trHead.appendChild(th);
   });
+  // data-tour="table-sort" — на первый сортируемый th, не на конкретную
+  // колонку. Если пользователь скрыл «Дату» или любой другой сортируемый
+  // столбец, тур всё равно найдёт, на что указать.
+  const firstSortableTh = trHead.querySelector("th.sortable");
+  if (firstSortableTh) {
+    firstSortableTh.setAttribute("data-tour", "table-sort");
+  }
+
+  // data-tour="table-resizer" — на ресайзере «Адреса». Он всегда видим
+  // (колонка isAbsoluteFixed), и это единственный ресайзер, который
+  // точно будет в DOM.
+  const addressResizer = trHead.querySelector('th[data-id="address"] .resizer');
+  if (addressResizer) {
+    addressResizer.setAttribute("data-tour", "table-resizer");
+  }
 }
 
 /** Динамические CSS-правила структурного скрытия колонок по режиму. */
