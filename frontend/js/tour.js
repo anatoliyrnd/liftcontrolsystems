@@ -615,14 +615,17 @@ async function beginScenario(state, notify) {
 
     // ИСПРАВЛЕНО: используем onNextClick и onPrevClick
     onNextClick: (_el, step) => {
+      // Проверка гейтов (например, выбран ли город)
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
         return false;
       }
-      // Ставим флаг только если это последний шаг
-      if (step === lastStep) {
+
+      // Если это последний шаг — ставим флаг для перехода на след. страницу
+      if (driverObj && driverObj.isLastStep()) {
         advancing = true;
       }
+
       return true;
     },
     onPrevClick: () => true,
