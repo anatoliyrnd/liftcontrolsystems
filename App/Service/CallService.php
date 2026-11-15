@@ -7,6 +7,7 @@ use App\Repository\{CallRepository, NoteRepository, HistoryRepository};
 use App\Exceptions\ApiException;
 use App\Http\ErrorCode;
 use App\Tenant;
+use App\Support\CallPolicy;
 
 class CallService
 {
@@ -49,8 +50,15 @@ class CallService
      *
      * @param string $source 'online' | 'offline_sync'
      */
-    public function callnew(array $user, array $data, string $source = 'online'): array
+     public function callnew(array $user, array $data, string $source = 'online'): array
     {
+        // Право проверяем до валидации и до поиска дублей: отказ не должен
+        // зависеть от содержимого заявки и не должен стоить запросов в БД.
+        //
+        // Контекст группы — null: group_id в payload это тип неисправности
+        // (справочник type 3), а НЕ группа лифтов. Группа появится из
+        // адресного слоя вместе с группами лифтов (точка C в CallPolicy).
+        $this->assertAllowed(CallPolicy::canCreate($user));
         $isOffline = ($source === 'offline_sync');
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
@@ -370,10 +378,16 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
+               // Право проверяем после загрузки заявки и ДО проверки закрытости:
+        // $call уже есть и уезжает в политику как контекст — когда появится
+        // назначенность (точка C), вызов менять не придётся. Состояние
+        // заявки не должно опережать права: иначе пользователь без прав
+        // узнаёт, закрыта ли чужая заявка.
+        $this->assertAllowed(CallPolicy::canEdit($user, $call));
+
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
-
         $isOffline = ($source === 'offline_sync');
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
@@ -496,14 +510,17 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
+         // Право до проверки закрытости — причина та же, что в calledit.
+        // Именно здесь была дыра: online-экшен приходит в сервис минуя
+        // checkCommandPermissions, и guest закрывал чужую заявку.
+        $this->assertAllowed(CallPolicy::canClose($user, $call));
+
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
-
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
         $closedAt = isset($data['closed_at']) ? (int) $data['closed_at'] : time();
-
         // Слепок сохраняем ДО удаления заметок.
         $notes = $this->noteRepo->listByCall($callId);
         if (!empty($notes)) {
@@ -560,14 +577,17 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
+        // Право до проверки закрытости — причина та же, что в calledit.
+        // Именно здесь была дыра: online-экшен приходит в сервис минуя
+        // checkCommandPermissions, и guest закрывал чужую заявку.
+        $this->assertAllowed(CallPolicy::canClose($user, $call));
+
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
-
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
-        $createdAt = isset($data['created_at']) ? (int) $data['created_at'] : time();
-
+        $closedAt = isset($data['closed_at']) ? (int) $data['closed_at'] : time();
         $noteId = $this->noteRepo->add($callId, $authorId, $note);
         if ($source === 'offline_sync') {
             $this->noteRepo->updateOfflineFlag($noteId, $createdAt);
@@ -581,6 +601,29 @@ class CallService
         $this->notificationsService->ticketNote($callId, $authorName, $authorId);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
+    }
+
+     /**
+     * Отказ в правах — одна форма на все четыре метода.
+     *
+     * Решение принимает CallPolicy, здесь только исключение: четыре копии
+     * throw разъехались бы по тексту и reason. Проверка дублирует
+     * ApiController::checkCommandPermissions намеренно — sync-путь уже
+     * проверен контроллером, online-путь не проверен вовсе, а сервис один.
+     * Повторная проверка идемпотентна: тот же предикат, тот же ответ.
+     *
+     * reason: no_rights совпадает с sync-путём — клиент показывает текст
+     * по типу команды (§6.3) и перечитывает config.
+     */
+    private function assertAllowed(bool $allowed): void
+    {
+        if (!$allowed) {
+            throw new ApiException(
+                ErrorCode::Forbidden,
+                'Роль не имеет прав на это действие',
+                reason: 'no_rights'
+            );
+        }
     }
 
     /**
