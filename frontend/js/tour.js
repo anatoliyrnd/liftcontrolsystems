@@ -38,6 +38,7 @@ const SEL = {
   cancelEditBtn: "#cancelEditBtn",
   closeBtn: "#closeBtn",
   solutionInput: "#solutionInput",
+  solutionMic: "#closeBlock .btn-voice-mic", // ДОБАВЛЕНО: кнопка микрофона
   closeAndCreate: "#closeAndCreateWrap",
   // Закрытые / очередь / профиль
   period: "#periodSelectorContainer",
@@ -297,6 +298,14 @@ function stepsFor(key) {
           popover: {
             title: "Решение",
             description: "Введите здесь, что было сделано.",
+          },
+        },
+        {
+          element: SEL.solutionMic,
+          popover: {
+            title: "Голосовой ввод",
+            description:
+              "В некоторых браузерах доступен голосовой ввод. Нажмите на микрофон и разрешите доступ, чтобы надиктовать текст решения.",
           },
         },
         {
@@ -587,7 +596,6 @@ async function beginScenario(state, notify) {
     watchDemoRow();
   }
 
-  // Принудительно закрываем details в профиле для начала тура
   if (key === "profile") {
     const details = document.querySelector(SEL.profileList)?.closest("details");
     if (details) details.open = false;
@@ -625,20 +633,34 @@ async function beginScenario(state, notify) {
     },
 
     onNextClick: (_el, step) => {
+      // Действия в форме создания
       if (key === "create") {
         if (step.origIndex === 0) autoFillCity();
         if (step.origIndex === 1) autoFillStreet();
         if (step.origIndex === 2) autoSelectObject();
       }
 
+      // Действия в карточке заявки
       if (key === "ticket") {
         if (step.origIndex === 1) document.querySelector(SEL.editBtn)?.click();
         if (step.origIndex === 6)
           document.querySelector(SEL.cancelEditBtn)?.click();
-        if (step.origIndex === 8) document.querySelector(SEL.closeBtn)?.click();
+
+        // Если нажат "Далее" на кнопке "Закрыть заявку"
+        if (step.origIndex === 8) {
+          document.querySelector(SEL.closeBtn)?.click();
+          // Даем время интерфейсу перестроиться (появиться полю решения)
+          setTimeout(() => {
+            if (driverObj) {
+              if (driverObj.isLastStep()) advancing = true;
+              driverObj.moveNext();
+            }
+          }, 250);
+          return; // Прерываем стандартный переход, так как сделали его в setTimeout
+        }
       }
 
-      // Раскрываем details перед показом следующего шага в профиле
+      // Раскрываем настройки в профиле
       if (key === "profile" && step.origIndex === 0) {
         const details = document
           .querySelector(SEL.profileList)
