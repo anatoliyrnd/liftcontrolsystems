@@ -4,6 +4,8 @@ declare(strict_types=1);
 namespace App\Service;
 
 use App\Database\DB;
+use App\Support\CallPolicy;
+use App\Support\CallScope;
 use App\Tenant;
 
 final class ConfigService
@@ -14,33 +16,36 @@ final class ConfigService
     ) {
     }
 
-    /**
-     * Конфигурация и права для SPA (§2).
+/* Роль, флаги и должность берутся из AuthService::formatUser —
+     * нормализация mechanic → engineer и foreman → dispatcher уже
+     * выполнена там. Повторно не выводим: два источника роли рано или
+     * поздно разъезжаются.
      *
-     * Роль берётся из AuthService::formatUser — нормализация
-     * mechanic → engineer и foreman → dispatcher уже выполнена там.
-     * Повторно не выводим: два источника роли рано или поздно разъезжаются.
+     * Права считает CallPolicy, область чтения — CallScope: те же
+     * предикаты отвечают на само действие. Своя формула здесь давала
+     * кнопку, на которую сервер отвечал 403.
      */
     public function getConfig(array $user): array
     {
-        // Один запрос на два поля: флаг создания и позиция для прав отчётов.
-        // Отдельный SELECT для позиции не нужен — она лежит в той же строке.
-        $u = $this->db->fetchOne(
-            "SELECT user_add_call, user_position FROM lift_users WHERE user_id = :id",
-            ['id' => $user['id']]
-        ) ?: [];
+               // Запрос за флагом и должностью убран: formatUser транспортирует
+        // оба поля в $user. Второй источник тех же данных на каждый config
+        // — это и лишний запрос, и риск разойтись с правами, по которым
+        // сервер принимает решение.
 
         $role    = $user['role'] ?? 'guest';
         $isAdmin = ($role === 'administrator');
         $isDisp  = ($role === 'dispatcher');
 
-        // §2.2: флаг user_add_call даёт право создания любому, включая engineer.
-        // Конфликт с sync-путём (там только admin/dispatcher) закрывается
-        // в B3 через CallPolicy — здесь поведение не меняем.
-        $canAdd  = $isAdmin || $isDisp || !empty($u['user_add_call']);
-        $readAll = $isAdmin || $isDisp;
-
-        $position = trim((string) ($u['user_position'] ?? ''));
+               // Решение отдаём политике: can_add_ticket обязан совпадать с тем,
+        // что ответит callnew. Своя формула показывала кнопку гостю
+        // с флагом, а сервер отвечал 403.
+        $canAdd  = CallPolicy::canCreate($user);
+        // Область чтения — CallScope: флаг user_read_all_calls уважается
+        // для любой роли (решение A), а не только admin/dispatcher.
+        $readAll = CallScope::readAll($user);
+        // Должность — бизнес-тип, не роль: по ней фронт отличает прораба
+        // от диспетчера (§2.1, отчёты). Пустая и NULL = «не задана».
+        $position = trim((string) ($user['user_position'] ?? ''));
 
         // --- Меню (§2.4) ---
         $menu = [];
