@@ -1,7 +1,6 @@
 /**
  * Сквозной обучающий тур по системе (driver.js).
  */
-// СТАТИЧЕСКИЙ ИМПОРТ CSS — Vite обработает на этапе сборки
 import "driver.js/dist/driver.css";
 
 const STATE_KEY = "lift_tour_state";
@@ -18,23 +17,26 @@ const SEL = {
   tableWrapper: ".table-wrapper",
   refreshBtn: "#refreshBtn",
   syncIndicator: "#syncIndicator",
+  userMenu: "#userProfileBtn", // ДОБАВЛЕНО
   // Создание
   addressSlot: "#formAddressSlot",
   details: "#formDetails",
   staff: "#formStaffSlot",
   dicts: "#createGroupSlot",
-  repair: "#repairTimeSlot", // ИСПРАВЛЕНО
+  repair: "#repairTimeSlot",
   saveBtn: "#saveTicketBtn",
   // Карточка
   ticketHeader: '[data-tour="ticket-header"]',
   editBtn: "#editBtn",
-  editDetails: "#detailsAddBlock", // ИСПРАВЛЕНО
-  editStaff: "#staffSlotsContainer", // ИСПРАВЛЕНО
-  editNotify: "#staffSlotsContainer", // ИСПРАВЛЕНО (статус ставится там же)
-  editRepair: "#repairTimeEditBlock", // ИСПРАВЛЕНО
+  editDetails: "#detailsAddBlock",
+  editStaff: "#staffSlotsContainer",
+  editRepair: "#repairTimeEditBlock",
   staffSlots: "#staffSlotsContainer",
   notes: "#noteComposer",
+  cardSaveBtn: "#saveBtn", // ДОБАВЛЕНО
+  cancelEditBtn: "#cancelEditBtn", // ДОБАВЛЕНО
   closeBtn: "#closeBtn",
+  solutionInput: "#solutionInput", // ДОБАВЛЕНО
   // Закрытые / очередь / профиль
   period: "#periodSelectorContainer",
   queueTable: "#queueTable",
@@ -53,7 +55,6 @@ const SEL = {
 
 let driverObj = null;
 let driverLib = null;
-
 let selfNav = false;
 let advancing = false;
 let hashListener = null;
@@ -61,8 +62,7 @@ let addressObserver = null;
 
 function loadState() {
   try {
-    const raw = sessionStorage.getItem(STATE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return JSON.parse(sessionStorage.getItem(STATE_KEY) || "null");
   } catch (e) {
     return null;
   }
@@ -100,7 +100,6 @@ function stepsFor(key) {
           popover: {
             title: "Новая заявка",
             description: "Нажмите «+», чтобы создать заявку.",
-            side: "bottom",
           },
         },
         {
@@ -165,6 +164,14 @@ function stepsFor(key) {
             description: "Показывает количество офлайн-действий.",
           },
         },
+        {
+          element: SEL.userMenu,
+          popover: {
+            title: "Меню пользователя",
+            description:
+              "Здесь можно сменить тему, зайти в настройки или выйти из системы.",
+          },
+        },
       ];
     case "create":
       return [
@@ -190,8 +197,7 @@ function stepsFor(key) {
           element: SEL.details,
           popover: {
             title: "3. Описание",
-            description:
-              "Обязательное поле. Опишите суть проблемы (минимум 6 символов).",
+            description: "Обязательное поле. Опишите суть проблемы.",
           },
         },
         {
@@ -236,7 +242,7 @@ function stepsFor(key) {
           element: SEL.editBtn,
           popover: {
             title: "Редактирование",
-            description: "Нажмите «Редактировать», чтобы продолжить.",
+            description: "Нажмите «Редактировать», чтобы изменить данные.",
           },
           gate: "edit",
           hint: "Нажмите «Редактировать»",
@@ -256,13 +262,6 @@ function stepsFor(key) {
           },
         },
         {
-          element: SEL.editNotify,
-          popover: {
-            title: "Статус уведомления",
-            description: "Отметьте, если механик уведомлён.",
-          },
-        },
-        {
           element: SEL.editRepair,
           popover: {
             title: "Дата ремонта",
@@ -270,11 +269,20 @@ function stepsFor(key) {
           },
         },
         {
-          element: SEL.staffSlots,
+          element: SEL.cardSaveBtn,
           popover: {
-            title: "Слоты",
-            description: "Нажмите на слот, чтобы назначить ответственного.",
+            title: "Сохранение",
+            description: "После внесения изменений нажмите «Сохранить».",
           },
+        },
+        {
+          element: SEL.cancelEditBtn,
+          popover: {
+            title: "Отмена",
+            description: "Чтобы вернуться без сохранения, нажмите «Отмена».",
+          },
+          gate: "cancelEdit",
+          hint: "Нажмите «Отмена»",
         },
         {
           element: SEL.notes,
@@ -286,8 +294,18 @@ function stepsFor(key) {
         {
           element: SEL.closeBtn,
           popover: {
-            title: "Закрытие",
-            description: "Нажмите сюда, чтобы ввести решение.",
+            title: "Закрытие заявки",
+            description:
+              "Закрытие — это отдельное действие. Нажмите сюда, чтобы ввести решение.",
+          },
+          gate: "closeMode",
+          hint: "Нажмите «Закрыть заявку»",
+        },
+        {
+          element: SEL.solutionInput,
+          popover: {
+            title: "Решение",
+            description: "Введите здесь, что было сделано.",
           },
         },
       ];
@@ -383,38 +401,48 @@ function scenarioHash(key, state) {
 const TOTAL_STEPS = SCENARIO_ORDER.reduce((n, k) => n + stepsFor(k).length, 0);
 
 // =========================================================================
-// ГЕЙТЫ И ДЕТЕКТЫ
+// ГЕЙТЫ
 // =========================================================================
 
-function streetControlExists() {
-  const slot = document.querySelector(SEL.addressSlot);
+function editModeActive() {
   return (
-    slot &&
-    slot.querySelectorAll("select, input:not([type='hidden'])").length >= 2
+    !!document.querySelector(SEL.editDetails) &&
+    document.querySelector(SEL.editDetails).style.display !== "none"
   );
 }
 
-function editModeActive() {
-  return !!document.querySelector(SEL.editDetails);
-}
-
 const GATES = {
-  city: streetControlExists,
+  city: () => {
+    const slot = document.querySelector(SEL.addressSlot);
+    if (!slot) return false;
+    // Ищем первый select (обычно это город). Если он заполнен — пропускаем.
+    const selects = slot.querySelectorAll("select");
+    if (selects.length > 0) return selects[0].value !== "";
+    const inputs = slot.querySelectorAll("input:not([type='hidden'])");
+    return inputs.length > 0 && inputs[0].value.trim() !== "";
+  },
   edit: editModeActive,
+  cancelEdit: () => !editModeActive(),
+  closeMode: () => {
+    const block = document.querySelector("#closeBlock");
+    return block && block.style.display !== "none";
+  },
 };
 
 function createStartIndex() {
   let start = 0;
-  if (streetControlExists()) start = 2;
+  // Если город выбран, начинаем с шага 2 (Улица)
+  if (GATES.city()) start = 2;
+
   const details = document.querySelector(SEL.details);
   if (start === 2 && details && details.value.trim().length >= 6) start = 3;
+
   const staffInput = document.querySelector(
     SEL.staff + " input, " + SEL.staff + " select",
   );
   if (start === 3 && staffInput && String(staffInput.value || "").trim() !== "")
     start = 4;
 
-  // ИСПРАВЛЕНО: проверяем select внутри div-контейнера
   const groupSelect = document.querySelector(SEL.dicts + " select");
   if (start === 4 && groupSelect && String(groupSelect.value || "") !== "")
     start = 6;
@@ -488,9 +516,9 @@ async function loadDriver() {
     const mod = await import("driver.js");
     driverLib = mod.driver;
   }
-  // CSS уже импортирован статически в начале файла
   return driverLib;
 }
+
 function filterAvailable(steps) {
   return steps
     .map((s, i) => ({ s, i }))
@@ -549,8 +577,6 @@ function updateGlobalProgress(step) {
     SCENARIO_ORDER.indexOf(step.scenario),
   ).reduce((n, k) => n + stepsFor(k).length, 0);
   const text = `${base + step.origIndex + 1} из ${TOTAL_STEPS}`;
-  // Driver дорисовывает поповер после onHighlightStarted и затирает
-  // прогресс своим «N of M». Подменяем текст на следующий кадр.
   requestAnimationFrame(() => {
     const el =
       document.querySelector(".driver-popover-progress-text") ||
@@ -558,6 +584,7 @@ function updateGlobalProgress(step) {
     if (el) el.textContent = text;
   });
 }
+
 // =========================================================================
 // ЗАПУСК
 // =========================================================================
@@ -570,19 +597,19 @@ async function beginScenario(state, notify) {
     const slot = document.querySelector(SEL.addressSlot);
     if (slot) {
       addressObserver = new MutationObserver(() => {
-        if (driverObj && streetControlExists()) {
-          const active = driverObj.getActiveStep?.();
-          if (
-            active &&
-            active.step &&
-            active.step.gate === "city" &&
-            active.step.origIndex === 0
-          ) {
+        if (driverObj && driverObj.isActive()) {
+          const active = driverObj.getActiveIndex();
+          // Если мы на шаге 0 (Город) и город выбран — переходим дальше
+          if (active === 0 && GATES.city()) {
             driverObj.moveNext();
           }
         }
       });
-      addressObserver.observe(slot, { childList: true, subtree: true });
+      addressObserver.observe(slot, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
     }
   }
 
@@ -604,7 +631,7 @@ async function beginScenario(state, notify) {
     const pos = available.findIndex(({ i }) => i >= wanted);
     startAt = pos === -1 ? available.length - 1 : pos;
   }
-  const lastStep = available[available.length - 1].s;
+
   const driverFn = await loadDriver();
 
   driverObj = driverFn({
@@ -620,26 +647,18 @@ async function beginScenario(state, notify) {
     onHighlightStarted: (_el, step) => updateGlobalProgress(step),
 
     onNextClick: (_el, step) => {
-      // 1. Проверяем гейт (например, выбран ли город)
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
-        return false; // Блокируем, если не выполнено
+        return false;
       }
-
-      // 2. Если это последний шаг сценария — ставим флаг для перехода на новую страницу
       if (driverObj && driverObj.isLastStep()) {
         advancing = true;
       }
-
-      // 3. ВАЖНО: Явно переключаем на следующий шаг!
       driverObj.moveNext();
     },
-
     onPrevClick: () => {
-      // То же самое для кнопки "Назад" — нужно вызывать явно
       driverObj.movePrevious();
     },
-
     onDestroyed: () => {
       driverObj = null;
       if (addressObserver) {
@@ -670,7 +689,7 @@ function goNextScenario(state, notify) {
   }
 
   if (next === "ticket" && !state.ticketId) {
-    next = SCENARIO_ORDER[idx + 2] || null; // Пропускаем карточку, если нет ID
+    next = SCENARIO_ORDER[idx + 2] || null;
   }
   if (state.scenario === "queue") removeDemoRow();
 
@@ -685,13 +704,34 @@ function goNextScenario(state, notify) {
   window.location.hash = scenarioHash(next, state).slice(1);
 }
 
+// ИСПРАВЛЕНО: Ждем появления контейнера страницы, а не элементов внутри тура
 function scheduleResume(state, notify) {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 5000;
+
+  const getContainer = (s) => {
+    switch (s) {
+      case "journal":
+        return "#dataTable";
+      case "create":
+        return "#formAddressSlot";
+      case "ticket":
+        return "#ticketDetailsDynamicContainer";
+      case "closed":
+        return "#dataTable";
+      case "queue":
+        return "#queueTable";
+      case "profile":
+        return "#columnsSettingsList";
+      default:
+        return "#app";
+    }
+  };
+  const containerSel = getContainer(state.scenario);
+
   const tick = async () => {
-    const first = stepsFor(state.scenario).find(
-      (s) => !s.element || document.querySelector(s.element) !== null,
-    );
-    if (first) {
+    if (document.querySelector(containerSel)) {
+      // Пауза, чтобы контроллер очереди успел отрисовать строки
+      await new Promise((r) => setTimeout(r, 300));
       await beginScenario(state, notify);
       return;
     }
@@ -729,7 +769,7 @@ export async function startTour() {
   try {
     await loadDriver();
   } catch (e) {
-    console.error("[tour] Ошибка загрузки driver.js:", e);
+    console.error("[tour] Ошибка загрузки:", e);
     notify.error("Обучающий тур недоступен.");
     clearState();
     return;
