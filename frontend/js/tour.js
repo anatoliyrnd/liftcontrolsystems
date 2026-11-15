@@ -598,7 +598,7 @@ async function beginScenario(state, notify) {
     const pos = available.findIndex(({ i }) => i >= wanted);
     startAt = pos === -1 ? available.length - 1 : pos;
   }
-
+  const lastStep = available[available.length - 1].s;
   const driverFn = await loadDriver();
 
   driverObj = driverFn({
@@ -614,13 +614,13 @@ async function beginScenario(state, notify) {
     onHighlightStarted: (_el, step) => updateGlobalProgress(step),
 
     // ИСПРАВЛЕНО: используем onNextClick и onPrevClick
-    onNextClick: (_el, step, options) => {
+    onNextClick: (_el, step) => {
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
         return false;
       }
       // Ставим флаг только если это последний шаг
-      if (step === options.steps[options.steps.length - 1]) {
+      if (step === lastStep) {
         advancing = true;
       }
       return true;

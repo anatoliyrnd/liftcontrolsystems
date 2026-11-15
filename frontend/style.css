@@ -2655,27 +2655,25 @@ td.cell-alert-info {
     color: var(--text-primary) !important;
     border: 1px solid var(--border-color) !important;
     border-radius: 8px !important;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
     max-width: 320px;
 }
 
 .driver-tour-popover .driver-popover-title {
     color: var(--text-primary) !important;
-    font-size: 15px !important;
     font-weight: 600;
 }
 
 .driver-tour-popover .driver-popover-description {
     color: var(--text-secondary) !important;
     font-size: 13px !important;
-    line-height: 1.5;
 }
 
-.driver-tour-popover .driver-popover-progress-txt {
+/* v1: текст прогресса и кнопки живут в footer */
+.driver-tour-popover .driver-popover-progress-text {
     color: var(--text-secondary) !important;
 }
 
-.driver-tour-popover .driver-popover-navigation-btns button {
+.driver-tour-popover .driver-popover-footer button {
     background: var(--bg-secondary) !important;
     color: var(--text-primary) !important;
     border: 1px solid var(--border-color) !important;
@@ -2685,14 +2683,13 @@ td.cell-alert-info {
     padding: 4px 10px;
 }
 
-.driver-tour-popover .driver-popover-navigation-btns button:hover {
+.driver-tour-popover .driver-popover-footer button:hover {
     background: var(--accent, #6366f1) !important;
     color: #fff !important;
 }
 
 .driver-tour-popover .driver-popover-close-btn {
     color: var(--text-secondary) !important;
-    font-size: 20px;
 }
 
 .driver-tour-popover .driver-popover-close-btn:hover {
@@ -2702,7 +2699,6 @@ td.cell-alert-info {
 .driver-active-element {
     box-shadow: 0 0 0 4px var(--accent, #6366f1) !important;
 }
-
 /* Виртуальный пункт очереди */
 tr[data-demo="true"] {
   background: rgba(249, 115, 22, 0.15) !important;
