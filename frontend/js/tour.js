@@ -17,7 +17,7 @@ const SEL = {
   tableWrapper: ".table-wrapper",
   refreshBtn: "#refreshBtn",
   syncIndicator: "#syncIndicator",
-  userMenu: "#userProfileBtn", // ДОБАВЛЕНО
+  userMenu: "#userProfileBtn",
   // Создание
   addressSlot: "#formAddressSlot",
   details: "#formDetails",
@@ -33,10 +33,11 @@ const SEL = {
   editRepair: "#repairTimeEditBlock",
   staffSlots: "#staffSlotsContainer",
   notes: "#noteComposer",
-  cardSaveBtn: "#saveBtn", // ДОБАВЛЕНО
-  cancelEditBtn: "#cancelEditBtn", // ДОБАВЛЕНО
+  cardSaveBtn: "#saveBtn",
+  cancelEditBtn: "#cancelEditBtn",
   closeBtn: "#closeBtn",
-  solutionInput: "#solutionInput", // ДОБАВЛЕНО
+  solutionInput: "#solutionInput",
+  closeAndCreate: "#closeAndCreateWrap", // Чекбокс
   // Закрытые / очередь / профиль
   period: "#periodSelectorContainer",
   queueTable: "#queueTable",
@@ -59,6 +60,7 @@ let selfNav = false;
 let advancing = false;
 let hashListener = null;
 let addressObserver = null;
+let queueObserver = null; // Обсервер для удержания демо-строки
 
 function loadState() {
   try {
@@ -178,20 +180,21 @@ function stepsFor(key) {
         {
           element: SEL.addressSlot,
           popover: {
-            title: "1. Город",
-            description: "Вначале выберите город.",
+            title: "1. Выбор города",
+            description: "Выберите город из списка. (Тур сделает это за вас).",
           },
           gate: "city",
-          hint: "Сначала выберите город",
+          hint: "Ждем выбора города...",
         },
         {
           element: SEL.addressSlot,
           popover: {
             title: "2. Улица и дом",
-            description: "Выберите объект из выпадающего списка.",
+            description:
+              "Введите улицу и выберите объект из выпадающего списка. (Тур сделает это за вас).",
           },
-          gate: "city",
-          hint: "Сначала выберите город",
+          gate: "street",
+          hint: "Ждем выбора адреса...",
         },
         {
           element: SEL.details,
@@ -295,8 +298,7 @@ function stepsFor(key) {
           element: SEL.closeBtn,
           popover: {
             title: "Закрытие заявки",
-            description:
-              "Закрытие — это отдельное действие. Нажмите сюда, чтобы ввести решение.",
+            description: "Закрытие — это отдельное действие. Нажмите сюда.",
           },
           gate: "closeMode",
           hint: "Нажмите «Закрыть заявку»",
@@ -306,6 +308,14 @@ function stepsFor(key) {
           popover: {
             title: "Решение",
             description: "Введите здесь, что было сделано.",
+          },
+        },
+        {
+          element: SEL.closeAndCreate,
+          popover: {
+            title: "Новая заявка по адресу",
+            description:
+              "Поставьте галочку, чтобы закрыть текущую и сразу создать новую по этому же адресу.",
           },
         },
       ];
@@ -401,13 +411,20 @@ function scenarioHash(key, state) {
 const TOTAL_STEPS = SCENARIO_ORDER.reduce((n, k) => n + stepsFor(k).length, 0);
 
 // =========================================================================
-// ГЕЙТЫ
+// ГЕЙТЫ И АВТОЗАПОЛНЕНИЕ
 // =========================================================================
 
 function editModeActive() {
-  return (
-    !!document.querySelector(SEL.editDetails) &&
-    document.querySelector(SEL.editDetails).style.display !== "none"
+  const el = document.querySelector(SEL.editDetails);
+  return !!el && el.style.display !== "none";
+}
+
+function addressFilled() {
+  const slot = document.querySelector(SEL.addressSlot);
+  if (!slot) return false;
+  // Проверяем, есть ли выбранный объект (обычно это скрытый input или кнопка с классом active)
+  return !!slot.querySelector(
+    '.address-pill.active, input[type="hidden"][name="object_id"]',
   );
 }
 
@@ -415,12 +432,10 @@ const GATES = {
   city: () => {
     const slot = document.querySelector(SEL.addressSlot);
     if (!slot) return false;
-    // Ищем первый select (обычно это город). Если он заполнен — пропускаем.
-    const selects = slot.querySelectorAll("select");
-    if (selects.length > 0) return selects[0].value !== "";
-    const inputs = slot.querySelectorAll("input:not([type='hidden'])");
-    return inputs.length > 0 && inputs[0].value.trim() !== "";
+    const citySelect = slot.querySelector("select");
+    return citySelect && citySelect.value !== "";
   },
+  street: addressFilled,
   edit: editModeActive,
   cancelEdit: () => !editModeActive(),
   closeMode: () => {
@@ -429,25 +444,25 @@ const GATES = {
   },
 };
 
-function createStartIndex() {
-  let start = 0;
-  // Если город выбран, начинаем с шага 2 (Улица)
-  if (GATES.city()) start = 2;
+// Программное заполнение полей для шагов create
+function autoFillAddress(stepIndex) {
+  const slot = document.querySelector(SEL.addressSlot);
+  if (!slot) return;
 
-  const details = document.querySelector(SEL.details);
-  if (start === 2 && details && details.value.trim().length >= 6) start = 3;
-
-  const staffInput = document.querySelector(
-    SEL.staff + " input, " + SEL.staff + " select",
-  );
-  if (start === 3 && staffInput && String(staffInput.value || "").trim() !== "")
-    start = 4;
-
-  const groupSelect = document.querySelector(SEL.dicts + " select");
-  if (start === 4 && groupSelect && String(groupSelect.value || "") !== "")
-    start = 6;
-
-  return start;
+  if (stepIndex === 0) {
+    // Выбираем первый город
+    const citySelect = slot.querySelector("select");
+    if (citySelect && !citySelect.value) {
+      citySelect.selectedIndex = 1; // Первый город после placeholder
+      citySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  } else if (stepIndex === 1) {
+    // Выбираем первый объект в списке
+    setTimeout(() => {
+      const firstPill = slot.querySelector(".address-pill");
+      if (firstPill) firstPill.click();
+    }, 500);
+  }
 }
 
 // =========================================================================
@@ -500,11 +515,25 @@ function insertDemoRow() {
 }
 
 function removeDemoRow() {
+  if (queueObserver) {
+    queueObserver.disconnect();
+    queueObserver = null;
+  }
   const row = document.querySelector(SEL.demoRow);
   if (row) row.remove();
   const tbody = document.querySelector(SEL.queueTable + " tbody");
   const empty = document.querySelector(SEL.queueEmpty);
   if (empty && tbody && tbody.children.length === 0) empty.style.display = "";
+}
+
+// Удерживаем строку в таблице, если контроллер её сотрет
+function watchDemoRow() {
+  const tbody = document.querySelector(SEL.queueTable + " tbody");
+  if (!tbody || queueObserver) return;
+  queueObserver = new MutationObserver(() => {
+    if (!document.querySelector(SEL.demoRow)) insertDemoRow();
+  });
+  queueObserver.observe(tbody, { childList: true });
 }
 
 // =========================================================================
@@ -591,18 +620,21 @@ function updateGlobalProgress(step) {
 
 async function beginScenario(state, notify) {
   const key = state.scenario;
-  if (key === "queue") insertDemoRow();
 
+  if (key === "queue") {
+    insertDemoRow();
+    watchDemoRow();
+  }
+
+  // Включаем автоматическое заполнение
   if (key === "create") {
     const slot = document.querySelector(SEL.addressSlot);
     if (slot) {
       addressObserver = new MutationObserver(() => {
         if (driverObj && driverObj.isActive()) {
           const active = driverObj.getActiveIndex();
-          // Если мы на шаге 0 (Город) и город выбран — переходим дальше
-          if (active === 0 && GATES.city()) {
-            driverObj.moveNext();
-          }
+          if (active === 0 && GATES.city()) driverObj.moveNext();
+          if (active === 1 && addressFilled()) driverObj.moveNext();
         }
       });
       addressObserver.observe(slot, {
@@ -626,12 +658,6 @@ async function beginScenario(state, notify) {
   }
 
   let startAt = 0;
-  if (key === "create") {
-    const wanted = createStartIndex();
-    const pos = available.findIndex(({ i }) => i >= wanted);
-    startAt = pos === -1 ? available.length - 1 : pos;
-  }
-
   const driverFn = await loadDriver();
 
   driverObj = driverFn({
@@ -643,17 +669,32 @@ async function beginScenario(state, notify) {
     nextBtnText: "Далее →",
     prevBtnText: "← Назад",
     doneBtnText: "Завершить",
+    disableActiveInteraction: true, // ЗАПРЕЩАЕМ КЛИКИ
+    overlayClickBehavior: "none", // ЗАПРЕЩАЕМ ЗАКРЫТИЕ ПО ФОНУ
     steps: available.map(({ s }) => s),
-    onHighlightStarted: (_el, step) => updateGlobalProgress(step),
+
+    onHighlightStarted: (_el, step) => {
+      updateGlobalProgress(step);
+      // Автозаполнение при создании
+      if (key === "create" && step.origIndex < 2)
+        autoFillAddress(step.origIndex);
+    },
 
     onNextClick: (_el, step) => {
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
         return false;
       }
-      if (driverObj && driverObj.isLastStep()) {
-        advancing = true;
+
+      // Программное нажатие кнопок в карточке
+      if (key === "ticket") {
+        if (step.origIndex === 1) document.querySelector(SEL.editBtn)?.click(); // Edit
+        if (step.origIndex === 6)
+          document.querySelector(SEL.cancelEditBtn)?.click(); // Cancel
+        if (step.origIndex === 8) document.querySelector(SEL.closeBtn)?.click(); // Close
       }
+
+      if (driverObj && driverObj.isLastStep()) advancing = true;
       driverObj.moveNext();
     },
     onPrevClick: () => {
@@ -704,7 +745,6 @@ function goNextScenario(state, notify) {
   window.location.hash = scenarioHash(next, state).slice(1);
 }
 
-// ИСПРАВЛЕНО: Ждем появления контейнера страницы, а не элементов внутри тура
 function scheduleResume(state, notify) {
   const deadline = Date.now() + 5000;
 
@@ -730,8 +770,7 @@ function scheduleResume(state, notify) {
 
   const tick = async () => {
     if (document.querySelector(containerSel)) {
-      // Пауза, чтобы контроллер очереди успел отрисовать строки
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300)); // Ждем маунта
       await beginScenario(state, notify);
       return;
     }
