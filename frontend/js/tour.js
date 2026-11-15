@@ -21,7 +21,8 @@ const SEL = {
   addressSlot: "#formAddressSlot",
   citySelect: "#formAddressSlot select",
   streetInput: "#formAddressSlot input.search-input",
-  streetDropdown: "#formAddressSlot .address-pill",
+  streetDropdown: () =>
+    document.querySelector(SEL.addressSlot + " .address-pill"), // Динамический элемент
   details: "#formDetails",
   staff: "#formStaffSlot",
   dicts: "#createGroupSlot",
@@ -38,7 +39,7 @@ const SEL = {
   cancelEditBtn: "#cancelEditBtn",
   closeBtn: "#closeBtn",
   solutionInput: "#solutionInput",
-  solutionMic: "#closeBlock .btn-voice-mic", // ДОБАВЛЕНО: кнопка микрофона
+  solutionMic: "#closeBlock .btn-voice-mic", // Кнопка микрофона
   closeAndCreate: "#closeAndCreateWrap",
   // Закрытые / очередь / профиль
   period: "#periodSelectorContainer",
@@ -173,7 +174,7 @@ function stepsFor(key) {
           element: SEL.citySelect,
           popover: {
             title: "1. Выбор города",
-            description: "Тур сам выберет город из списка. Нажмите «Далее».",
+            description: "Нажмите «Далее», чтобы тур выбрал город.",
           },
         },
         {
@@ -184,11 +185,11 @@ function stepsFor(key) {
           },
         },
         {
-          element: SEL.addressSlot,
+          element: SEL.streetDropdown,
           popover: {
-            title: "3. Выбор лифта",
+            title: "3. Выбор объекта",
             description:
-              "Нажмите «Далее», чтобы тур выбрал конкретный лифт из выпадающего списка.",
+              "Нажмите «Далее», чтобы выбрать этот объект из списка.",
           },
         },
         {
@@ -305,7 +306,7 @@ function stepsFor(key) {
           popover: {
             title: "Голосовой ввод",
             description:
-              "В некоторых браузерах доступен голосовой ввод. Нажмите на микрофон и разрешите доступ, чтобы надиктовать текст решения.",
+              "В некоторых браузерах есть функция голосового ввода. Нажмите на иконку микрофона и подтвердите разрешение.",
           },
         },
         {
@@ -417,29 +418,6 @@ const TOTAL_STEPS = SCENARIO_ORDER.reduce((n, k) => n + stepsFor(k).length, 0);
 // ПРОГРАММНЫЕ ДЕЙСТВИЯ
 // =========================================================================
 
-function autoFillCity() {
-  const select = document.querySelector(SEL.citySelect);
-  if (select && !select.value) {
-    select.selectedIndex = 1;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-}
-
-function autoFillStreet() {
-  const input = document.querySelector(SEL.streetInput);
-  if (input && !input.value) {
-    input.value = "Красноармейская";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-}
-
-function autoSelectObject() {
-  setTimeout(() => {
-    const pill = document.querySelector(SEL.streetDropdown);
-    if (pill) pill.click();
-  }, 600);
-}
-
 function insertDemoRow() {
   const tbody = document.querySelector(SEL.queueTable + " tbody");
   if (!tbody || document.querySelector(SEL.demoRow)) return;
@@ -520,14 +498,16 @@ async function loadDriver() {
 }
 
 function filterAvailable(steps) {
+  // Не отфильтровываем динамические элементы (функции) и скрытые блоки (решение)
+  const DYNAMIC_SELECTORS = [SEL.solutionInput, SEL.solutionMic];
   return steps
     .map((s, i) => ({ s, i }))
-    .filter(
-      ({ s }) =>
-        !s.element ||
-        typeof s.element === "function" ||
-        document.querySelector(s.element) !== null,
-    );
+    .filter(({ s }) => {
+      if (!s.element) return true;
+      if (typeof s.element === "function") return true;
+      if (DYNAMIC_SELECTORS.includes(s.element)) return true;
+      return document.querySelector(s.element) !== null;
+    });
 }
 
 function destroyDriverInstance() {
@@ -626,41 +606,61 @@ async function beginScenario(state, notify) {
     doneBtnText: "Завершить",
     disableActiveInteraction: true,
     overlayClickBehavior: "none",
+    waitForElement: 3000, // Ждем до 3 секунд, пока появятся динамические элементы
     steps: available.map(({ s }) => s),
 
     onHighlightStarted: (_el, step) => {
       updateGlobalProgress(step);
+      // Если мы дошли до поля "Решение" (оно появляется после клика на кнопку), просим driver.js пересчитать координаты
+      if (key === "ticket" && step.origIndex === 9) {
+        setTimeout(() => {
+          if (driverObj) driverObj.refresh();
+        }, 150);
+      }
     },
 
     onNextClick: (_el, step) => {
-      // Действия в форме создания
+      // Программные действия в форме создания
       if (key === "create") {
-        if (step.origIndex === 0) autoFillCity();
-        if (step.origIndex === 1) autoFillStreet();
-        if (step.origIndex === 2) autoSelectObject();
+        if (step.origIndex === 0) {
+          const select = document.querySelector(SEL.citySelect);
+          if (select && !select.value) {
+            select.selectedIndex = 1;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+        if (step.origIndex === 1) {
+          const input = document.querySelector(SEL.streetInput);
+          if (input) {
+            input.value = "Красноармейская";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("focus", { bubbles: true }));
+          }
+        }
+        if (step.origIndex === 2) {
+          const pill = document.querySelector(
+            SEL.addressSlot + " .address-pill",
+          );
+          if (pill) pill.click();
+        }
       }
 
-      // Действия в карточке заявки
+      // Программные действия в карточке
       if (key === "ticket") {
         if (step.origIndex === 1) document.querySelector(SEL.editBtn)?.click();
         if (step.origIndex === 6)
           document.querySelector(SEL.cancelEditBtn)?.click();
-
-        // Если нажат "Далее" на кнопке "Закрыть заявку"
         if (step.origIndex === 8) {
           document.querySelector(SEL.closeBtn)?.click();
-          // Даем время интерфейсу перестроиться (появиться полю решения)
+          // Даем интерфейсу время, чтобы применить display: block к блоку решения
           setTimeout(() => {
-            if (driverObj) {
-              if (driverObj.isLastStep()) advancing = true;
-              driverObj.moveNext();
-            }
-          }, 250);
-          return; // Прерываем стандартный переход, так как сделали его в setTimeout
+            if (driverObj && driverObj.isLastStep()) advancing = true;
+            driverObj.moveNext();
+          }, 200);
+          return; // Прерываем стандартный переход
         }
       }
 
-      // Раскрываем настройки в профиле
       if (key === "profile" && step.origIndex === 0) {
         const details = document
           .querySelector(SEL.profileList)
