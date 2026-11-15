@@ -543,15 +543,21 @@ async function finishTour(notify) {
 }
 
 function updateGlobalProgress(step) {
-  const el = document.querySelector(".driver-popover-progress-txt");
-  if (!el || step.origIndex == null) return;
+  if (step.origIndex == null) return;
   const base = SCENARIO_ORDER.slice(
     0,
     SCENARIO_ORDER.indexOf(step.scenario),
   ).reduce((n, k) => n + stepsFor(k).length, 0);
-  el.textContent = `${base + step.origIndex + 1} из ${TOTAL_STEPS}`;
+  const text = `${base + step.origIndex + 1} из ${TOTAL_STEPS}`;
+  // Driver дорисовывает поповер после onHighlightStarted и затирает
+  // прогресс своим «N of M». Подменяем текст на следующий кадр.
+  requestAnimationFrame(() => {
+    const el =
+      document.querySelector(".driver-popover-progress-text") ||
+      document.querySelector(".driver-popover-progress-txt");
+    if (el) el.textContent = text;
+  });
 }
-
 // =========================================================================
 // ЗАПУСК
 // =========================================================================
@@ -615,17 +621,12 @@ async function beginScenario(state, notify) {
 
     // ИСПРАВЛЕНО: используем onNextClick и onPrevClick
     onNextClick: (_el, step) => {
-      // Проверка гейтов (например, выбран ли город)
+      console.log("[tour] Клик по Далее, текущий шаг:", step);
+
       if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
         notify.info(step.hint || "Сначала выполните действие");
         return false;
       }
-
-      // Если это последний шаг — ставим флаг для перехода на след. страницу
-      if (driverObj && driverObj.isLastStep()) {
-        advancing = true;
-      }
-
       return true;
     },
     onPrevClick: () => true,
