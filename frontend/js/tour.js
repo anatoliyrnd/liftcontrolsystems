@@ -5,7 +5,6 @@ import "driver.js/dist/driver.css";
 
 const STATE_KEY = "lift_tour_state";
 
-/** Все селекторы тура в одном месте. */
 const SEL = {
   // Журнал
   createBtn: '[data-tour="create-btn"]',
@@ -20,6 +19,9 @@ const SEL = {
   userMenu: "#userProfileBtn",
   // Создание
   addressSlot: "#formAddressSlot",
+  citySelect: "#formAddressSlot select",
+  streetInput: "#formAddressSlot input.search-input",
+  streetDropdown: "#formAddressSlot .address-pill",
   details: "#formDetails",
   staff: "#formStaffSlot",
   dicts: "#createGroupSlot",
@@ -31,13 +33,12 @@ const SEL = {
   editDetails: "#detailsAddBlock",
   editStaff: "#staffSlotsContainer",
   editRepair: "#repairTimeEditBlock",
-  staffSlots: "#staffSlotsContainer",
   notes: "#noteComposer",
   cardSaveBtn: "#saveBtn",
   cancelEditBtn: "#cancelEditBtn",
   closeBtn: "#closeBtn",
   solutionInput: "#solutionInput",
-  closeAndCreate: "#closeAndCreateWrap", // Чекбокс
+  closeAndCreate: "#closeAndCreateWrap",
   // Закрытые / очередь / профиль
   period: "#periodSelectorContainer",
   queueTable: "#queueTable",
@@ -50,17 +51,12 @@ const SEL = {
   demoDelete: 'tr[data-demo-row="true"] button[data-action="delete"]',
 };
 
-// =========================================================================
-// СОСТОЯНИЕ
-// =========================================================================
-
 let driverObj = null;
 let driverLib = null;
 let selfNav = false;
 let advancing = false;
 let hashListener = null;
-let addressObserver = null;
-let queueObserver = null; // Обсервер для удержания демо-строки
+let queueObserver = null;
 
 function loadState() {
   try {
@@ -79,10 +75,6 @@ function clearState() {
     sessionStorage.removeItem(STATE_KEY);
   } catch (e) {}
 }
-
-// =========================================================================
-// СЦЕНАРИИ
-// =========================================================================
 
 const SCENARIO_ORDER = [
   "journal",
@@ -170,64 +162,66 @@ function stepsFor(key) {
           element: SEL.userMenu,
           popover: {
             title: "Меню пользователя",
-            description:
-              "Здесь можно сменить тему, зайти в настройки или выйти из системы.",
+            description: "Здесь можно сменить тему или выйти из системы.",
           },
         },
       ];
     case "create":
       return [
         {
-          element: SEL.addressSlot,
+          element: SEL.citySelect,
           popover: {
             title: "1. Выбор города",
-            description: "Выберите город из списка. (Тур сделает это за вас).",
+            description: "Тур сам выберет город из списка. Нажмите «Далее».",
           },
-          gate: "city",
-          hint: "Ждем выбора города...",
+        },
+        {
+          element: SEL.streetInput,
+          popover: {
+            title: "2. Поиск улицы",
+            description: "Нажмите «Далее», чтобы тур ввел название улицы.",
+          },
         },
         {
           element: SEL.addressSlot,
           popover: {
-            title: "2. Улица и дом",
+            title: "3. Выбор лифта",
             description:
-              "Введите улицу и выберите объект из выпадающего списка. (Тур сделает это за вас).",
+              "Нажмите «Далее», чтобы тур выбрал конкретный лифт из выпадающего списка.",
           },
-          gate: "street",
-          hint: "Ждем выбора адреса...",
         },
         {
           element: SEL.details,
           popover: {
-            title: "3. Описание",
+            title: "4. Описание",
             description: "Обязательное поле. Опишите суть проблемы.",
           },
         },
         {
           element: SEL.staff,
           popover: {
-            title: "4. Ответственный",
+            title: "5. Ответственный",
             description: "Необязательное поле. Можно назначить позже.",
           },
         },
         {
           element: SEL.dicts,
           popover: {
-            title: "5. Категории",
+            title: "6. Категории",
             description: "Укажите Группу, Тип запроса и Отдел.",
           },
         },
         {
           element: SEL.repair,
           popover: {
-            title: "6. Срок ремонта",
+            title: "7. Срок ремонта",
             description: "Можно указать позже.",
           },
         },
         {
           element: SEL.saveBtn,
           popover: {
-            title: "7. Сохранение",
+            title: "8. Сохранение",
             description: "Если нет сети — заявка сохранится локально.",
           },
         },
@@ -245,10 +239,9 @@ function stepsFor(key) {
           element: SEL.editBtn,
           popover: {
             title: "Редактирование",
-            description: "Нажмите «Редактировать», чтобы изменить данные.",
+            description:
+              "Нажмите «Далее», чтобы тур открыл режим редактирования.",
           },
-          gate: "edit",
-          hint: "Нажмите «Редактировать»",
         },
         {
           element: SEL.editDetails,
@@ -282,10 +275,8 @@ function stepsFor(key) {
           element: SEL.cancelEditBtn,
           popover: {
             title: "Отмена",
-            description: "Чтобы вернуться без сохранения, нажмите «Отмена».",
+            description: "Нажмите «Далее», чтобы тур отменил редактирование.",
           },
-          gate: "cancelEdit",
-          hint: "Нажмите «Отмена»",
         },
         {
           element: SEL.notes,
@@ -298,10 +289,8 @@ function stepsFor(key) {
           element: SEL.closeBtn,
           popover: {
             title: "Закрытие заявки",
-            description: "Закрытие — это отдельное действие. Нажмите сюда.",
+            description: "Нажмите «Далее», чтобы перейти к закрытию.",
           },
-          gate: "closeMode",
-          hint: "Нажмите «Закрыть заявку»",
         },
         {
           element: SEL.solutionInput,
@@ -411,67 +400,40 @@ function scenarioHash(key, state) {
 const TOTAL_STEPS = SCENARIO_ORDER.reduce((n, k) => n + stepsFor(k).length, 0);
 
 // =========================================================================
-// ГЕЙТЫ И АВТОЗАПОЛНЕНИЕ
+// ПРОГРАММНЫЕ ДЕЙСТВИЯ (вместо кликов)
 // =========================================================================
 
-function editModeActive() {
-  const el = document.querySelector(SEL.editDetails);
-  return !!el && el.style.display !== "none";
-}
-
-function addressFilled() {
-  const slot = document.querySelector(SEL.addressSlot);
-  if (!slot) return false;
-  // Проверяем, есть ли выбранный объект (обычно это скрытый input или кнопка с классом active)
-  return !!slot.querySelector(
-    '.address-pill.active, input[type="hidden"][name="object_id"]',
-  );
-}
-
-const GATES = {
-  city: () => {
-    const slot = document.querySelector(SEL.addressSlot);
-    if (!slot) return false;
-    const citySelect = slot.querySelector("select");
-    return citySelect && citySelect.value !== "";
-  },
-  street: addressFilled,
-  edit: editModeActive,
-  cancelEdit: () => !editModeActive(),
-  closeMode: () => {
-    const block = document.querySelector("#closeBlock");
-    return block && block.style.display !== "none";
-  },
-};
-
-// Программное заполнение полей для шагов create
-function autoFillAddress(stepIndex) {
-  const slot = document.querySelector(SEL.addressSlot);
-  if (!slot) return;
-
-  if (stepIndex === 0) {
-    // Выбираем первый город
-    const citySelect = slot.querySelector("select");
-    if (citySelect && !citySelect.value) {
-      citySelect.selectedIndex = 1; // Первый город после placeholder
-      citySelect.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-  } else if (stepIndex === 1) {
-    // Выбираем первый объект в списке
-    setTimeout(() => {
-      const firstPill = slot.querySelector(".address-pill");
-      if (firstPill) firstPill.click();
-    }, 500);
+function autoFillCity() {
+  const select = document.querySelector(SEL.citySelect);
+  if (select && !select.value) {
+    select.selectedIndex = 1; // Выбираем первый город
+    select.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 
-// =========================================================================
-// ДЕМО-СТРОКА ОЧЕРЕДИ
-// =========================================================================
+function autoFillStreet() {
+  const input = document.querySelector(SEL.streetInput);
+  if (input && !input.value) {
+    input.value = "Красноармейская"; // Тестовая улица
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
+function autoSelectObject() {
+  // Ждем, пока прогрузится выпадающий список, и кликаем по первому элементу
+  setTimeout(() => {
+    const pill = document.querySelector(SEL.streetDropdown);
+    if (pill) pill.click();
+  }, 600);
+}
 
 function insertDemoRow() {
   const tbody = document.querySelector(SEL.queueTable + " tbody");
-  if (!tbody || document.querySelector(SEL.demoRow)) return;
+  if (!tbody) return;
+
+  // Если строка уже есть, ничего не делаем
+  if (document.querySelector(SEL.demoRow)) return;
+
   const tr = document.createElement("tr");
   tr.setAttribute("data-demo-row", "true");
 
@@ -526,12 +488,16 @@ function removeDemoRow() {
   if (empty && tbody && tbody.children.length === 0) empty.style.display = "";
 }
 
-// Удерживаем строку в таблице, если контроллер её сотрет
+// Удерживаем строку, если queue-controller её сотрет
 function watchDemoRow() {
   const tbody = document.querySelector(SEL.queueTable + " tbody");
   if (!tbody || queueObserver) return;
+
   queueObserver = new MutationObserver(() => {
-    if (!document.querySelector(SEL.demoRow)) insertDemoRow();
+    // Если таблица перерисовалась и стерла нашу строку — возвращаем
+    if (!document.querySelector(SEL.demoRow)) {
+      insertDemoRow();
+    }
   });
   queueObserver.observe(tbody, { childList: true });
 }
@@ -557,10 +523,6 @@ function filterAvailable(steps) {
 }
 
 function destroyDriverInstance() {
-  if (addressObserver) {
-    addressObserver.disconnect();
-    addressObserver = null;
-  }
   if (driverObj) {
     try {
       driverObj.destroy();
@@ -626,25 +588,6 @@ async function beginScenario(state, notify) {
     watchDemoRow();
   }
 
-  // Включаем автоматическое заполнение
-  if (key === "create") {
-    const slot = document.querySelector(SEL.addressSlot);
-    if (slot) {
-      addressObserver = new MutationObserver(() => {
-        if (driverObj && driverObj.isActive()) {
-          const active = driverObj.getActiveIndex();
-          if (active === 0 && GATES.city()) driverObj.moveNext();
-          if (active === 1 && addressFilled()) driverObj.moveNext();
-        }
-      });
-      addressObserver.observe(slot, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-      });
-    }
-  }
-
   const all = stepsFor(key).map((s, i) => ({
     ...s,
     origIndex: i,
@@ -657,7 +600,6 @@ async function beginScenario(state, notify) {
     return;
   }
 
-  let startAt = 0;
   const driverFn = await loadDriver();
 
   driverObj = driverFn({
@@ -669,29 +611,27 @@ async function beginScenario(state, notify) {
     nextBtnText: "Далее →",
     prevBtnText: "← Назад",
     doneBtnText: "Завершить",
-    disableActiveInteraction: true, // ЗАПРЕЩАЕМ КЛИКИ
-    overlayClickBehavior: "none", // ЗАПРЕЩАЕМ ЗАКРЫТИЕ ПО ФОНУ
+    disableActiveInteraction: true, // Блокируем клики
+    overlayClickBehavior: "none", // Запрещаем закрытие по фону
     steps: available.map(({ s }) => s),
 
     onHighlightStarted: (_el, step) => {
       updateGlobalProgress(step);
-      // Автозаполнение при создании
-      if (key === "create" && step.origIndex < 2)
-        autoFillAddress(step.origIndex);
     },
 
     onNextClick: (_el, step) => {
-      if (step.gate && GATES[step.gate] && !GATES[step.gate]()) {
-        notify.info(step.hint || "Сначала выполните действие");
-        return false;
+      // Программное выполнение действий перед переходом
+      if (key === "create") {
+        if (step.origIndex === 0) autoFillCity();
+        if (step.origIndex === 1) autoFillStreet();
+        if (step.origIndex === 2) autoSelectObject();
       }
 
-      // Программное нажатие кнопок в карточке
       if (key === "ticket") {
-        if (step.origIndex === 1) document.querySelector(SEL.editBtn)?.click(); // Edit
+        if (step.origIndex === 1) document.querySelector(SEL.editBtn)?.click();
         if (step.origIndex === 6)
-          document.querySelector(SEL.cancelEditBtn)?.click(); // Cancel
-        if (step.origIndex === 8) document.querySelector(SEL.closeBtn)?.click(); // Close
+          document.querySelector(SEL.cancelEditBtn)?.click();
+        if (step.origIndex === 8) document.querySelector(SEL.closeBtn)?.click();
       }
 
       if (driverObj && driverObj.isLastStep()) advancing = true;
@@ -702,10 +642,6 @@ async function beginScenario(state, notify) {
     },
     onDestroyed: () => {
       driverObj = null;
-      if (addressObserver) {
-        addressObserver.disconnect();
-        addressObserver = null;
-      }
       if (advancing) {
         advancing = false;
         goNextScenario(state, notify);
@@ -715,7 +651,7 @@ async function beginScenario(state, notify) {
     },
   });
 
-  driverObj.drive(startAt);
+  driverObj.drive(0);
 }
 
 function goNextScenario(state, notify) {
@@ -770,7 +706,7 @@ function scheduleResume(state, notify) {
 
   const tick = async () => {
     if (document.querySelector(containerSel)) {
-      await new Promise((r) => setTimeout(r, 300)); // Ждем маунта
+      await new Promise((r) => setTimeout(r, 400)); // Ждем полной инициализации контроллера
       await beginScenario(state, notify);
       return;
     }
