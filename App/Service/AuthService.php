@@ -94,7 +94,13 @@ final class AuthService
 
         $surname    = trim((string) ($u['user_surname'] ?? ''));
         $firstname  = trim((string) ($u['user_firstname'] ?? ''));
-        $patronymic = trim((string) ($u['user_patronymic'] ?? ''));
+         $patronymic = trim((string) ($u['user_patronymic'] ?? ''));
+
+        // Должностной тип — бизнес-тип, а не роль доступа: его НЕ
+        // нормализуем (mechanic/foreman выше относятся к user_role).
+        // Пустая строка и NULL в БД означают одно «не задан», поэтому
+        // наружу отдаём null — ConfigService уже ждёт эту форму.
+        $position = trim((string) ($u['user_position'] ?? ''));
 
         return [
             'id'           => (int) $u['user_id'],
@@ -103,8 +109,22 @@ final class AuthService
             'name'         => $firstname !== '' ? $firstname : (string) $u['user_name'],
             'surname'      => $surname !== '' ? $surname : null,
             'patronymic'   => $patronymic !== '' ? $patronymic : null,
-            'display_name' => (string) $u['user_name'],
+           'display_name' => (string) $u['user_name'],
             'role'         => $role,
+
+            // Флаги обязан вернуть именно formatUser: CallPolicy читает
+            // права из $user и в БД не ходит. Без этих полей флаг
+            // прочитается как 0, и инженер с правом потеряет создание
+            // в обоих путях — поэтому патч выкатывается ДО проверок.
+            //
+            // int 0/1, а не bool: колонки tinyint(1), клиент сравнивает
+            // с 0/1, приведение к bool живёт внутри CallPolicy.
+            'user_add_call'       => (int) ($u['user_add_call'] ?? 0),
+            // Транспорт без потребителя: область чтения остаётся прежней
+            // до B3.2 (CallScope). Поле добавлено сейчас, чтобы B3.2
+            // правил один файл и не трогал AuthService повторно.
+            'user_read_all_calls' => (int) ($u['user_read_all_calls'] ?? 0),
+            'user_position'       => $position !== '' ? $position : null,
         ];
     }
 }
