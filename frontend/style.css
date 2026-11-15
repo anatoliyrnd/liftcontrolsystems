@@ -2591,6 +2591,119 @@ td.cell-alert-info {
     max-width: 220px;
 }
 
+/* ==========================================================================
+   Пункты dropdown пользователя
+   ========================================================================== */
+
+.user-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 14px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s ease;
+}
+
+.user-dropdown-item:hover {
+    background: var(--bg-secondary, rgba(0, 0, 0, 0.05));
+}
+
+.user-dropdown-item svg {
+    flex: 0 0 auto;
+    opacity: 0.7;
+}
+
+/* Обучающий тур — акцентный цвет для отличия */
+.tour-menu-item {
+    color: var(--accent, #6366f1);
+}
+
+.tour-menu-item svg {
+    color: var(--accent, #6366f1);
+    opacity: 1;
+}
+
+/* Разделитель перед «Выйти» — защита от случайного клика */
+.user-dropdown-divider {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--border-color, #e5e7eb);
+}
+
+/* Пункт выхода — красный для визуального предупреждения */
+.logout-item {
+    color: #ef4444;
+}
+
+.logout-item:hover {
+    background: rgba(239, 68, 68, 0.08);
+}
+
+/* ==========================================================================
+   Обучающий тур (driver.js) — кастомизация под тему
+   ========================================================================== */
+
+.driver-tour-popover {
+    background: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    max-width: 320px;
+}
+
+.driver-tour-popover .driver-popover-title {
+    color: var(--text-primary) !important;
+    font-size: 15px !important;
+    font-weight: 600;
+}
+
+.driver-tour-popover .driver-popover-description {
+    color: var(--text-secondary) !important;
+    font-size: 13px !important;
+    line-height: 1.5;
+}
+
+.driver-tour-popover .driver-popover-progress-txt {
+    color: var(--text-secondary) !important;
+}
+
+.driver-tour-popover .driver-popover-navigation-btns button {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 4px !important;
+    text-shadow: none !important;
+    font-size: 13px;
+    padding: 4px 10px;
+}
+
+.driver-tour-popover .driver-popover-navigation-btns button:hover {
+    background: var(--accent, #6366f1) !important;
+    color: #fff !important;
+}
+
+.driver-tour-popover .driver-popover-close-btn {
+    color: var(--text-secondary) !important;
+    font-size: 20px;
+}
+
+.driver-tour-popover .driver-popover-close-btn:hover {
+    color: var(--text-primary) !important;
+}
+
+.driver-active-element {
+    box-shadow: 0 0 0 4px var(--accent, #6366f1) !important;
+}
+
+
 /* Адаптивность: на экранах уже 768px оставляем только иконку */
 @media (max-width: 768px) {
     .logo-text-group {
