@@ -16,6 +16,37 @@ import { getWebGLFingerprint } from "./utils/webgl-fingerprint.js";
 
 const AUTH_LOST_EVENT = "auth:lost";
 
+// Лок общий для всех вкладок origin: refresh-токен один на браузер
+// (httpOnly cookie). Grace-окно сервера закрывает гонку и без лока,
+// лок убирает лишние ротации и мусорные строки access.
+const REFRESH_LOCK = "lift-auth-refresh";
+
+// Защита от отсутствующего значения: NaN в setTimeout срабатывает
+// немедленно и абортит ожидание лока на старте.
+const REQUEST_TIMEOUT_MS = Number(API?.REQUEST_TIMEOUT_MS) || 15000;
+
+// Ожидание лока больше границы одного запроса: иначе ожидающий
+// абортится, пока держатель легитимно работает.
+const LOCK_WAIT_MS = REQUEST_TIMEOUT_MS + 5000;
+
+// Сквозной бюджет цепочки 401 → refresh → retry. Без него сроки
+// складываются (T + T+5 + T + T ≈ 50 с спиннера), и пользователь
+// видит «загрузку» вместо ошибки.
+const CHAIN_BUDGET_MS = REQUEST_TIMEOUT_MS * 2;
+
+// Только эти коды означают потерю сессии. Всё прочее — транспорт:
+// разлогин по сетевому чиху выбрасывал бы пользователя без причины.
+// invalid_credentials — на будущее: сейчас его отдаёт только login,
+// но «пользователь исчез» не должен становиться вечным offline.
+const AUTH_FAIL_CODES = new Set([
+  "token_expired",
+  "token_invalid",
+  "missing_token",
+  "user_blocked",
+  "device_mismatch",
+  "invalid_credentials",
+]);
+
 export class ApiService {
   constructor(baseUrl = "", options = { local: false }) {
     this.baseUrl = baseUrl;
@@ -61,48 +92,138 @@ export class ApiService {
     } catch (e) {}
   }
 
-  // ------------------------------------------------------------------
-  // Refresh + mutex
-  // ------------------------------------------------------------------
-  async _refreshSession() {
-    // Mutex: если refresh уже идёт — ждём тот же Promise
+  /**
+   * Обновление сессии: мьютекс вкладки + межвкладочный лок.
+   *
+   * Возвращает { ok, kind, code }, а не bool: вызывающий обязан
+   * отличать отказ авторизации от транспортного сбоя и разлогинивать
+   * только по первому.
+   *
+   * Проверки «не обновил ли кто access, пока ждали» нет намеренно:
+   * access лежит в памяти вкладки, чужой refresh её не наполняет.
+   */
+  async _refreshSession(deadlineAt = null) {
     if (this._refreshPromise) return this._refreshPromise;
 
-    this._refreshPromise = (async () => {
-      try {
-        const resp = await this._sendPostRequest(
-          AUTH.LOGIN_URL + "?action=refresh",
-          {},
-          "Обновление сессии...",
-          null,
-          /* skipAuthHandling */ true,
-        );
+    const deadline = deadlineAt ?? Date.now() + CHAIN_BUDGET_MS;
 
-        if (resp && resp.status === "ok" && resp.access_token) {
-          authStore.setSession(resp.access_token, resp.expires_at, resp.user);
-          return true;
-        }
-        return false;
-      } catch (e) {
-        return false;
-      } finally {
-        this._refreshPromise = null;
-      }
-    })();
+    this._refreshPromise = this._withRefreshLock(
+      () => this._doRefresh(deadline),
+      deadline,
+    ).finally(() => {
+      this._refreshPromise = null;
+    });
 
     return this._refreshPromise;
+  }
+
+  /**
+   * Web Locks в режиме ожидания (не ifAvailable, как в sync-manager):
+   * пропустить refresh нельзя — вкладка останется без access.
+   *
+   * signal ограничивает именно ОЖИДАНИЕ: замороженная браузером
+   * вкладка держит лок неограниченно, и без таймаута foreground-
+   * вкладка встанет насмерть с чистой консолью.
+   *
+   * Три исхода отказа различаются сознательно:
+   *   тело выполнялось → транспорт, повтора быть не должно;
+   *   аборт в ожидании → транспорт, БЕЗ разлокированного повтора
+   *                      (иначе таймаут сам создавал бы гонку);
+   *   сломан API локов → однократный fn(), это деградация.
+   */
+  async _withRefreshLock(fn, deadline) {
+    if (!navigator.locks?.request) return fn();
+
+    const wait = Math.min(LOCK_WAIT_MS, deadline - Date.now());
+    if (wait <= 0) return { ok: false, kind: "transport", code: "aborted" };
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), wait);
+    let bodyRan = false;
+
+    try {
+      return await navigator.locks.request(
+        REFRESH_LOCK,
+        { mode: "exclusive", signal: ac.signal },
+        async () => {
+          // Ожидание кончилось — дальше границу задаёт таймаут fetch.
+          clearTimeout(timer);
+          bodyRan = true;
+          return fn();
+        },
+      );
+    } catch (e) {
+      if (bodyRan || ac.signal.aborted) {
+        return { ok: false, kind: "transport", code: "aborted" };
+      }
+      console.warn("[ApiService] Web Locks недоступны:", e);
+      return fn();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Тело refresh. Никогда не бросает — вызывающий ждёт { ok, kind, code }. */
+  async _doRefresh(deadline) {
+    try {
+      const resp = await this._sendPostRequest(
+        AUTH.LOGIN_URL + "?action=refresh",
+        {},
+        "Обновление сессии...",
+        null,
+        /* skipAuthHandling */ true,
+        { deadline, isRefresh: true },
+      );
+      if (resp && resp.status === "ok" && resp.access_token) {
+        authStore.setSession(resp.access_token, resp.expires_at, resp.user);
+        return { ok: true };
+      }
+      // skipAuthHandling гасит и rate_limited-ветку, поэтому
+      // классифицируем сами: иначе 429 прилетел бы как отказ
+      // авторизации и разлогинил.
+      const code = resp?.code || resp?.error?.code || "";
+      if (AUTH_FAIL_CODES.has(code)) {
+        return { ok: false, kind: "auth", code };
+      }
+      // Неклассифицированный код — аномалия, а не «сеть упала».
+      // Молча превращать его в вечный offline нельзя.
+      if (code && code !== "network_error" && code !== "aborted") {
+        console.warn("[ApiService] Неклассифицированный отказ refresh:", code);
+      }
+      return { ok: false, kind: "transport", code };
+    } catch (e) {
+      return { ok: false, kind: "transport", code: "exception" };
+    }
   }
 
   // ------------------------------------------------------------------
   // Низкоуровневый POST
   // ------------------------------------------------------------------
-  async _sendPostRequest(
+    async _sendPostRequest(
     url,
     payloadData,
     actionComment = "",
     tag = null,
     skipAuthHandling = false,
+    internal = null,
   ) {
+    // internal = { deadline, isRefresh } — только для внутренних вызовов
+    // (refresh и retry), наружный контракт метода не меняется.
+    //
+    // Дедлайн сквозной: refresh и retry наследуют бюджет родителя,
+    // иначе цепочка складывает таймауты в ~50 секунд спиннера.
+    const deadline = internal?.deadline ?? Date.now() + CHAIN_BUDGET_MS;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return {
+        status: "error",
+        code: "aborted",
+        reason: "timeout",
+        offline: true,
+        message: "Превышено время ожидания ответа сервера.",
+      };
+    }
+
     networkLed.requestStarted();
 
     // actionComment === null → silent-запрос: не трогаем статус-бар вообще.
@@ -117,10 +238,10 @@ export class ApiService {
     // ставит cooldown) от ручного abort'а через abortTag (AUTH_LOST,
     // отмена по кнопке — offline: false, без cooldown).
     let timedOut = false;
-    const timeoutId = setTimeout(() => {
+        const timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, API.REQUEST_TIMEOUT_MS);
+    }, Math.min(REQUEST_TIMEOUT_MS, remaining));
     if (tag) {
       if (!this._activeByTag.has(tag)) this._activeByTag.set(tag, new Set());
       this._activeByTag.get(tag).add(controller);
@@ -144,7 +265,6 @@ export class ApiService {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
 
       // HTTP-ошибка на уровне сети
       if (!response.ok) {
@@ -182,7 +302,16 @@ export class ApiService {
       const data = await response.json();
 
       // Ошибка внутри JSON
-      if (data && data.status === "error" && !skipAuthHandling) {
+          // isRefresh — второй, независимый барьер реентерабельности.
+      // Инстансный флаг для этого не годится: он погасил бы обработку
+      // 401 у параллельных запросов, которые как раз должны дождаться
+      // refresh и повториться. Барьер — на вызов, не на объект.
+      if (
+        data &&
+        data.status === "error" &&
+        !skipAuthHandling &&
+        internal?.isRefresh !== true
+      ) {
         if (AUTH.BYPASS_AUTH) {
           return data;
         }
@@ -194,22 +323,43 @@ export class ApiService {
           code === "missing_token" ||
           code === "token_invalid"
         ) {
-          const okRefresh = await this._refreshSession();
-          if (okRefresh) {
-            networkLed.reportSuccess();
+                    // Сетевая фаза оригинала завершена, JSON разобран. Таймер
+          // дальше не нужен: иначе он сработает во время ожидания
+          // лока и выставит timedOut, размывая семантику флага.
+          clearTimeout(timeoutId);
+
+          const refresh = await this._refreshSession(deadline);
+          if (refresh.ok) {
+            // reportSuccess здесь избыточен: refresh уже отчитался
+            // своим запросом, retry отчитается своим. Одна логическая
+            // операция не должна давать два события успеха.
             return this._sendPostRequest(
               url,
               payloadData,
               actionComment,
               tag,
               true,
+              { deadline },
             );
-          } else {
+          }
+          if (refresh.kind === "auth") {
             networkLed.reportFailure();
-            this._emitAuthLost(code);
+            // Код refresh, а не оригинала: слушатели различают
+            // «истекло» и «заблокирован», им нужно реальное основание.
+            this._emitAuthLost(refresh.code || code);
             data._authLost = true;
             return data;
           }
+          // Транспорт: refresh-токен мог остаться валидным, сессия не
+          // потеряна. Отдаём offline-класс — SyncManager поставит
+          // cooldown и оставит команду pending вместо разлогина.
+          networkLed.reportFailure();
+          return {
+            status: "error",
+            code: "network_error",
+            offline: true,
+            message: "Не удалось обновить сессию: сервер недоступен.",
+          };
         }
 
         if (code === "device_mismatch" || code === "user_blocked") {
@@ -237,8 +387,6 @@ export class ApiService {
       networkLed.reportSuccess();
       return data;
     } catch (err) {
-      clearTimeout(timeoutId);
-
       if (err.name === "AbortError") {
         if (timedOut) {
           window.dispatchEvent(new CustomEvent("app:network-error"));
@@ -267,6 +415,10 @@ export class ApiService {
         message: "Ошибка сети: " + (err.message || "неизвестная ошибка"),
       };
     } finally {
+      // Единственное место снятия таймаута. Раньше он снимался сразу
+      // после fetch — по заголовкам, и зависшее тело (.json()) висело
+      // бесконечно. Под refresh-локом это deadlock всех вкладок.
+      clearTimeout(timeoutId);
       if (showStatus) {
         apiStatus.hide();
       }
@@ -335,8 +487,10 @@ export class ApiService {
     );
   }
 
+  /** main.js ждёт bool — внутренний контракт { ok, kind } наружу не отдаём. */
   async tryAutoLogin() {
-    return this._refreshSession();
+    const refresh = await this._refreshSession();
+    return refresh.ok === true;
   }
 
   async logout() {
