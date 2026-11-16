@@ -2,7 +2,9 @@
 declare(strict_types=1);
 namespace App;
 
-use RuntimeException;
+use App\Exceptions\ApiException;
+use App\Http\ErrorCode;
+use App\Support\Logger;
 
 final readonly class Tenant
 {
@@ -26,21 +28,49 @@ final readonly class Tenant
         $host = strtolower(preg_replace('/:\d+$/', '', $host) ?? '');
 
         $parts = explode('.', $host);
+        // Битый Host — это сканеры, а не пользователи: SPA отдаётся с
+        // поддомена тенанта и на apex не загружается вовсе. Прежний
+        // RuntimeException ловился вторым catch как Throwable и писал
+        // [FATAL API] на каждый такой запрос, забивая app.log. Штатный
+        // ApiException перехватывается первым catch в api.php/auth.php
+        // → обычный 4xx без записи в лог.
         if (count($parts) < 3) {
-            throw new RuntimeException('Неверный формат домена. Ожидается поддомен.liftcs.ru');
+            throw new ApiException(
+                ErrorCode::TenantNotFound,
+                'Организация не найдена',
+                reason: 'invalid_host_format'
+            );
         }
 
         $subdomain = $parts[0];
 
+        // Служебные имена (www, api, admin…) тенантами не являются.
+        // Текст клиенту одинаковый во всех трёх отказах, конкретика —
+        // в reason: она нужна поддержке, а не пользователю.
         if (in_array($subdomain, self::RESERVED, true) || !preg_match('/^[a-z0-9][a-z0-9-]{0,30}$/', $subdomain)) {
-            throw new RuntimeException('Недопустимый или зарезервированный поддомен');
+            throw new ApiException(
+                ErrorCode::TenantNotFound,
+                'Организация не найдена',
+                reason: 'reserved_subdomain'
+            );
         }
 
         $registry = new Registry();
         $data = $registry->findBySubdomain($subdomain);
-
         if (!$data) {
-            throw new RuntimeException('Организация не найдена');
+            // Единственный случай, который логируем: имя синтаксически
+            // валидно и не зарезервировано, значит на него кто-то реально
+            // пришёл. Отсутствие в реестре — ошибка конфигурации тенанта,
+            // её нужно видеть. Битые Host выше не логируются сознательно.
+            Logger::warning('Тенант не найден в реестре', [
+                'subdomain' => $subdomain,
+                'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+            ]);
+            throw new ApiException(
+                ErrorCode::TenantNotFound,
+                'Организация не найдена',
+                reason: 'tenant_not_found'
+            );
         }
 
         return new self(
