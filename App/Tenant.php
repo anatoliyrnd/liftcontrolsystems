@@ -10,6 +10,15 @@ final readonly class Tenant
 {
     private const RESERVED = ['www', 'api', 'admin', 'mail', 'test', 'dev', 'staging', 'docs', 'cp', 'ftp', 'mysql', 'ns1', 'ns2', 'org'];
 
+    /**
+     * Базовый домен тенантов.
+     *
+     * Хардкод осознан: локальная разработка переводится на liftcs.ru
+     * в OSPanel, отдельный конфиг не нужен. Если появится второй базовый
+     * домен (white-label), оверрайд добавляется ЗДЕСЬ — константой из
+     * bootstrap/config, а не правкой проверок ниже.
+     */
+    private const string BASE_DOMAIN = 'liftcs.ru';
     public function __construct(
         public string $id,
         public string $orgName,
@@ -26,7 +35,10 @@ final readonly class Tenant
     {
         $host = $_SERVER['HTTP_HOST'] ?? '';
         $host = strtolower(preg_replace('/:\d+$/', '', $host) ?? '');
-
+        // FQDN с точкой на конце («l3.liftcs.ru.») — валидный Host, но
+        // пустая последняя метка сдвинула бы разбор: базовый домен не
+        // совпал бы и рабочий тенант ушёл бы в отказ.
+        $host = rtrim($host, '.');
         $parts = explode('.', $host);
         // Битый Host — это сканеры, а не пользователи: SPA отдаётся с
         // поддомена тенанта и на apex не загружается вовсе. Прежний
@@ -39,6 +51,25 @@ final readonly class Tenant
                 ErrorCode::TenantNotFound,
                 'Организация не найдена',
                 reason: 'invalid_host_format'
+            );
+        }
+
+        // Без этой проверки любой трёхуровневый Host резолвился в тенант:
+        // «l3.evil.com» отдавал данные организации l3. Поддомен берём из
+        // первой метки, но принадлежность домену проверяем по двум
+        // последним — именно последним, иначе «l3.liftcs.ru.evil.com»
+        // прошёл бы по подстроке.
+        //
+        // Глубину НЕ ограничиваем (решение владельца): «l3.x.liftcs.ru»
+        // остаётся валидным, поддомен по-прежнему первая метка.
+        //
+        // Не логируем: чужой Host — это сканеры, как и битый формат выше.
+        $base = implode('.', array_slice($parts, -2));
+        if ($base !== self::BASE_DOMAIN) {
+            throw new ApiException(
+                ErrorCode::TenantNotFound,
+                'Организация не найдена',
+                reason: 'foreign_domain'
             );
         }
 
