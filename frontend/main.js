@@ -35,7 +35,7 @@ import { offlineBanner } from "./js/components/offline-banner.js";
 import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js";
 import { queuePageTemplate } from "./js/route/pages/queue.js";
 import { QueueController } from "./js/queue-controller.js";
-import { startTour, stopTour } from "./js/tour.js";
+import { startTour, stopTour } from "./js/tour/index.js";
 
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
