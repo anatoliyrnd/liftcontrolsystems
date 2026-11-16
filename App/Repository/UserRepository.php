@@ -23,26 +23,6 @@ final class UserRepository
         return $this->db->fetchOne("SELECT * FROM lift_users WHERE `$field` = :login LIMIT 1", ['login' => $login]);
     }
 
-    /**
-     * Ищет пользователя по токену.
-     * ВХОДЯЩИЙ ТОКЕН ХЭШИРУЕТСЯ, так как в БД лежит только хэш.
-     */
-    public function findByApiToken(string $token): ?array
-    {
-        $hash = hash('sha256', $token);
-        return $this->db->fetchOne("SELECT * FROM lift_users WHERE api_token = :token LIMIT 1", ['token' => $hash]);
-    }
-
-    /**
-     * Обновляет токен.
-     * В БД ЗАПИСЫВАЕТСЯ ХЭШ, а не сам токен.
-     */
-    public function updateApiToken(int $userId, string $rawToken, int $expires, string $webgl): void
-    {
-        $hash = hash('sha256', $rawToken);
-        $sql = "UPDATE lift_users SET api_token = :token, api_token_expires = :expires, webgl_info_spa = :webgl WHERE user_id = :id";
-        $this->db->execute($sql, ['token' => $hash, 'expires' => $expires, 'webgl' => $webgl, 'id' => $userId]);
-    }
 
 
 
@@ -68,24 +48,8 @@ final class UserRepository
         $this->insertRefreshToken($userId, $rawToken, $webgl, $familyId);
     }
 
-    /**
-     * Ищет пользователя по Refresh-токену.
-     *
-     * УДАЛИТЬ на шаге 6 вместе с переходом AuthController на
-     * rotateRefreshToken(): метод не различает ротированный токен и
-     * живой, то есть допускает многократное использование одного
-     * refresh — ровно то, что закрывает ротация. Оставлен, чтобы этот
-     * файл можно было выкатить отдельно и не сломать текущий refresh.
-     */
-    public function findByRefreshToken(string $rawToken): ?array
-    {
-        $hash = hash('sha256', $rawToken);
-        $sql = "SELECT u.* FROM lift_users u 
-                JOIN lift_refresh_tokens rt ON u.user_id = rt.user_id 
-                WHERE rt.token_hash = :hash AND rt.expires_at > NOW() LIMIT 1";
-        return $this->db->fetchOne($sql, ['hash' => $hash]);
-    }
-    /**
+
+     /**
      * Ротация refresh-токена: предъявленный гасится, выпускается преемник.
      *
      * Возвращает status:
@@ -141,7 +105,11 @@ final class UserRepository
             }
 
             $newRaw = bin2hex(random_bytes(32));
-            if ($this->claimRefreshToken($hash, $userId, $newRaw, $webgl, $familyId)) {
+            // Строка целиком: replaced_by — ожидаемое значение CAS,
+            // device_fingerprint — наследство преемнику. Отдельными
+            // параметрами список разросся бы до семи и разъехался бы
+            // по порядку при первой же правке.
+            if ($this->claimRefreshToken($hash, $row, $newRaw, $webgl)) {
                 return ['status' => 'ok', 'user_id' => $userId, 'new_token' => $newRaw];
             }
         }
@@ -157,11 +125,15 @@ final class UserRepository
      * TZ-скос, который лечим в FROM_UNIXTIME, и окно поедет на 3 часа.
      *
      * Истёкший токен не отдаём вовсе: продлевать мёртвую сессию нельзя.
+     *
+     * replaced_by читаем не для диагностики, а как ожидаемое значение
+     * CAS: ротация заявляется, только если владелец не сменился.
+     * device_fingerprint нужен преемнику — клиент на refresh его не шлёт.
      */
     private function readRefreshToken(string $hash): ?array
     {
         return $this->db->fetchOne(
-            "SELECT user_id, family_id, rotated_at, replaced_by,
+            "SELECT user_id, family_id, rotated_at, replaced_by, device_fingerprint,
                     (rotated_at IS NOT NULL
                      AND rotated_at > NOW() - INTERVAL :grace SECOND) AS in_grace
              FROM lift_refresh_tokens
@@ -170,52 +142,76 @@ final class UserRepository
             ['hash' => $hash, 'grace' => AuthService::REFRESH_REUSE_GRACE_SEC]
         );
     }
-
     /**
      * Погасить предъявленный токен и выпустить преемника — атомарно.
      *
-     * UPDATE условный (rotated_at IS NULL): из двух параллельных
-     * запросов ровно один станет владельцем ротации.
+     * CAS по replaced_by, а не по признаку «ещё не ротирован»: иначе
+     * grace-повтор не мог бы заявиться никогда — токен уже ротирован,
+     * условие не выполняется, и сценарий потерянного ответа (ради
+     * которого окно и введено) упирался бы в busy, а по истечении окна —
+     * в ложную кражу. Проигравший гонку перечитывает строку, видит
+     * нового владельца, попадает в grace и заявляется со второй попытки.
      *
-     * Факт владения проверяем повторным чтением replaced_by, а не
-     * rowCount: обёртка DB его не гарантирует (тот же приём, что в
-     * CallRepository::bindSpultGuid). Без проверки проигравший запрос
-     * решил бы, что ротировал он, и отдал бы клиенту токен-сироту.
+     * rotated_at = COALESCE(rotated_at, NOW()) — метка НЕ перезаписывается.
+     * Иначе каждый повтор сдвигал бы окно, и украденный токен,
+     * предъявляемый раз в 20 секунд, продлевал бы себе grace бесконечно.
      *
-     * Транзакция обязательна: UPDATE без INSERT оставил бы токен
-     * погашенным без преемника, и клиент вышел бы на логин по истечении
-     * grace-окна. Пара должна примениться целиком или не примениться.
+     * Факт владения проверяем чтением replaced_by, а не rowCount: обёртка
+     * DB его не гарантирует (тот же приём, что в bindSpultGuid). Чтение
+     * ВНУТРИ транзакции: снаружи между коммитом и чтением строку забрал
+     * бы другой запрос, и мы получили бы ложный отказ на ровном месте.
+     *
+     * Преемник вставляется только после подтверждённого владения и в той
+     * же транзакции: UPDATE без INSERT оставил бы токен погашенным без
+     * преемника, INSERT без владения — токен-сироту на 30 дней.
      */
-    private function claimRefreshToken(
-        string $hash,
-        int $userId,
-        string $newRaw,
-        string $webgl,
-        string $familyId
-    ): bool {
+    private function claimRefreshToken(string $hash, array $row, string $newRaw, string $webgl): bool
+    {
         $newHash = hash('sha256', $newRaw);
+        $expected = $row['replaced_by'] !== null ? (string) $row['replaced_by'] : null;
+
+        // Клиент не шлёт webGL на refresh. Без наследства колонка пустела
+        // бы у каждого преемника, и признак устройства терял смысл.
+        $fingerprint = $webgl !== '' ? $webgl : (string) ($row['device_fingerprint'] ?? '');
 
         $this->db->beginTransaction();
         try {
             $this->db->execute(
                 "UPDATE lift_refresh_tokens
-                 SET rotated_at = NOW(), replaced_by = :new_hash, last_used_at = NOW()
-                 WHERE token_hash = :hash AND rotated_at IS NULL",
-                ['new_hash' => $newHash, 'hash' => $hash]
+                 SET rotated_at = COALESCE(rotated_at, NOW()),
+                     replaced_by = :new_hash,
+                     last_used_at = NOW()
+                 WHERE token_hash = :hash
+                   AND replaced_by <=> :expected
+                   AND expires_at > NOW()",
+                ['new_hash' => $newHash, 'hash' => $hash, 'expected' => $expected]
             );
-            $this->insertRefreshToken($userId, $newRaw, $webgl, $familyId);
+
+            $after = $this->db->fetchOne(
+                "SELECT replaced_by FROM lift_refresh_tokens WHERE token_hash = :hash",
+                ['hash' => $hash]
+            );
+
+            if (!$after || (string) $after['replaced_by'] !== $newHash) {
+                // CAS не прошёл: владелец сменился. Откатываем — преемника
+                // не создаём, вызывающий перечитает строку и повторит.
+                $this->db->rollBack();
+                return false;
+            }
+
+            $this->insertRefreshToken(
+                (int) $row['user_id'],
+                $newRaw,
+                $fingerprint,
+                (string) $row['family_id']
+            );
             $this->db->commit();
         } catch (\Throwable $e) {
             $this->db->rollBack();
             throw $e;
         }
 
-        $after = $this->db->fetchOne(
-            "SELECT replaced_by FROM lift_refresh_tokens WHERE token_hash = :hash",
-            ['hash' => $hash]
-        );
-
-        return $after && (string) $after['replaced_by'] === $newHash;
+        return true;
     }
 
     /**
@@ -323,15 +319,5 @@ final class UserRepository
         $hash = hash('sha256', $rawToken);
         $this->db->execute("DELETE FROM lift_access_tokens WHERE token_hash = :hash", ['hash' => $hash]);
     }
-    /**
-     * Удалить Refresh-токен (при логауте)
-     */
-    public function deleteRefreshToken(string $rawToken): void
-    {
-        $hash = hash('sha256', $rawToken);
-        $this->db->execute(
-            "DELETE FROM lift_refresh_tokens WHERE token_hash = :hash",
-            ['hash' => $hash]
-        );
-    }
+
 }
