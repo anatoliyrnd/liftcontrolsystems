@@ -577,11 +577,17 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
-        // Право до проверки закрытости — причина та же, что в calledit.
+                // Право до проверки закрытости — причина та же, что в calledit.
         // Именно здесь была дыра: online-экшен приходит в сервис минуя
-        // checkCommandPermissions, и guest закрывал чужую заявку.
-        $this->assertAllowed(CallPolicy::canClose($user, $call));
-
+        // checkCommandPermissions, и guest комментировал чужую заявку.
+        //
+        // canComment, а не canClose: действие — комментарий, а не закрытие.
+        // Сегодня предикаты совпадают, поэтому подмена не видна, но при
+        // точке C (назначенность engineer) они разойдутся, и право
+        // комментировать начнёт требовать права закрывать.
+        // ApiController для AddComment уже использует canComment —
+        // online- и sync-путь обязаны проверять одно и то же.
+        $this->assertAllowed(CallPolicy::canComment($user, $call));
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
