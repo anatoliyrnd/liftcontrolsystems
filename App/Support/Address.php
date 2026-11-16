@@ -18,19 +18,26 @@ namespace App\Support;
  * Нормализация строго по полю: «д.» в доме — «дом», в улице — «деревня».
  * Общей функции «вырезать д.» быть не должно.
  *
- * ё/е не сворачиваем: это могут быть разные улицы. Близкие промахи
- * попадают в отчёт, а не в мёрж.
+ * ё/е не сворачиваем: это могут быть разные улицы.
  */
 final class Address
 {
     /**
-     * Закрытая карта ходовых типов, а не классификатор ГАР (300+ позиций).
-     * Трек А живёт 6–8 месяцев, полный словарь — AddressProvider в Треке Б;
-     * поле gar зарезервировано, чтобы переезд стал маппингом, а не археологией.
+     * Маркер дома при форматировании. В БД его нет никогда.
      *
-     * pos — позиция при ФОРМАТИРОВАНИИ. При разборе тип принимается с обеих
-     * сторон: «ул. Ленина» и «Ленина ул.» — одна улица. Порядок СПульт —
-     * их convention для сортировки, а не данные.
+     * Пробел после «д.» — новое решение: прежний формат «д.5» склеивал
+     * маркер с номером, а пульт сам шлёт «д. 20/1». Примеры fullAddress
+     * в API_PROTOCOL §5/§7 обновить вместе с выкаткой.
+     */
+    public const HOME_PREFIX = 'д. ';
+
+    /**
+     * Закрытая карта ходовых типов, а не классификатор ГАР (300+ позиций).
+     * Трек А живёт 6–8 месяцев, полный словарь — AddressProvider в Треке Б.
+     *
+     * pos — позиция при ФОРМАТИРОВАНИИ. При разборе тип принимается
+     * с обеих сторон: «ул. Ленина» и «Ленина ул.» — одна улица.
+     * Порядок СПульт — их convention для сортировки, а не данные.
      *
      * Неоднозначные сокращения («пр», «у», «к») в алиасы НЕ входят:
      * «пр» — это и проспект, и проезд.
@@ -52,6 +59,7 @@ final class Address
         'тер'   => ['pos' => 'prefix', 'gar' => null, 'al' => ['тер', 'территория']],
     ];
 
+    /** Кэш алиас → канонический тип. Строится один раз на процесс. */
     private static ?array $aliasMap = null;
 
     private static function aliasMap(): array
@@ -68,20 +76,35 @@ final class Address
         return self::$aliasMap;
     }
 
-    /** Пробелы: NBSP в справочнике встречается, а \s его не берёт без /u. */
-    private static function space(string $s): string
+    /**
+     * Только пробелы: NBSP в справочнике встречается, а \s без /u его
+     * не берёт. Используется для города и названия лифта — у них нет
+     * ни типов, ни маркеров, терять символы нельзя.
+     */
+    public static function plain(string $raw): string
     {
-        $s = str_replace("\u{00A0}", ' ', trim($s));
-        return trim(preg_replace('/\s+/u', ' ', $s) ?? $s);
-    }
-
-    /** Нормализация токена/имени для ключа: регистр, точки, пробелы. */
-    private static function token(string $s): string
-    {
-        return str_replace([' ', '.'], '', mb_strtolower(self::space($s), 'UTF-8'));
+        return self::space($raw);
     }
 
     /**
+     * Ключ для полей без типов (город, лифт). Эквивалент того, что
+     * раньше делал SQL REPLACE: регистр, пробелы, точки.
+     */
+    public static function plainKey(string $raw): string
+    {
+        return self::token($raw);
+    }
+
+    /**
+     * Разбор улицы. Тип принимается и префиксом, и суффиксом.
+     *
+     * Суффикс разбирается по ПОСЛЕДНЕМУ токену, поэтому порядковое
+     * числительное в имени не съедается: «1-я Советская ул.» даёт
+     * тип «ул» и имя «1-я Советская», а не «Советская».
+     *
+     * Неизвестный тип остаётся в названии: не угадываем. Строка
+     * попадёт в отчёт/лог на ручной разбор, а не в ложное совпадение.
+     *
      * @return array{type:?string,name:string}
      */
     public static function parseStreet(string $raw): array
@@ -97,51 +120,56 @@ final class Address
 
         // Префикс: «ул. Ленина». Требуем непустой остаток — иначе улица
         // с названием «Линия» превратилась бы в тип без имени.
-        if ($n > 1 && isset($map[self::token($parts[0])])) {
-            $name = self::space(implode(' ', array_slice($parts, 1)));
-            if ($name !== '') {
-                return ['type' => $map[self::token($parts[0])], 'name' => $name];
+        if ($n > 1) {
+            $first = self::token($parts[0]);
+            if (isset($map[$first])) {
+                $name = self::space(implode(' ', array_slice($parts, 1)));
+                if ($name !== '') {
+                    return ['type' => $map[$first], 'name' => $name];
+                }
+            }
+
+            $last = self::token($parts[$n - 1]);
+            if (isset($map[$last])) {
+                $name = self::space(implode(' ', array_slice($parts, 0, -1)));
+                if ($name !== '') {
+                    return ['type' => $map[$last], 'name' => $name];
+                }
             }
         }
 
-        // Суффикс: «Ленина ул.», «1-я линия». Разбор по ПОСЛЕДНЕМУ токену,
-        // поэтому порядковое числительное в имени не съедается:
-        // «1-я Советская ул.» → тип ул, имя «1-я Советская».
-        if ($n > 1 && isset($map[self::token($parts[$n - 1])])) {
-            $name = self::space(implode(' ', array_slice($parts, 0, -1)));
-            if ($name !== '') {
-                return ['type' => $map[self::token($parts[$n - 1])], 'name' => $name];
-            }
-        }
-
-        // Неизвестный тип остаётся в названии и попадает в отчёт.
-        // Не угадываем: ложное совпадение хуже карантина.
         return ['type' => null, 'name' => $s];
     }
 
     /**
-     * Маркер дома снимается ТОЛЬКО ведущий и только в поле дома.
+     * Разбор дома. Маркер снимается ТОЛЬКО ведущий и только здесь.
      *
-     * Требуем после маркера пробел или цифру: иначе «домовой» потерял бы
-     * начало, а одинокую литеру «Д» мы бы стёрли в пустоту.
+     * После маркера требуем пробел или цифру: иначе «домовой» потерял
+     * бы начало, а одиночная литера «Д» стёрлась бы в пустоту.
      *
      * «корп», «с», дробь и литера — идентичность дома, не мусор:
-     * «2 корп.2» → «2 корп.2», не «2».
+     * «2 корп.2» остаётся «2 корп.2», а не «2». «30/2 с1» и «66-Б»
+     * тоже сохраняются целиком.
      *
      * @return array{name:string}
      */
     public static function parseHome(string $raw): array
     {
         $s = self::space($raw);
-        $s = preg_replace('/^(?:дом\.?|д\.|д|№|#)(?:\s+|(?=\d))/iu', '', $s) ?? $s;
-        $s = self::space($s);
+        $s = self::space(preg_replace('/^(?:дом\.?|д\.|д|№|#)(?:\s+|(?=\d))/iu', '', $s) ?? $s);
+
+        // Пустой результат означает, что всё поле было маркером.
+        // Такое значение терять нельзя — отдаём как есть.
         return ['name' => $s !== '' ? $s : self::space($raw)];
     }
 
     /**
-     * Тип ВХОДИТ в ключ: «Ленина ул.» и «Ленина пр-кт» — разные улицы
-     * одного города. Ключ без типа склеил бы их, и бригада уехала бы
-     * не на тот лифт.
+     * Ключ улицы. Тип ВХОДИТ в ключ: «Ленина ул.» и «Ленина пр-кт» —
+     * разные улицы одного города. Ключ без типа склеил бы их, и бригада
+     * уехала бы не на тот лифт.
+     *
+     * Неразобранный тип остаётся частью имени с обеих сторон, поэтому
+     * такие строки продолжают совпадать сами с собой.
      */
     public static function streetKey(string $raw): string
     {
@@ -149,6 +177,11 @@ final class Address
         return ($p['type'] ?? '') . '|' . self::token($p['name']);
     }
 
+    /**
+     * Ключ дома. Пробелы и точки снимаются, как в прежнем SQL-ключе,
+     * поэтому «2 корп.2» и «2корп2» совпадут, а «2к2» — нет.
+     * Нечёткого сравнения не вводим осознанно.
+     */
     public static function homeKey(string $raw): string
     {
         return self::token(self::parseHome($raw)['name']);
@@ -158,7 +191,7 @@ final class Address
     public static function formatHome(string $raw): string
     {
         $n = self::parseHome($raw)['name'];
-        return $n === '' ? '' : 'д. ' . $n;
+        return $n === '' ? '' : self::HOME_PREFIX . $n;
     }
 
     public static function formatStreet(string $raw): string
@@ -170,8 +203,10 @@ final class Address
         if ($p['type'] === null) {
             return $p['name'];
         }
+
         $def   = self::TYPES[$p['type']];
         $label = $p['type'] . ($def['pos'] === 'prefix' ? '.' : '');
+
         return $def['pos'] === 'prefix'
             ? $label . ' ' . $p['name']
             : $p['name'] . ' ' . $label;
@@ -179,20 +214,37 @@ final class Address
 
     /**
      * Единственная сборка адресной строки. Порядок и разделители
-     * фиксированы: расхождение с findObjectByGuid давало ложный
+     * фиксированы: две копии формата расходились и давали ложный
      * guid_mismatch на каждом сигнале.
      *
-     * Город не трогаем: «г.» приходит из lift_options.city_default,
+     * Город не нормализуем по типам: «г.» приходит из
+     * lift_options.city_default и является частью значения,
      * а «г.» / «деревня» в поле города — отдельная неоднозначность.
      */
     public static function format(string $city, string $street, string $home, string $object): string
     {
         $parts = [];
-        foreach ([self::space($city), self::formatStreet($street), self::formatHome($home), self::space($object)] as $p) {
+        foreach ([
+            self::plain($city),
+            self::formatStreet($street),
+            self::formatHome($home),
+            self::plain($object),
+        ] as $p) {
             if ($p !== '') {
                 $parts[] = $p;
             }
         }
         return implode(', ', $parts);
+    }
+
+    private static function space(string $s): string
+    {
+        $s = str_replace("\u{00A0}", ' ', trim($s));
+        return trim(preg_replace('/\s+/u', ' ', $s) ?? $s);
+    }
+
+    private static function token(string $s): string
+    {
+        return str_replace([' ', '.'], '', mb_strtolower(self::space($s), 'UTF-8'));
     }
 }
