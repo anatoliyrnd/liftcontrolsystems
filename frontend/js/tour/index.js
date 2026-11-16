@@ -186,12 +186,19 @@ async function beginScenario(state) {
             if (key === "profile" && step.origIndex === 0) {
                 expandProfileBlock();
             }
-            if (step === lastShownStep) advancing = true;
-            return true;
+            if (!driverObj) return;
+            // В driver.js 1.14 onNextClick ЗАМЕНЯЕТ стандартный переход:
+            // без явного moveNext() шаг не сменится.
+            if (driverObj.isLastStep()) {
+                advancing = true;
+                driverObj.destroy();   // → onDestroyed → goNextScenario
+            } else {
+                driverObj.moveNext();
+            }
         },
-
-        onPrevClick: () => true,
-
+  onPrevClick: () => {
+            driverObj?.movePrevious();
+        },
         onDestroyed: () => {
             driverObj = null;
             hideGhost();
