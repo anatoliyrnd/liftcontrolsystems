@@ -11,19 +11,9 @@
  * мессенджер и письмо без разметки.
  */
 import { formatTs } from "./date-utils.js";
+import { BUSINESS } from "../config.js";
 import { isOfflineTicket, isClosedTicket } from "./ticket-permissions.js";
 
-/** Каналы уведомления, API_PROTOCOL §1.3. */
-const NOTIFY_CHANNELS = {
-    0: "не уведомлён",
-    1: "по телефону",
-    2: "онлайн",
-    3: "в телеграм",
-    4: "в макс",
-    5: "в вк",
-    6: "по смс",
-    7: "по email",
-};
 
 function text(value) {
     if (value == null) return "";
@@ -57,10 +47,13 @@ function staffLine(ticket, index) {
 
     const parts = [name];
     const statusCode = ticket["notify_status" + suffix];
-    const channel =
-        statusCode == null || statusCode === ""
+    statusCode == null || statusCode === ""
             ? null
-            : NOTIFY_CHANNELS[Number(statusCode)] || null;
+            : BUSINESS.NOTIFY_CHANNELS[Number(statusCode)] || null;
+    // В конфиге строки с эмодзи и обрамлением «— … —»: чистим для текста.
+    const channel = channelRaw
+        ? channelRaw.replace(/[—]/g, "").replace(/\s+/g, " ").trim().toLowerCase()
+        : null;
     if (channel) parts.push(channel);
 
     const notifiedAt = date(ticket["notify_date" + suffix]);
