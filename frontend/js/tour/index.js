@@ -29,7 +29,11 @@ import {
     waitForScenario,
 } from "./state.js";
 import { pointAt, hide as hideGhost, destroyGhost, resetGhost } from "./effects/ghost-cursor.js";
-
+import {
+    openEditMode,
+    cancelEditMode,
+    openCloseBlock,
+} from "./scenarios/ticket.js";
 let driverObj = null;
 let driverLib = null;
 let selfNav = false;
@@ -46,13 +50,29 @@ async function loadDriver() {
     return driverLib;
 }
 
-/** Шаги с несуществующими элементами пропускаем; функции-резолверы — нет. */
+/**
+ * Шаги с несуществующими элементами пропускаем. Исключения:
+ * функции-резолверы и элементы блоков, которые тур откроет сам
+ * (форма правки, блок решения) — на момент старта их нет в DOM
+ * или они скрыты, но появятся к своему шагу.
+ */
+const DEFERRED = new Set([
+    SEL.editDetails,
+    SEL.editRepair,
+    SEL.cardSaveBtn,
+    SEL.cancelEditBtn,
+    SEL.solutionInput,
+    SEL.solutionMic,
+    SEL.closeAndCreate,
+]);
+
 function filterAvailable(steps) {
     return steps
         .map((s, i) => ({ s, i }))
         .filter(({ s }) => {
             if (!s.element) return true;
             if (typeof s.element === "function") return true;
+            if (DEFERRED.has(s.element)) return true;
             return document.querySelector(s.element) !== null;
         });
 }
@@ -181,20 +201,49 @@ async function beginScenario(state) {
             hideGhost();
         },
 
-        onNextClick: (_el, step) => {
-            // Единственное разрешённое действие: раскрыть блок настроек.
+       onHighlighted: (el, step) => {
+            updateGlobalProgress(step);
+            pointAt(el || step.element);
+            // Блок мог раскрыться с анимацией — пересчитываем рамку
+            // и позицию призрака после завершения раскладки.
+            if (key === "ticket" && DEFERRED.has(step.element)) {
+                setTimeout(() => {
+                    if (!driverObj) return;
+                    driverObj.refresh();
+                    pointAt(step.element);
+                }, 220);
+            }
+        },
+
+               onNextClick: (_el, step) => {
+            if (!driverObj) return;
+
+            // Переключение UI-состояния выполняется ДО moveNext:
+            // после перехода оверлей перестроится и клик уйдёт в пустоту.
+            let delay = 0;
+
             if (key === "profile" && step.origIndex === 0) {
                 expandProfileBlock();
+                delay = 180;
             }
-            if (!driverObj) return;
-            // В driver.js 1.14 onNextClick ЗАМЕНЯЕТ стандартный переход:
-            // без явного moveNext() шаг не сменится.
-            if (driverObj.isLastStep()) {
-                advancing = true;
-                driverObj.destroy();   // → onDestroyed → goNextScenario
-            } else {
-                driverObj.moveNext();
+            if (key === "ticket") {
+                if (step.origIndex === 1) { openEditMode(); delay = 260; }
+                if (step.origIndex === 6) { cancelEditMode(); delay = 200; }
+                if (step.origIndex === 8) { openCloseBlock(); delay = 260; }
             }
+
+            const advance = () => {
+                if (!driverObj) return;
+                if (driverObj.isLastStep()) {
+                    advancing = true;
+                    driverObj.destroy();
+                } else {
+                    driverObj.moveNext();
+                }
+            };
+
+            if (delay > 0) setTimeout(advance, delay);
+            else advance();
         },
   onPrevClick: () => {
             driverObj?.movePrevious();

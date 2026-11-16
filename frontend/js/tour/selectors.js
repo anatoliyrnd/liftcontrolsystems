@@ -33,6 +33,14 @@ export const SEL = {
     staffSlots: "#staffSlotsContainer",
     notes: "#noteComposer",
     closeBtn: "#closeBtn",
+        // --- Карточка: блоки, видимые только после открытия режима ---
+    editDetails: "#detailsAddBlock",
+    editRepair: "#repairTimeEditBlock",
+    cardSaveBtn: "#saveBtn",
+    cancelEditBtn: "#cancelEditBtn",
+    solutionInput: "#solutionInput",
+    solutionMic: "#closeBlock .btn-voice-mic",
+    closeAndCreate: "#closeAndCreateWrap",
 
     // --- Закрытые / очередь / профиль ---
     period: "#periodSelectorContainer",
