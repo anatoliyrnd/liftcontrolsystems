@@ -587,7 +587,16 @@ class CallService
         }
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
-        $closedAt = isset($data['closed_at']) ? (int) $data['closed_at'] : time();
+                // Время заметки — время устройства: офлайн-комментарий мог быть
+        // написан час назад. updateOfflineFlag пишет не только is_offline,
+        // но и note_post_date, поэтому серверная метка исказила бы историю.
+        //
+        // Здесь был $closedAt — копия строки из callClose, не используемая,
+        // а $createdAt не определялся вовсе. Обращение к неопределённой
+        // переменной даёт Warning, set_error_handler из bootstrap превращает
+        // его в ErrorException — любой офлайн-комментарий падал.
+        $createdAt = isset($data['created_at']) ? (int) $data['created_at'] : time();
+
         $noteId = $this->noteRepo->add($callId, $authorId, $note);
         if ($source === 'offline_sync') {
             $this->noteRepo->updateOfflineFlag($noteId, $createdAt);
