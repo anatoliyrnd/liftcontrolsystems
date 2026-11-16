@@ -569,3 +569,48 @@ CREATE TABLE IF NOT EXISTS `spult_events` (
   ALTER TABLE `lift_calls` CHANGE `call_solution` `call_solution` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;
   
 ALTER TABLE `lift_calls` CHANGE `call_fullhistory` `call_fullhistory` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '\'\'' COMMENT 'История после закрытия';
+-- Миграция 1.3 — ротация refresh-токенов и детект переиспользования (B3.4).
+-- Применять ДО выкатки UserRepository / AuthController: код читает новые колонки.
+--
+-- Зачем family_id, а не device_fingerprint: WebGL-отпечаток не уникален —
+-- одинаковые GPU и драйверы дают один хэш. Отзыв по нему задел бы соседние
+-- браузеры того же пользователя. Семья = одна цепочка ротаций от одного логина.
+--
+-- ascii_bin для hex-колонок: сравнение побайтовое и вчетверо компактнее
+-- utf8mb4. Тот же приём, что у lift_object.guid.
+
+ALTER TABLE lift_refresh_tokens
+    ADD COLUMN family_id CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NULL AFTER token_hash,
+    ADD COLUMN rotated_at DATETIME NULL AFTER last_used_at,
+    ADD COLUMN replaced_by CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL AFTER rotated_at;
+
+-- Ротации до этой миграции не было: каждая существующая строка — самостоятельная
+-- семья. LEFT(token_hash, 32) уникален, потому что уникален token_hash (uq_token_hash).
+-- RANDOM_BYTES не используем: детерминированный бэкфилл проще повторить и сверить.
+UPDATE lift_refresh_tokens
+SET family_id = LEFT(token_hash, 32)
+WHERE family_id IS NULL;
+
+-- NOT NULL ставим только после бэкфилла: иначе ALTER на непустой таблице
+-- подставит '' и все старые строки окажутся в одной «семье» — отзыв одной
+-- семьи разлогинил бы всех пользователей разом.
+ALTER TABLE lift_refresh_tokens
+    MODIFY COLUMN family_id CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL;
+
+-- Дубли: idx_refresh_expires повторяет idx_expires_at, idx_refresh_user — idx_user_id.
+-- Каждый лишний индекс — лишняя запись в B-tree на каждый refresh, а ротация
+-- делает refresh чаще, чем раньше.
+ALTER TABLE lift_refresh_tokens
+    DROP INDEX idx_refresh_expires,
+    DROP INDEX idx_refresh_user;
+
+-- idx_refresh_family — отзыв семьи одним DELETE по (user_id, family_id).
+-- idx_refresh_rotated — cron вычищает ротированные строки старше 7 дней:
+-- окно детекта переиспользования = 7 дней, дальше хранить нечего.
+ALTER TABLE lift_refresh_tokens
+    ADD INDEX idx_refresh_family (user_id, family_id),
+    ADD INDEX idx_refresh_rotated (rotated_at);
+
+-- lift_access_tokens не меняется: PK(token_hash), idx_user_id, idx_expires уже
+-- есть, дублей нет. Старый access дотекает свои 2 часа (решение 2), cron
+-- удаляет по idx_expires — отдельная колонка отзыва не нужна.
