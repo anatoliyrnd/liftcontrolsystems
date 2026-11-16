@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+
 define('APP_ENTRY_POINT', true);
 require_once __DIR__ . '/bootstrap.php';
 
@@ -7,7 +8,7 @@ use App\Tenant;
 use App\Database\DB;
 use App\Repository\{CallRepository, NoteRepository, HistoryRepository, SpultEventRepository};
 use App\Service\{CallService, LegacyProxyService, ConfigService, NotificationsService, AddressCacheService};
-use App\Support\{SpultClassifier, AdminAlert};
+use App\Support\{SpultClassifier, AdminAlert, Address};
 use App\Exceptions\ApiException;
 
 /**
@@ -26,6 +27,10 @@ use App\Exceptions\ApiException;
  *
  * Приоритет объекта: GUID → адрес. Привязка GUID только при пустом поле
  * либо в INSERT нового объекта; чужая привязка не перезаписывается.
+ *
+ * Адресный путь сопоставляет по *_key и пишет ЧИСТЫЕ имена: маркер дома
+ * и тип улицы в названии не хранятся, тип улицы живёт в street_type.
+ * Маркеры добавляет только Address::format, ровно один раз, на выводе.
  */
 
 // ---------------------------------------------------------------------------
@@ -53,7 +58,6 @@ function spult_spool_root(): string
         error_log('SPult SPOOL WARNING: root unavailable, web-root fallback: ' . $fallback);
         return $fallback;
     }
-
     return '';
 }
 
@@ -76,12 +80,10 @@ function spult_store(string $xml): ?string
     }
 
     $path = $dir . '/' . date('Ymd_His') . '_' . uniqid() . '_' . mt_rand(1000, 9999) . '.xml';
-
     if (@file_put_contents($path, $xml) === false) {
         error_log('SPult SPOOL CRITICAL: write failed, raw_b64=' . base64_encode($xml));
         return null;
     }
-
     return $path;
 }
 
@@ -133,13 +135,54 @@ function spult_ok(string $text): never
 // Диагностика: журнал + письмо + лента
 // ---------------------------------------------------------------------------
 
-/** Нормализация для словаря статусов и сравнения адресов. */
+/** Нормализация для словаря статусов. Адреса сравниваются ключами Address. */
 function spult_norm(string $s): string
 {
     $s = trim($s);
     // /u на битой кодировке вернёт null — оставляем исходную строку.
     $s = preg_replace('/\s+/u', ' ', $s) ?? $s;
     return mb_strtolower($s, 'UTF-8');
+}
+
+/**
+ * Список разрешённых GUID пультов тенанта.
+ *
+ * В lift_options.spult_pult_guid их может быть НЕСКОЛЬКО через запятую:
+ * у организации бывает несколько пультов. Сверка с одним значением
+ * отправила бы весь поток второго пульта в карантин.
+ *
+ * Каждый элемент проходит тот же normalizeGuid, что и пришедший из XML:
+ * сравнение сырых строк ломалось бы на регистре, скобках и дефисах.
+ * Разделители — запятая, точка с запятой, пробел/перенос: поле заполняет
+ * админ руками, опечатка в разделителе не должна терять сигналы.
+ *
+ * Невалидные элементы возвращаются отдельно: молча укоротившийся
+ * allow-list — это опечатка, о которой админ обязан узнать из лога,
+ * а не из пропущенного сигнала.
+ *
+ * @return array{valid: string[], invalid: string[]}
+ */
+function spult_pult_list(?string $raw): array
+{
+    $valid = [];
+    $invalid = [];
+
+    foreach (preg_split('/[,;\s]+/u', (string) $raw) ?: [] as $item) {
+        $item = trim($item);
+        if ($item === '') {
+            continue;
+        }
+        $n = CallRepository::normalizeGuid($item);
+        if ($n === null) {
+            $invalid[] = mb_substr($item, 0, 64);
+            continue;
+        }
+        if (!in_array($n, $valid, true)) {
+            $valid[] = $n;
+        }
+    }
+
+    return ['valid' => $valid, 'invalid' => $invalid];
 }
 
 function spult_mail_event(string $kind): string
@@ -207,7 +250,6 @@ function spult_finish(array $st, string $bucket, string $okText, ?string $kind =
     if ($kind !== null) {
         $st['diag'][] = ['kind' => $kind, 'message' => $message, 'history' => false];
     }
-
     $st['spool_rel'] = spult_settle($st['spool'], $bucket, $kind ?? '', $st['meta']);
     spult_flush($st);
     spult_ok($okText);
@@ -319,21 +361,31 @@ try {
         );
     }
 
-    // --- Опциональная проверка GUID пульта ---
+    // --- Опциональная проверка GUID пульта: перебор по списку ---
     if (!empty($cfg['verify_pult_guid'])) {
-        $expectedPult = CallRepository::normalizeGuid($parameters['spult_pult_guid'] ?? null);
-        if ($expectedPult === null) {
-            // Включили флаг, но значение не задано — проверять нечем.
+        $pultList = spult_pult_list($parameters['spult_pult_guid'] ?? null);
+
+        if ($pultList['invalid'] !== []) {
+            // Список стал короче из-за опечатки. Поток не карантиним,
+            // но пишем: иначе админ узнает об опечатке по пропущенному сигналу.
+            error_log('SPult PULT GUID: невалидные элементы списка: ' . implode(', ', $pultList['invalid']));
+        }
+
+        if ($pultList['valid'] === []) {
+            // Флаг включён, а проверяемых значений нет — проверять нечем.
             // Карантинить весь поток нельзя.
-            error_log('SPult PULT GUID: check enabled but spult_pult_guid empty, skipped');
+            error_log('SPult PULT GUID: check enabled but spult_pult_guid has no valid GUID, skipped');
         } else {
             $actualPult = CallRepository::normalizeGuid((string) ($xml['GUID'] ?? ''));
-            if ($actualPult !== $expectedPult) {
+
+            // Оба конца приведены одним normalizeGuid, поэтому регистр
+            // и формат записи (скобки, дефисы) на результат не влияют.
+            if ($actualPult === null || !in_array($actualPult, $pultList['valid'], true)) {
                 $st['meta']['pult_guid_got'] = (string) ($xml['GUID'] ?? '');
-                $st['meta']['pult_guid_expected'] = $expectedPult;
+                $st['meta']['pult_guid_expected'] = $pultList['valid'];
                 spult_finish(
                     $st, 'quarantine', 'OK: accepted', 'pult_guid_mismatch',
-                    'Сигнал отклонён: GUID пульта не совпал с ожидаемым'
+                    'Сигнал отклонён: GUID пульта не входит в список разрешённых'
                 );
             }
         }
@@ -347,6 +399,7 @@ try {
     $spultId   = CallRepository::normalizeSpultId((string) ($liftNode['ID'] ?? ''));
     $userSpult = (string) ($liftNode['User'] ?? '');
     $note      = (string) ($liftNode['Note'] ?? '');
+
     $st['spult_id'] = $spultId;
 
     $statuses = [];
@@ -373,12 +426,21 @@ try {
         $city   = trim(substr($streetRaw, $pos + 1));
         $street = trim(substr($streetRaw, 0, $pos));
     }
-    $xmlAddress = "{$city}, {$street}, {$homeRaw}, {$liftName}";
+
+    // Обе стороны сравнения собираются ОДНИМ форматировщиком. Иначе пульт
+    // с «Ленина ул.» и «д. 20/1» никогда не совпадёт со справочником,
+    // и каждый корректный сигнал уйдёт в письмо админу как расхождение.
+    $xmlAddress = Address::format($city, $street, $homeRaw, $liftName);
     $st['xml_addr'] = $xmlAddress;
 
     $addressChanged = false;
     $cityId = $streetId = $homeId = $liftId = 0;
     $dbAddress = $xmlAddress;
+    $matchedByGuid = false;
+
+    // Созданные в этом сигнале улица/дом — для уборки, если объект не встанет.
+    $newStreetId = 0;
+    $newHomeId   = 0;
 
     $byGuid = $guid !== null ? $callRepo->findObjectByGuid($guid) : null;
 
@@ -389,18 +451,12 @@ try {
         $homeId    = $byGuid['home_id'];
         $streetId  = $byGuid['street_id'];
         $cityId    = $byGuid['city_id'];
-        $dbAddress = $byGuid['full_address'];
+        $matchedByGuid = true;
 
         error_log('SPult GUID: matched object_id=' . $liftId);
 
-        if (spult_norm($xmlAddress) !== spult_norm($dbAddress)) {
-            $st['diag'][] = [
-                'kind'    => 'guid_mismatch',
-                'message' => 'Адрес в сигнале отличается от справочника. Пульт: ' . $xmlAddress
-                             . '. В базе: ' . $dbAddress . '. Заявка создана на объект по GUID.',
-                'history' => true,
-            ];
-        }
+        // Сравнение адресов — ниже, по ключам компонентов, когда будут
+        // известны имена справочника. Строки здесь не сравниваем.
 
         // spult_id дозаполняем, существующий не меняем.
         if (($byGuid['spult_id'] ?? null) === null || $byGuid['spult_id'] === '') {
@@ -409,69 +465,89 @@ try {
             $st['diag'][] = [
                 'kind'    => 'spult_id_conflict',
                 'message' => 'LIFT@ID отличается от сохранённого: пульт ' . $spultId
-                             . ', в базе ' . $byGuid['spult_id'] . '. Значение не изменено.',
+                    . ', в базе ' . $byGuid['spult_id'] . '. Значение не изменено.',
                 'history' => false,
             ];
         }
     } else {
-        // --- Адресный путь (логика legacy xml.php) ---
+        // --- Адресный путь: поиск по ключам, запись чистых имён ---
         $allowAdd = (($parameters['XML_add'] ?? '0') === '1');
 
-        // ГОРОД
-        $cityClean = str_replace([' ', '.'], '', $city);
+        // ГОРОД. Типа у города нет, ключ — регистр/пробелы/точки.
+        $cityKey = Address::plainKey($city);
         $cityRow = $db->fetchOne(
-            "SELECT id FROM lift_city WHERE REPLACE(REPLACE(city_name,' ',''),'.','') = ?",
-            [$cityClean]
+            "SELECT id FROM lift_city WHERE city_key = ? LIMIT 1",
+            [$cityKey]
         );
         if (!$cityRow && $allowAdd) {
-            $db->execute("INSERT INTO lift_city (city_name, vis) VALUES (?, 1)", [$city]);
-            $cityRow = $db->fetchOne(
-                "SELECT id FROM lift_city WHERE REPLACE(REPLACE(city_name,' ',''),'.','') = ?",
-                [$cityClean]
+            $db->execute(
+                "INSERT INTO lift_city (city_name, city_key, vis) VALUES (?, ?, 1)",
+                [Address::plain($city), $cityKey]
             );
+            $cityRow = $db->fetchOne("SELECT id FROM lift_city WHERE city_key = ? LIMIT 1", [$cityKey]);
             $addressChanged = true;
         }
         $cityId = (int) ($cityRow['id'] ?? 0);
 
-        // УЛИЦА
-        $streetClean = str_replace([' ', '.'], '', $street);
+        // УЛИЦА. Тип вынесен в street_type и ВХОДИТ в ключ: «Ленина ул.»
+        // и «Ленина пр-кт» — разные улицы одного города.
+        $streetParsed = Address::parseStreet($street);
+        $streetKey    = Address::streetKey($street);
+        if ($streetParsed['type'] === null && $street !== '') {
+            // Не угадываем: тип остался в названии. Логируем, чтобы словарь
+            // пополнялся по факту приходящих данных, а не по догадкам.
+            error_log('SPult ADDR: street type unknown — ' . $street);
+        }
+
         $streetRow = $cityId ? $db->fetchOne(
-            "SELECT id FROM lift_street WHERE REPLACE(REPLACE(street_name,' ',''),'.','') = ? AND city_id = ?",
-            [$streetClean, $cityId]
+            "SELECT id FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
+            [$cityId, $streetKey]
         ) : null;
         if (!$streetRow && $cityId && $allowAdd) {
-            $db->execute("INSERT INTO lift_street (street_name, city_id, vis) VALUES (?, ?, 1)", [$street, $cityId]);
-            $streetRow = $db->fetchOne(
-                "SELECT id FROM lift_street WHERE REPLACE(REPLACE(street_name,' ',''),'.','') = ? AND city_id = ?",
-                [$streetClean, $cityId]
+            // Чистое имя + тип + ключ. Сырое значение больше не пишем:
+            // иначе справочник сам плодит «ул. Ленина» рядом с «Ленина».
+            $db->execute(
+                "INSERT INTO lift_street (street_name, street_type, street_key, city_id, vis)
+                 VALUES (?, ?, ?, ?, 1)",
+                [$streetParsed['name'], $streetParsed['type'], $streetKey, $cityId]
             );
+            $streetRow = $db->fetchOne(
+                "SELECT id FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
+                [$cityId, $streetKey]
+            );
+            $newStreetId = (int) ($streetRow['id'] ?? 0);
             $addressChanged = true;
         }
         $streetId = (int) ($streetRow['id'] ?? 0);
 
-        // ДОМ
-        $homeClean = str_replace([' ', '.'], '', str_replace('д.', '', $homeRaw));
+        // ДОМ. Ведущий маркер снят, корпус/строение/дробь/литера сохранены.
+        $homeParsed = Address::parseHome($homeRaw);
+        $homeKey    = Address::homeKey($homeRaw);
         $homeRow = $streetId ? $db->fetchOne(
-            "SELECT id FROM lift_home WHERE REPLACE(REPLACE(REPLACE(home_name,'д.',''),' ',''),'.','') = ? AND street_id = ?",
-            [$homeClean, $streetId]
+            "SELECT id FROM lift_home WHERE street_id = ? AND home_key = ? LIMIT 1",
+            [$streetId, $homeKey]
         ) : null;
         if (!$homeRow && $streetId && $allowAdd) {
-            $db->execute("INSERT INTO lift_home (home_name, street_id, vis) VALUES (?, ?, 1)", [$homeRaw, $streetId]);
-            $homeRow = $db->fetchOne(
-                "SELECT id FROM lift_home WHERE REPLACE(REPLACE(REPLACE(home_name,'д.',''),' ',''),'.','') = ? AND street_id = ?",
-                [$homeClean, $streetId]
+            $db->execute(
+                "INSERT INTO lift_home (home_name, home_key, street_id, vis) VALUES (?, ?, ?, 1)",
+                [$homeParsed['name'], $homeKey, $streetId]
             );
+            $homeRow = $db->fetchOne(
+                "SELECT id FROM lift_home WHERE street_id = ? AND home_key = ? LIMIT 1",
+                [$streetId, $homeKey]
+            );
+            $newHomeId = (int) ($homeRow['id'] ?? 0);
             $addressChanged = true;
         }
         $homeId = (int) ($homeRow['id'] ?? 0);
 
-        // ЛИФТ
-        $liftClean = str_replace([' ', '.'], '', $liftName);
+        // ЛИФТ. Названия лифта не нормализуем по типам: «п.1 пасс.» —
+        // целиком идентичность, терять символы нельзя.
+        $liftKey = Address::plainKey($liftName);
         $liftRow = $homeId ? $db->fetchOne(
-            "SELECT id FROM lift_object WHERE REPLACE(REPLACE(object_name,' ',''),'.','') = ? AND home_id = ?",
-            [$liftClean, $homeId]
+            "SELECT id FROM lift_object WHERE home_id = ? AND object_key = ? LIMIT 1",
+            [$homeId, $liftKey]
         ) : null;
-
         if (!$liftRow && $homeId && $allowAdd) {
             // GUID и spult_id — сразу в INSERT, не отдельным UPDATE: иначе
             // между операциями второй сигнал не найдёт GUID и создаст дубль.
@@ -479,19 +555,40 @@ try {
             // тип давал отказ на нечисловом LIFT@ID.
             try {
                 $db->execute(
-                    "INSERT INTO lift_object (object_name, home_id, vis, group_id, guid, spult_id)
-                     VALUES (?, ?, 1, 1, ?, ?)",
-                    [$liftName, $homeId, $guid, $spultId]
+                    "INSERT INTO lift_object (object_name, object_key, home_id, vis, group_id, guid, spult_id)
+                     VALUES (?, ?, ?, 1, 1, ?, ?)",
+                    [Address::plain($liftName), $liftKey, $homeId, $guid, $spultId]
                 );
                 $liftRow = $db->fetchOne(
-                    "SELECT id FROM lift_object WHERE REPLACE(REPLACE(object_name,' ',''),'.','') = ? AND home_id = ?",
-                    [$liftClean, $homeId]
+                    "SELECT id FROM lift_object WHERE home_id = ? AND object_key = ? LIMIT 1",
+                    [$homeId, $liftKey]
                 );
                 $addressChanged = true;
             } catch (\Throwable $e) {
                 // UNIQUE(guid): GUID успел привязаться к другому объекту.
                 // Не падаем — ниже перечитаем по GUID и создадим на владельца.
                 error_log('SPult ADDR: object insert failed, will retry by GUID — ' . $e->getMessage());
+
+                // Уборка созданных в этом сигнале улицы/дома. Транзакции
+                // вокруг адресного пути нет, а bindSpultGuid открывает свою —
+                // обернуть нельзя. Без уборки каждый промах сопоставления
+                // оставлял дом-сироту без объекта навсегда.
+                if ($newHomeId > 0) {
+                    $used = $db->fetchOne("SELECT id FROM lift_object WHERE home_id = ? LIMIT 1", [$newHomeId]);
+                    if (!$used) {
+                        $db->execute("DELETE FROM lift_home WHERE id = ?", [$newHomeId]);
+                        $homeId = 0;
+                        $newHomeId = 0;
+                    }
+                }
+                if ($newStreetId > 0) {
+                    $used = $db->fetchOne("SELECT id FROM lift_home WHERE street_id = ? LIMIT 1", [$newStreetId]);
+                    if (!$used) {
+                        $db->execute("DELETE FROM lift_street WHERE id = ?", [$newStreetId]);
+                        $streetId = 0;
+                        $newStreetId = 0;
+                    }
+                }
             }
         }
         $liftId = (int) ($liftRow['id'] ?? 0);
@@ -504,23 +601,21 @@ try {
                 $homeId = $retry['home_id'];
                 $streetId = $retry['street_id'];
                 $cityId = $retry['city_id'];
-                $dbAddress = $retry['full_address'];
+                $matchedByGuid = true;
             }
         }
 
         if ($liftId > 0) {
             $obj = $callRepo->findObjectById($liftId);
-            $dbAddress = $xmlAddress;   // адрес собран из XML, объект найден по нему
 
             // Привязка GUID: только если поле пустое.
             if ($guid !== null) {
                 $bind = $callRepo->bindSpultGuid($liftId, $guid, $spultId);
-
                 if ($bind['status'] === 'conflict') {
                     $st['diag'][] = [
                         'kind'    => 'guid_conflict',
                         'message' => 'У объекта уже другой GUID (' . $bind['existing_guid']
-                                     . '), привязка не изменена. Сигнал: ' . $xmlAddress,
+                            . '), привязка не изменена. Сигнал: ' . $xmlAddress,
                         'history' => true,
                     ];
                 } elseif (in_array($bind['status'], ['guid_taken', 'lost_race'], true)) {
@@ -532,11 +627,22 @@ try {
                         $homeId = $holder['home_id'];
                         $streetId = $holder['street_id'];
                         $cityId = $holder['city_id'];
-                        $dbAddress = $holder['full_address'];
+                        $matchedByGuid = true;
+
+                        $holderAddr = $callRepo->resolveAddress($cityId, $streetId, $homeId, $liftId);
+                        $holderText = $holderAddr
+                            ? Address::format(
+                                (string) $holderAddr['city_name'],
+                                (string) $holderAddr['street_name'],
+                                (string) $holderAddr['home_name'],
+                                (string) $holderAddr['object_name']
+                            )
+                            : $xmlAddress;
+
                         $st['diag'][] = [
                             'kind'    => 'guid_mismatch',
                             'message' => 'GUID привязан к другому объекту, заявка создана на него. Пульт: '
-                                         . $xmlAddress . '. В базе: ' . $dbAddress,
+                                . $xmlAddress . '. В базе: ' . $holderText,
                             'history' => true,
                         ];
                     }
@@ -551,15 +657,50 @@ try {
                 $st['diag'][] = [
                     'kind'    => 'spult_id_conflict',
                     'message' => 'LIFT@ID отличается от сохранённого: пульт ' . $spultId
-                                 . ', в базе ' . $obj['spult_id'] . '. Значение не изменено.',
+                        . ', в базе ' . $obj['spult_id'] . '. Значение не изменено.',
                     'history' => false,
                 ];
             }
         }
     }
 
+    // --- Адрес справочника: один источник для заявки и для сравнения ---
+    // Берём имена из БД, а не из XML: объект найден по ключу, но отображать
+    // нужно написание справочника. Фолбэк на XML — если справочник не
+    // собрался JOIN'ом (скрытый родитель и т.п.), сигнал не теряем.
+    $resolved = $liftId > 0 ? $callRepo->resolveAddress($cityId, $streetId, $homeId, $liftId) : null;
+    if ($resolved) {
+        $dbAddress = Address::format(
+            (string) $resolved['city_name'],
+            (string) $resolved['street_name'],
+            (string) $resolved['home_name'],
+            (string) $resolved['object_name']
+        );
+    }
+
     $st['lift_id'] = $liftId > 0 ? $liftId : null;
     $st['db_addr'] = $dbAddress;
+
+    // Расхождение адреса при найденном GUID — по КЛЮЧАМ компонентов.
+    // «Ленина ул.» и «ул. Ленина» — одна улица, «д. 20/1» и «20/1» — один
+    // дом. Сравнение собранных строк давало guid_mismatch на КАЖДОМ
+    // сигнале: письмо админу и запись в историю на ровном месте.
+    if ($matchedByGuid && $resolved) {
+        $sameAddress =
+            Address::plainKey($city)        === Address::plainKey((string) $resolved['city_name'])
+            && Address::streetKey($street)  === Address::streetKey((string) $resolved['street_name'])
+            && Address::homeKey($homeRaw)   === Address::homeKey((string) $resolved['home_name'])
+            && Address::plainKey($liftName) === Address::plainKey((string) $resolved['object_name']);
+
+        if (!$sameAddress) {
+            $st['diag'][] = [
+                'kind'    => 'guid_mismatch',
+                'message' => 'Адрес в сигнале отличается от справочника. Пульт: ' . $xmlAddress
+                    . '. В базе: ' . $dbAddress . '. Заявка создана на объект по GUID.',
+                'history' => true,
+            ];
+        }
+    }
 
     // Адрес не собран — заявку создать нельзя (FK на объект).
     // Не 400: сигнал уходит в карантин и будет разобран.
@@ -679,7 +820,6 @@ try {
         }
 
         $existingId = (int) ($duplicates[0]['ticket_id'] ?? 0);
-
         if ($existingId > 0 && $st['db'] !== null) {
             try {
                 $noteText = sprintf(
@@ -690,7 +830,6 @@ try {
                     $st['xml_addr']
                 );
                 (new NoteRepository($st['db']))->add($existingId, 0, $noteText);
-
                 error_log('SPult DUPLICATE: note added to ticket #' . $existingId);
                 $st['ticket'] = $existingId;
                 spult_finish($st, 'processed', 'OK: Updated existing ticket #' . $existingId);

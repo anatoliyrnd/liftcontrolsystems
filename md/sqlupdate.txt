@@ -615,3 +615,9 @@ ALTER TABLE lift_refresh_tokens
 -- есть, дублей нет. Старый access дотекает свои 2 часа (решение 2), cron
 -- удаляет по idx_expires — отдельная колонка отзыва не нужна.
 
+-- Шаг 1: только добавление. Старый код новых колонок не читает,
+-- поэтому шаг безопасен и обратим на живом потоке.
+ALTER TABLE lift_street
+  ADD COLUMN IF NOT EXISTS street_type VARCHAR(20) NULL AFTER street_name,
+  ADD COLUMN IF NOT EXISTS street_key  VARCHAR(190) NULL AFTER street_type,
+  ADD INDEX IF NOT EXISTS idx_street_key (city_id, street_key);
