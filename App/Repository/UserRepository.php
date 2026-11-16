@@ -89,7 +89,13 @@ final class UserRepository
 
             if ($row['rotated_at'] !== null && (int) $row['in_grace'] === 0) {
                 $this->revokeRefreshFamily($userId, $familyId);
-                Logger::warning('Refresh вне grace-окна: семья отозвана', [
+                // Гасим и выданные access: иначе вор с уже полученным
+                // токеном работает ещё 2 часа после того, как кража
+                // распознана. Реакция живёт здесь, а не в контроллере:
+                // user_id есть только у репозитория, и забывать её
+                // в каждом вызывающем месте нельзя.
+                $this->deleteAccessTokensByUser($userId);
+                Logger::warning('Refresh вне grace-окна: семья отозвана, access погашены', [
                     'user_id' => $userId,
                     'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
                 ]);
@@ -245,8 +251,9 @@ final class UserRepository
      * DELETE, а не пометка: ротированные предки обязаны перестать
      * работать, иначе украденный токен продолжит выпускать access.
      *
-     * Только refresh: access дотекает свои 2 часа (решение 2), а
-     * presented access удаляет контроллер при logout.
+     * Только refresh. Access гасится отдельно и по-разному: при logout —
+     * предъявленный (остальные дотекают 2 часа, решение 2), при краже —
+     * все токены пользователя через deleteAccessTokensByUser().
      */
     public function revokeRefreshFamily(int $userId, string $familyId): void
     {
@@ -318,6 +325,25 @@ final class UserRepository
     {
         $hash = hash('sha256', $rawToken);
         $this->db->execute("DELETE FROM lift_access_tokens WHERE token_hash = :hash", ['hash' => $hash]);
+    }
+        /**
+     * Погасить ВСЕ access-токены пользователя — при обнаружении кражи.
+     *
+     * Отзыв семьи лишает вора возможности выпустить новый access, но
+     * уже выданный живёт до 2 часов. Для logout это осознанный комфорт
+     * (решение 2), для подтверждённой кражи — дыра: детект сработал,
+     * а вор продолжает работать.
+     *
+     * Побочный ущерб минимален: на других устройствах семья цела,
+     * их access умрёт, клиент получит 401 и обновится своим refresh
+     * без разлогина. Перелогинится только скомпрометированное устройство.
+     */
+    public function deleteAccessTokensByUser(int $userId): void
+    {
+        $this->db->execute(
+            "DELETE FROM lift_access_tokens WHERE user_id = :uid",
+            ['uid' => $userId]
+        );
     }
 
 }
