@@ -614,3 +614,4 @@ ALTER TABLE lift_refresh_tokens
 -- lift_access_tokens не меняется: PK(token_hash), idx_user_id, idx_expires уже
 -- есть, дублей нет. Старый access дотекает свои 2 часа (решение 2), cron
 -- удаляет по idx_expires — отдельная колонка отзыва не нужна.
+
