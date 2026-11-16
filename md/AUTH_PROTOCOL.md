@@ -1,9 +1,103 @@
-# AUTH_PROTOCOL.md — обновлённая версия
+AUTH_PROTOCOL.md — обновлённая версия
 
-**Версия:** 2.0  
-**Дата:** 01.11.2026  
-**Статус:** Утверждено  
-**Связанные документы:** API_PROTOCOL.md v4.1, OFFLINE_PROTOCOL.md v2.0, MASTER_PLAN.md v3.0, bisness.md v3.0, sqlstrukture.md v3.0
+> ⚠️ **ДВА ТРЕКА. Читать сначала §0.**
+> Разделы 1–15 описывают **Трек Б** (Node.js + PostgreSQL, целевая архитектура).
+> Работающая система l3 живёт на **Треке А** (PHP + MariaDB) и отличается
+> принципиально: не JWT, не 15 минут, не refresh в теле, не localStorage.
+> При расхождении §0 приоритетнее любого раздела ниже.
+>
+> **Дельта 2.1 · 16.11.2026** — добавлены §0 (Трек А as-is) и §16 (мобильное
+> требование), уточнены §5.3 и §13.
+
+## 0. Трек А — как работает сейчас (as-is)
+
+### 0.1. Токены
+
+| Параметр           | Значение                                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- |
+| Access             | opaque `bin2hex(random_bytes(32))`; в БД только SHA-256 (`lift_access_tokens.token_hash`, PK)                 |
+| Access TTL         | `AuthService::ACCESS_TTL = 7200` (2 часа)                                                                     |
+| Access на клиенте  | **только память вкладки** (`auth-store.js`); в localStorage лишь `user`                                       |
+| Refresh            | opaque `bin2hex(random_bytes(32))`; SHA-256 в `lift_refresh_tokens.token_hash` (UNIQUE)                       |
+| Refresh TTL        | `AuthService::REFRESH_TTL` = 30 дней; срок преемника считается от момента ротации, не наследуется             |
+| Refresh на клиенте | **httpOnly cookie** `lift_refresh`: Secure, SameSite=Strict, path=/, без Domain (host-only)                   |
+| Передача access    | `Authorization: Bearer <token>`                                                                               |
+| Запись сроков      | `FROM_UNIXTIME(:ts)` — пишет и сравнивает MySQL. PHP `date()` давал +3 часа (Europe/Moscow против зоны MySQL) |
+
+JWT не используется, `tenant_id` в токене нет, `schema_name` нет.
+
+### 0.2. Тенант
+
+Только `Host` (`Tenant::fromRequest`). `X-Tenant` и `org_key` не используются. Отказ — `ApiException(TenantNotFound)`, HTTP 200, `reason`: `invalid_host_format` / `reserved_subdomain` / `foreign_domain` / `tenant_not_found`. Битый Host не логируется (это сканеры), валидный поддомен без записи в реестре — `Logger::warning`.
+
+### 0.3. Ротация refresh — реализована
+
+Семья = цепочка преемников одного логина (`family_id`, 32 hex, генерируется при логине). Уникальна на логин, а не на пользователя: иначе выход одной вкладки гасил бы сессию на другом устройстве.
+
+Механика: предъявленный токен гасится, преемник выпускается в той же семье.
+
+- `rotated_at = COALESCE(rotated_at, NOW())` — метка не перезаписывается, окно не скользит;
+- `replaced_by` = хэш преемника; заявка на ротацию — CAS по наблюдаемому `replaced_by` (`<=>`), факт владения проверяется чтением **внутри** транзакции;
+- преемник INSERT в той же транзакции; `device_fingerprint` наследуется от предка (клиент не шлёт `webGL` на refresh).
+
+| Состояние предъявленного токена      | Действие                                                | Ответ                                                    |
+| ------------------------------------ | ------------------------------------------------------- | -------------------------------------------------------- |
+| Не найден / истёк                    | —                                                       | `token_expired` → вход заново                            |
+| `rotated_at IS NULL`                 | обычная ротация                                         | новый access + новая cookie                              |
+| `rotated_at` в пределах grace (30 с) | ротация как обычно, семья не отзывается, `Logger::info` | новый access + новая cookie                              |
+| `rotated_at` старше grace            | DELETE всей семьи, `Logger::warning`                    | `token_invalid`, `reason: refresh_reuse`                 |
+| Гонка не разрешилась за 2 попытки    | —                                                       | `rate_limited`, `reason: refresh_busy`, `retry_after: 1` |
+
+Grace-окно (`AuthService::REFRESH_REUSE_GRACE_SEC = 30`) нужно не только для гонки вкладок. При потерянном ответе refresh cookie остаётся со старым токеном, и следующий refresh предъявит ротированный — локи этот случай не покрывают вообще, он происходит и в одной вкладке.
+
+Внутри окна ротация выполняется **как обычно, с новой cookie**. Вариант «выдать access без ротации» отвергнут: клиент залипнет на ротированном токене и по истечении окна получит ложную кражу.
+
+Цена компромисса: украденный токен, предъявленный в течение 30 с, пройдёт.
+
+### 0.4. Logout
+
+Гасится **вся семья**: `findRefreshFamily` (без фильтра по срокам — истёкшая cookie тоже должна приводить к чистке) → `revokeRefreshFamily`. Удаляется предъявленный access, cookie снимается теми же параметрами, что и ставилась. Остальные access дотекают свои 2 часа.
+
+### 0.5. Клиент (`js/api-service.js`)
+
+- Межвкладочный лок `lift-auth-refresh` (Web Locks, режим ожидания) + мьютекс вкладки. Лок — **оптимизация**: grace закрывает гонку и без него.
+- Ожидание лока ограничено `REQUEST_TIMEOUT_MS + 5 с`; сквозной бюджет цепочки 401 → refresh → retry = `2 × REQUEST_TIMEOUT_MS`. Без него таймауты складываются в ~50 с спиннера.
+- Таймаут запроса снимается в `finally`, а не после заголовков: зависшее тело (`.json()`) иначе держит лок бесконечно — мёртвое приложение с чистой консолью.
+- Отказ refresh классифицируется: `auth` (`token_expired`, `token_invalid`, `missing_token`, `user_blocked`, `device_mismatch`, `invalid_credentials`) → событие `auth:lost`; всё прочее → транспорт, **без разлогина**. Сетевой чих не должен выбрасывать пользователя.
+- `auth:lost` несёт код refresh, а не исходного 401.
+- Web Locks и Secure-cookie требуют secure context: по `http://<домен>` лок деградирует до мьютекса вкладки, а cookie не сохранится вовсе. Отладка через `localhost` или https.
+
+### 0.6. Чего в Треке А нет — осознанно
+
+`revoked_tokens`, `force_reload`, `login_attempts` / `locked_until`, rate-limit, `audit_log`, PHP-админка `/settings`, `check_org_key` / `get_org_users`.
+
+Принудительный выход при смене прав не нужен: `validate()` читает пользователя из БД на каждом запросе, роль и флаги пересобираются в `formatUser`, поэтому новая роль и `user_block` действуют со следующего запроса. Выданный access при этом живёт до 2 часов — окно, в котором пользователь видит уже отказанные действия, но не может их выполнить.
+
+### 0.7. Чистка (cron)
+
+| Таблица               | Условие удаления                                                 | Индекс                |
+| --------------------- | ---------------------------------------------------------------- | --------------------- |
+| `lift_access_tokens`  | `expires_at < NOW()`                                             | `idx_expires`         |
+| `lift_refresh_tokens` | `expires_at < NOW()`                                             | `idx_expires_at`      |
+| `lift_refresh_tokens` | `rotated_at IS NOT NULL AND rotated_at < NOW() - INTERVAL 7 DAY` | `idx_refresh_rotated` |
+
+Пакетно `LIMIT 1000` с потолком итераций; наличие `rotated_at` проверяется через `information_schema.COLUMNS` (тенант без миграции 1.3 → чистка только по `expires_at`, без ложной тревоги). Вызов `/usr/bin/php8.4`.
+
+Удаление ротированного предка дыру не открывает: токен недействителен в любом случае. Теряется только сигнал — спустя 7 дней повтор вернёт `invalid` вместо `reuse` (без отзыва семьи и warning).
+
+### 0.8. Сводка расхождений с разделами 1–15
+
+| Тема            | Разделы 1–15 (Трек Б)         | Трек А (работает)                         |
+| --------------- | ----------------------------- | ----------------------------------------- |
+| Access          | JWT HS256, 15 мин             | opaque, 2 часа                            |
+| Хранение access | localStorage                  | память вкладки                            |
+| Refresh         | в теле запроса/ответа         | httpOnly cookie                           |
+| Ротация         | «на усмотрение команды»       | обязательна: семьи + grace 30 с           |
+| Тенант          | JWT / X-Tenant / org_key      | только Host                               |
+| БД              | PostgreSQL, schema-per-tenant | MariaDB, БД на тенант                     |
+| Отзыв           | revoked_tokens + force_reload | отзыв семьи; принудительного выхода нет   |
+| HTTP-статусы    | 401 / 403 / 404               | всегда 200, код в теле                    |
+| Формат ошибки   | `{ok:false, error:{code}}`    | `{status:"error", code, reason, message}` |
 
 ---
 
@@ -38,25 +132,25 @@
 
 ### 1.2. Разделение потоков
 
-| Клиент | Как хранит токен | Где используется |
-|---|---|---|
-| SPA/PWA (диспетчеры, механики) | `localStorage` | `tenant.liftcs.ru/` → `api.liftcs.ru` |
-| PHP-админка (`/settings`) | `$_SESSION` (сервер) | `tenant.liftcs.ru/settings` → `api.liftcs.ru` |
-| Внешние интеграции (СПульт) | `.env` (сервис-к-сервису) | Сервер → сервер |
+| Клиент                         | Как хранит токен          | Где используется                              |
+| ------------------------------ | ------------------------- | --------------------------------------------- |
+| SPA/PWA (диспетчеры, механики) | `localStorage`            | `tenant.liftcs.ru/` → `api.liftcs.ru`         |
+| PHP-админка (`/settings`)      | `$_SESSION` (сервер)      | `tenant.liftcs.ru/settings` → `api.liftcs.ru` |
+| Внешние интеграции (СПульт)    | `.env` (сервис-к-сервису) | Сервер → сервер                               |
 
 **Правило:** JWT никогда не хранится в браузере при работе через PHP-админку. Только `PHPSESSID` (httpOnly, secure, SameSite=Lax).
 
 ### 1.3. Соответствие ролей и должностей
 
-| `user_role` | `user_position` | Описание |
-|---|---|---|
-| `administrator` | `admin` | Полные права |
-| `dispatcher` | `dispatcher` | Обычный диспетчер |
-| `dispatcher` | `foreman` | Прораб |
-| `engineer` | `mechanic` | Механик |
-| `engineer` | `dispatch_equipment_mechanic` | Связист |
-| `engineer` | `electronics_engineer` | Инженер-электронщик |
-| `guest` | `guest` | Только чтение |
+| `user_role`     | `user_position`               | Описание            |
+| --------------- | ----------------------------- | ------------------- |
+| `administrator` | `admin`                       | Полные права        |
+| `dispatcher`    | `dispatcher`                  | Обычный диспетчер   |
+| `dispatcher`    | `foreman`                     | Прораб              |
+| `engineer`      | `mechanic`                    | Механик             |
+| `engineer`      | `dispatch_equipment_mechanic` | Связист             |
+| `engineer`      | `electronics_engineer`        | Инженер-электронщик |
+| `guest`         | `guest`                       | Только чтение       |
 
 **Допустимые пары** валидируются по `public.role_position_matrix` (см. `sqlstrukture.md`).
 
@@ -96,10 +190,12 @@ SET LOCAL search_path TO tenant_l3, public;
 ```
 
 **Ключевое:**
+
 - `SET LOCAL` (не `SET`) — действует только внутри транзакции, не «протекает» на соединение из пула.
 - Все запросы в рамках запроса идут в схему тенанта, справочники — из `public`.
 
 **Источник данных:**
+
 - `lift_users`, `lift_refresh_tokens`, `revoked_tokens`, `user_group_access` — **в схеме тенанта**.
 - `public.tenants` — реестр (для резолва).
 
@@ -143,6 +239,7 @@ POST /auth/login
 ```
 
 **Важно:**
+
 - `tenant_id` — ID из `public.tenants`.
 - `schema_name` — имя схемы (для быстрого `SET LOCAL search_path` без SELECT к `public.tenants`).
 - `schema_name` в токене **можно подделать только при знании `JWT_SECRET`** — это защищено подписью.
@@ -150,11 +247,11 @@ POST /auth/login
 
 ### 2.5. Коды ошибок мультитенантности
 
-| Код | Когда |
-|---|---|
+| Код                   | Когда                                    |
+| --------------------- | ---------------------------------------- |
 | `tenant_not_resolved` | Тенант не определён ни одним из способов |
-| `tenant_not_found` | Тенант не найден в реестре |
-| `tenant_suspended` | Тенант `is_active = false` |
+| `tenant_not_found`    | Тенант не найден в реестре               |
+| `tenant_suspended`    | Тенант `is_active = false`               |
 
 ---
 
@@ -182,11 +279,11 @@ POST /auth/login
 
 ### 3.2. Защита от перебора
 
-| Счётчик | Поле | Логика |
-|---|---|---|
-| Неудачные попытки | `login_attempts` | Инкремент при неверном пароле |
-| Блокировка | `locked_until` | `now() + 15 min` после 5 неудач |
-| Сброс | оба | При успешном логине: `login_attempts = 0, locked_until = NULL` |
+| Счётчик           | Поле             | Логика                                                         |
+| ----------------- | ---------------- | -------------------------------------------------------------- |
+| Неудачные попытки | `login_attempts` | Инкремент при неверном пароле                                  |
+| Блокировка        | `locked_until`   | `now() + 15 min` после 5 неудач                                |
+| Сброс             | оба              | При успешном логине: `login_attempts = 0, locked_until = NULL` |
 
 **Дополнительно — rate-limit на IP (Nginx):**
 
@@ -220,14 +317,14 @@ POST /auth/login
 
 ### 4.1. Параметры
 
-| Параметр | Значение |
-|---|---|
-| Алгоритм | HS256 |
-| Секрет | `JWT_SECRET` (≥ 32 байта, из `.env`) |
-| TTL | 15 минут (`JWT_ACCESS_TTL = 900`) |
-| Issuer | `api.liftcs.ru` |
-| Audience | `liftcs` |
-| Header | `Authorization: Bearer <token>` |
+| Параметр | Значение                             |
+| -------- | ------------------------------------ |
+| Алгоритм | HS256                                |
+| Секрет   | `JWT_SECRET` (≥ 32 байта, из `.env`) |
+| TTL      | 15 минут (`JWT_ACCESS_TTL = 900`)    |
+| Issuer   | `api.liftcs.ru`                      |
+| Audience | `liftcs`                             |
+| Header   | `Authorization: Bearer <token>`      |
 
 ### 4.2. Payload
 
@@ -262,17 +359,17 @@ Access-token обновляется через `POST /auth/refresh` (refresh-tok
 
 ### 5.2. Поля `lift_refresh_tokens`
 
-| Поле | Назначение |
-|---|---|
-| `id` | PK |
-| `user_id` | FK → lift_users |
-| `token_hash` | SHA-256 хэш токена (UNIQUE) |
+| Поле                 | Назначение                   |
+| -------------------- | ---------------------------- |
+| `id`                 | PK                           |
+| `user_id`            | FK → lift_users              |
+| `token_hash`         | SHA-256 хэш токена (UNIQUE)  |
 | `device_fingerprint` | Отпечаток устройства (WebGL) |
-| `user_ip` | IP при создании |
-| `user_agent` | Браузер |
-| `expires_at` | Истекает (30 дней) |
-| `last_used_at` | Последнее использование |
-| `created_at` | Дата создания |
+| `user_ip`            | IP при создании              |
+| `user_agent`         | Браузер                      |
+| `expires_at`         | Истекает (30 дней)           |
+| `last_used_at`       | Последнее использование      |
+| `created_at`         | Дата создания                |
 
 ### 5.3. Ротация
 
@@ -286,8 +383,9 @@ Access-token обновляется через `POST /auth/refresh` (refresh-tok
 6. Выдать новый access-token.
 
 **Почему ротация:** если refresh-token украден и использован, оригинальный пользователь при следующем refresh обнаружит, что хэш изменился (или получит 401). Это сигнал компрометации.
+Решение принято и реализовано в Треке А (§0.3): ротация обязательна, предок сохраняется с `rotated_at` / `replaced_by`, отзыв — по семье, повтор в пределах grace-окна 30 с кражей не считается. Вариант «не ротировать» отклонён: он не даёт детекта переиспользования вообще.
 
-**Альтернатива (проще):** не ротировать, только обновлять `last_used_at`. Для B2B-системы с малым числом пользователей — приемлемо. Решение — на усмотрение команды.
+Описанный выше `UPDATE ... SET token_hash = ?` (перезапись на месте) в Треке А не применяется: он стирает след предка, и повтор украденного токена становится неотличим от легитимного использования.
 
 ### 5.4. Смена прав и refresh-token
 
@@ -318,12 +416,12 @@ Access-token обновляется через `POST /auth/refresh` (refresh-tok
 }
 ```
 
-| Поле | Обязательно | Описание |
-|---|---|---|
-| `login` | Да | Логин |
-| `password` | Да | Пароль (plain) |
-| `org_key` | Да (если нет `X-Tenant`) | Ключ организации |
-| `device_fingerprint` | Нет | WebGL-отпечаток |
+| Поле                 | Обязательно              | Описание         |
+| -------------------- | ------------------------ | ---------------- |
+| `login`              | Да                       | Логин            |
+| `password`           | Да                       | Пароль (plain)   |
+| `org_key`            | Да (если нет `X-Tenant`) | Ключ организации |
+| `device_fingerprint` | Нет                      | WebGL-отпечаток  |
 
 **Response 200:**
 
@@ -373,15 +471,15 @@ Access-token обновляется через `POST /auth/refresh` (refresh-tok
 
 ### 6.3. Ошибки
 
-| Ситуация | Код | HTTP |
-|---|---|---|
-| Тенант не определён | `tenant_not_resolved` | 401 |
-| Тенант не найден | `tenant_not_found` | 404 |
-| Тенант приостановлен | `tenant_suspended` | 403 |
-| Неверный логин/пароль | `unauthorized` | 401 |
-| Пользователь заблокирован | `forbidden` | 403 |
-| Аккаунт заблокирован (5+ попыток) | `account_locked` | 403 |
-| Превышен rate-limit | `rate_limited` | 429 |
+| Ситуация                          | Код                   | HTTP |
+| --------------------------------- | --------------------- | ---- |
+| Тенант не определён               | `tenant_not_resolved` | 401  |
+| Тенант не найден                  | `tenant_not_found`    | 404  |
+| Тенант приостановлен              | `tenant_suspended`    | 403  |
+| Неверный логин/пароль             | `unauthorized`        | 401  |
+| Пользователь заблокирован         | `forbidden`           | 403  |
+| Аккаунт заблокирован (5+ попыток) | `account_locked`      | 403  |
+| Превышен rate-limit               | `rate_limited`        | 429  |
 
 **Безопасность:** при неверном логине — не раскрывать, что именно неверно (логин или пароль). Одинаковый ответ 401.
 
@@ -406,7 +504,7 @@ Access-token обновляется через `POST /auth/refresh` (refresh-tok
   "ok": true,
   "data": {
     "access_token": "eyJhbGciOiJIUzI1NiIs...",
-    "refresh_token": "eFgH5678..."  // если включена ротация
+    "refresh_token": "eFgH5678..." // если включена ротация
   }
 }
 ```
@@ -490,13 +588,13 @@ UPDATE lift_users SET force_reload = 1 WHERE user_id = ?;
 
 ### 9.1. Когда отзываем
 
-| Событие | Что отзываем | Как |
-|---|---|---|
-| Смена прав (`userAccessUpdate`) | Access + Refresh | `revoked_tokens` + `force_reload = 1` + `DELETE refresh_tokens` |
-| Блокировка (`userBlock`) | Access + Refresh | То же |
-| Logout | Access + Refresh | `revoked_tokens` + `DELETE refresh_tokens` |
-| Смена пароля | Access + Refresh (все устройства) | То же |
-| Подозрение на компрометацию | Access + Refresh (все) | То же |
+| Событие                         | Что отзываем                      | Как                                                             |
+| ------------------------------- | --------------------------------- | --------------------------------------------------------------- |
+| Смена прав (`userAccessUpdate`) | Access + Refresh                  | `revoked_tokens` + `force_reload = 1` + `DELETE refresh_tokens` |
+| Блокировка (`userBlock`)        | Access + Refresh                  | То же                                                           |
+| Logout                          | Access + Refresh                  | `revoked_tokens` + `DELETE refresh_tokens`                      |
+| Смена пароля                    | Access + Refresh (все устройства) | То же                                                           |
+| Подозрение на компрометацию     | Access + Refresh (все)            | То же                                                           |
 
 ### 9.2. Механизм
 
@@ -675,13 +773,13 @@ UPDATE lift_users SET force_reload = 1 WHERE user_id = ?;
 
 ### 12.1. Отличия от SPA
 
-| Параметр | SPA/PWA | PHP-админка (`/settings`) |
-|---|---|---|
-| Хранение JWT | `localStorage` (браузер) | `$_SESSION` (сервер PHP) |
-| Передача в API | `Authorization: Bearer` из JS | `Authorization: Bearer` из PHP (curl) |
-| CSRF | Не нужен (Bearer) | Обязателен (формы) |
-| Cookie | Нет | `PHPSESSID` (httpOnly, secure, SameSite=Lax) |
-| Refresh | JS вызывает `POST /auth/refresh` | PHP вызывает `POST /auth/refresh` при 401 |
+| Параметр       | SPA/PWA                          | PHP-админка (`/settings`)                    |
+| -------------- | -------------------------------- | -------------------------------------------- |
+| Хранение JWT   | `localStorage` (браузер)         | `$_SESSION` (сервер PHP)                     |
+| Передача в API | `Authorization: Bearer` из JS    | `Authorization: Bearer` из PHP (curl)        |
+| CSRF           | Не нужен (Bearer)                | Обязателен (формы)                           |
+| Cookie         | Нет                              | `PHPSESSID` (httpOnly, secure, SameSite=Lax) |
+| Refresh        | JS вызывает `POST /auth/refresh` | PHP вызывает `POST /auth/refresh` при 401    |
 
 ### 12.2. Login flow (PHP)
 
@@ -756,7 +854,11 @@ if (!$response['ok'] && $response['error']['code'] === 'unauthorized') {
 **В каждой форме:**
 
 ```html
-<input type="hidden" name="_csrf" value="<?= htmlspecialchars($_SESSION['csrf']) ?>">
+<input
+  type="hidden"
+  name="_csrf"
+  value="<?= htmlspecialchars($_SESSION['csrf']) ?>"
+/>
 ```
 
 **Проверка:**
@@ -793,20 +895,20 @@ exit;
 
 ## 13. Коды ошибок
 
-| Код | HTTP | Когда |
-|---|---|---|
-| `tenant_not_resolved` | 401 | Тенант не определён ни одним из способов |
-| `tenant_not_found` | 404 | Тенант не найден в реестре |
-| `tenant_suspended` | 403 | Тенант `is_active = false` |
-| `unauthorized` | 401 | Нет токена / просрочен / невалиден / неверный логин |
-| `token_revoked` | 401 | Токен в `revoked_tokens` или `force_reload = 1` |
-| `forbidden` | 403 | Пользователь заблокирован / нет прав |
-| `account_locked` | 403 | `locked_until > now()` (5+ неудачных попыток) |
-| `invalid_key` | 404 | Неверный `org_key` |
-| `invalid_password` | 400 | Неверный старый пароль (смена пароля) |
-| `invalid_input` | 400 | Ошибка валидации |
-| `rate_limited` | 429 | Превышен rate-limit |
-| `internal_error` | 500 | Внутренняя ошибка |
+| Код                   | HTTP | Когда                                               |
+| --------------------- | ---- | --------------------------------------------------- |
+| `tenant_not_resolved` | 401  | Тенант не определён ни одним из способов            |
+| `tenant_not_found`    | 404  | Тенант не найден в реестре                          |
+| `tenant_suspended`    | 403  | Тенант `is_active = false`                          |
+| `unauthorized`        | 401  | Нет токена / просрочен / невалиден / неверный логин |
+| `token_revoked`       | 401  | Токен в `revoked_tokens` или `force_reload = 1`     |
+| `forbidden`           | 403  | Пользователь заблокирован / нет прав                |
+| `account_locked`      | 403  | `locked_until > now()` (5+ неудачных попыток)       |
+| `invalid_key`         | 404  | Неверный `org_key`                                  |
+| `invalid_password`    | 400  | Неверный старый пароль (смена пароля)               |
+| `invalid_input`       | 400  | Ошибка валидации                                    |
+| `rate_limited`        | 429  | Превышен rate-limit                                 |
+| `internal_error`      | 500  | Внутренняя ошибка                                   |
 
 **Формат ответа об ошибке:**
 
@@ -820,21 +922,23 @@ exit;
 }
 ```
 
-**Важно:** из-за настроек Nginx все ответы приходят с HTTP 200 (см. `API_PROTOCOL.md`). Ошибки — по полю `status: "error"` в теле.
+Важно: из-за настроек Nginx все ответы приходят с HTTP 200 (см. `API_PROTOCOL.md`). Ошибки — по полю `status: "error"` в теле.
 
----
+Трек А (§0): формат — `{status:"error", code, reason, message}`, без обёртки `error`. Коды берутся из `App\Http\ErrorCode`: `invalid_input`, `forbidden`, `not_found`, `closed`, `token_expired`, `missing_token`, `token_invalid`, `device_mismatch`, `user_blocked`, `invalid_credentials`, `internal_error`, `unknown_action`, `method_not_allowed`, `tenant_not_found`, `rate_limited`.
+
+## Кодов `unauthorized`, `token_revoked`, `account_locked`, `tenant_not_resolved`, `tenant_suspended`, `invalid_key` в Треке А **нет** — клиент, ветвящийся по ним, не сработает.
 
 ## 14. Безопасность
 
 ### 14.1. Rate-limit
 
-| Эндпоинт | Nginx | Fastify |
-|---|---|---|
-| `POST /auth/login` | 5 r/m с IP | дополнительно 5 r/m с IP + 10 r/m с логина |
-| `POST /auth/refresh` | 30 r/m с IP | — |
-| `POST /check_org_key` | 5 r/m с IP | — |
-| `POST /get_org_users` | 5 r/m с IP | — |
-| Остальные | 30 r/s с IP | — |
+| Эндпоинт              | Nginx       | Fastify                                    |
+| --------------------- | ----------- | ------------------------------------------ |
+| `POST /auth/login`    | 5 r/m с IP  | дополнительно 5 r/m с IP + 10 r/m с логина |
+| `POST /auth/refresh`  | 30 r/m с IP | —                                          |
+| `POST /check_org_key` | 5 r/m с IP  | —                                          |
+| `POST /get_org_users` | 5 r/m с IP  | —                                          |
+| Остальные             | 30 r/s с IP | —                                          |
 
 ### 14.2. CORS
 
@@ -896,13 +1000,13 @@ credentials: false,
 
 ### 15.1. Таблицы, связанные с аутентификацией
 
-| Таблица | Схема | Назначение |
-|---|---|---|
-| `public.tenants` | `public` | Реестр тенантов (для резолва) |
-| `lift_users` | схема тенанта | Пользователи + `login_attempts`, `locked_until`, `force_reload` |
-| `lift_refresh_tokens` | схема тенанта | Refresh-токены |
-| `revoked_tokens` | схема тенанта | Отозванные access-токены |
-| `audit_log` | схема тенанта | Аудит |
+| Таблица               | Схема         | Назначение                                                      |
+| --------------------- | ------------- | --------------------------------------------------------------- |
+| `public.tenants`      | `public`      | Реестр тенантов (для резолва)                                   |
+| `lift_users`          | схема тенанта | Пользователи + `login_attempts`, `locked_until`, `force_reload` |
+| `lift_refresh_tokens` | схема тенанта | Refresh-токены                                                  |
+| `revoked_tokens`      | схема тенанта | Отозванные access-токены                                        |
+| `audit_log`           | схема тенанта | Аудит                                                           |
 
 ### 15.2. Связи
 
@@ -918,6 +1022,19 @@ public.tenants (1) ─── (N) tenant_<name>.lift_users
 
 ---
 
-**Конец `AUTH_PROTOCOL.md` v2.0.**
+## 16. Мобильный клиент (Трек Б, требование)
 
----
+Отдельный фронтенд, не тот же SPA. Требования к авторизации:
+
+- **Одно устройство = один пользователь.** Множественные сессии на устройстве не предполагаются.
+- **Долговременное хранилище сессии.** Вход обязан переживать перезапуск приложения и отсутствие сети. Схема Трека А (access в памяти вкладки) для мобильного неприемлема: процесс умирает — сессия исчезает.
+- **Офлайн-авторизация.** Приложение пускает пользователя по локально сохранённому контексту; при появлении связи — обязательная проверка на сервере (блокировка, смена прав, отзыв семьи).
+- **Сервер остаётся источником истины.** Локальный вход не даёт прав больше, чем было на момент последней успешной проверки; расхождение, обнаруженное при связи, разрешается в пользу сервера.
+- **Вероятно отдельный эндпоинт.** Cookie-схема Трека А рассчитана на браузер; мобильный клиент не обязан иметь cookie-jar, refresh передаётся иначе.
+- **Хранилище — платформенное защищённое** (Keychain / Keystore), не localStorage и не IndexedDB.
+
+Открытые вопросы: предельный срок жизни локального контекста без связи; поведение при отзыве семьи, обнаруженном после офлайн-периода; нужен ли собственный device-идентификатор вместо WebGL-отпечатка (он не уникален — одинаковые GPU дают один хэш).
+
+Статус: требование зафиксировано, реализация — Трек Б. В Треке А возможно .
+
+Конец `AUTH_PROTOCOL.md` v2.1.
