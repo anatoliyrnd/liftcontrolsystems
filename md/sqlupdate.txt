@@ -621,3 +621,47 @@ ALTER TABLE lift_street
   ADD COLUMN IF NOT EXISTS street_type VARCHAR(20) NULL AFTER street_name,
   ADD COLUMN IF NOT EXISTS street_key  VARCHAR(190) NULL AFTER street_type,
   ADD INDEX IF NOT EXISTS idx_street_key (city_id, street_key);
+
+  -- Миграция 1.4 — адресный справочник: тип улицы отдельно, ключи для поиска.
+-- Идемпотентна, данные не меняет. Запускать на каждой тенантской БД
+-- ДО выкатки кода, который читает новые колонки.
+--
+-- Бэкфилла нет осознанно: справочник будет перезаполнен, важна чистота
+-- того, что добавится позже. Строки с NULL-ключом адресный путь СПульт
+-- не найдёт и создаст рядом чистые — это ожидаемое поведение.
+
+ALTER TABLE lift_city
+  ADD COLUMN IF NOT EXISTS city_key VARCHAR(190) NULL,
+  ADD INDEX IF NOT EXISTS idx_city_key (city_key);
+
+-- street_type — канонический тип из закрытого словаря App\Support\Address.
+-- NULL означает «тип не разобран», значение остаётся внутри street_name.
+ALTER TABLE lift_street
+  ADD COLUMN IF NOT EXISTS street_type VARCHAR(20)  NULL AFTER street_name,
+  ADD COLUMN IF NOT EXISTS street_key  VARCHAR(190) NULL AFTER street_type,
+  ADD INDEX IF NOT EXISTS idx_street_key (city_id, street_key);
+
+ALTER TABLE lift_home
+  ADD COLUMN IF NOT EXISTS home_key VARCHAR(190) NULL,
+  ADD INDEX IF NOT EXISTS idx_home_key (street_id, home_key);
+
+ALTER TABLE lift_object
+  ADD COLUMN IF NOT EXISTS object_key VARCHAR(190) NULL,
+  ADD INDEX IF NOT EXISTS idx_object_key (home_id, object_key);
+
+-- VARCHAR(190) — потолок индекса при utf8mb4 (767 байт).
+-- Ключ длиннее 190 символов в адресе не встречается; при обрезке
+-- совпадение станет ложным, поэтому длина контролируется на записи.
+-- Флаг сверки GUID пульта: решение тенанта, а не общее для всех.
+-- Дефолт '0' сохраняет текущее поведение — в config/spult.php было false.
+-- Идемпотентно без опоры на UNIQUE: повторный запуск не создаст дубль.
+INSERT INTO lift_options (option_name, option_value)
+SELECT 'spult_verify_pult_guid', '0' FROM DUAL
+WHERE NOT EXISTS (
+    SELECT 1 FROM lift_options WHERE option_name = 'spult_verify_pult_guid'
+);
+-- Включение — там же, где лежит список:
+-- ⚠️ Включать после заполнения списка. Пустой список проверку пропускает с WARNING (поток не карантинится), но и не защищает.
+UPDATE lift_options SET option_value = '1' WHERE option_name = 'spult_verify_pult_guid';
+SELECT option_name, option_value FROM lift_options
+WHERE option_name IN ('spult_verify_pult_guid','spult_pult_guid');

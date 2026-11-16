@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Database\DB;
+use App\Support\Address;
 use App\Support\CallPolicy;
 use App\Support\CallScope;
 use App\Support\Period;
@@ -566,12 +567,18 @@ final class CallRepository
      * собрать адрес и city_id невозможно — возвращаем null, вызывающая
      * сторона уходит в адресный путь и далее в карантин.
      *
-     * Формат full_address совпадает с resolveAddress() дословно, чтобы
-     * оба пути давали одинаковую строку в заявке.
-     *
-     * @return array{object_id:int,home_id:int,street_id:int,city_id:int,
-     *               group_id:int,vis:bool,guid:string|null,spult_id:string|null,
-     *               full_address:string}|null
+      * full_address собирается тем же Address::format, что и
+ * CallService::validateAddress. Две копии формата расходились
+ * и давали ложный guid_mismatch на каждом корректном сигнале.
+ *
+ * Сырые имена компонентов отдаются наружу: сравнение по ключам
+ * возможно только по исходным именам, разбирать собранную строку
+ * обратно нельзя.
+ *
+ * @return array{object_id:int,home_id:int,street_id:int,city_id:int,
+ *               group_id:int,vis:bool,guid:string|null,spult_id:string|null,
+ *               city_name:string,street_name:string,home_name:string,
+ *               object_name:string,full_address:string}|null
      */
     public function findObjectByGuid(string $guid): ?array
     {
@@ -608,12 +615,21 @@ final class CallRepository
             'vis'          => (bool) $row['vis'],
             'guid'         => $row['guid'] !== null ? (string) $row['guid'] : null,
             'spult_id'     => $row['spult_id'] !== null ? (string) $row['spult_id'] : null,
-            'full_address' => sprintf(
-                '%s, %s, д.%s, %s',
-                $row['city_name'],
-                $row['street_name'],
-                $row['home_name'],
-                $row['object_name']
+                       // Сырые имена — для сравнения по ключам. Собранную строку
+            // разбирать обратно нельзя: форматирование пульта и
+            // справочника различается, разбор дал бы ложные расхождения.
+            'city_name'    => (string) $row['city_name'],
+            'street_name'  => (string) $row['street_name'],
+            'home_name'    => (string) $row['home_name'],
+            'object_name'  => (string) $row['object_name'],
+
+            // Прежний sprintf приклеивал «д.» безусловно: на строке
+            // справочника «д. 20/1» получалось «д.д. 20/1».
+            'full_address' => Address::format(
+                (string) $row['city_name'],
+                (string) $row['street_name'],
+                (string) $row['home_name'],
+                (string) $row['object_name']
             ),
         ];
     }

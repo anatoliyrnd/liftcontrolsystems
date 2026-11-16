@@ -7,7 +7,7 @@ use App\Repository\{CallRepository, NoteRepository, HistoryRepository};
 use App\Exceptions\ApiException;
 use App\Http\ErrorCode;
 use App\Tenant;
-use App\Support\CallPolicy;
+use App\Support\{Address, CallPolicy};
 
 class CallService
 {
@@ -670,7 +670,16 @@ class CallService
             'street' => $streetId,
             'home' => $homeId,
             'lift' => $liftId,
-            'full_address' => "{$address['city_name']}, {$address['street_name']}, д.{$address['home_name']}, {$address['object_name']}",
+            // «д.» приклеивалось к home_name безусловно: на строках
+            // справочника, где маркер уже был, получалось «д.д. 20/1».
+            // Address нормализует защитно — даже если кто-то руками
+            // впишет «д.20/1» в справочник, двойного маркера не будет.
+            'full_address' => Address::format(
+                (string) $address['city_name'],
+                (string) $address['street_name'],
+                (string) $address['home_name'],
+                (string) $address['object_name']
+            ),
             'group_id' => (int) ($address['group_id'] ?? 1),
             'vis' => (bool) ($address['vis'] ?? true),
         ];

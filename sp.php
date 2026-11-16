@@ -303,7 +303,6 @@ try {
     // Конфиг. require, не require_once: повторный вернул бы true вместо массива.
     // Отсутствие файла не должно давать фатал — работаем на дефолтах.
     $cfg = [
-        'verify_pult_guid'   => false,
         'description_prefix' => 'Создана из SPult',
         'status_exclude'     => [],
     ];
@@ -344,7 +343,8 @@ try {
     $parameters = [];
     foreach ($db->fetchAll(
         "SELECT option_name, option_value FROM lift_options
-         WHERE option_name IN ('city_default','city_separator','spult_organization_name','XML_add','spult_pult_guid')"
+                  WHERE option_name IN ('city_default','city_separator','spult_organization_name','XML_add',
+                               'spult_pult_guid','spult_verify_pult_guid')"
     ) as $p) {
         $parameters[$p['option_name']] = $p['option_value'];
     }
@@ -361,10 +361,19 @@ try {
         );
     }
 
-    // --- Опциональная проверка GUID пульта: перебор по списку ---
-    if (!empty($cfg['verify_pult_guid'])) {
-        $pultList = spult_pult_list($parameters['spult_pult_guid'] ?? null);
+       // --- Опциональная проверка GUID пульта: перебор по списку ---
+    // Флаг — решение тенанта, а не общее для всех. Канон значения '1',
+    // как у XML_add. Нераспознанное значение логируем: молча выключенная
+    // проверка безопасности хуже опечатки, о которой никто не знает.
+    $verifyRaw  = trim((string) ($parameters['spult_verify_pult_guid'] ?? ''));
+    $verifyPult = $verifyRaw === '1';
+    if (!$verifyPult && $verifyRaw !== '' && $verifyRaw !== '0') {
+        error_log('SPult PULT GUID: значение spult_verify_pult_guid="' . $verifyRaw
+            . '" не распознано, проверка ВЫКЛЮЧЕНА (ожидается 1 или 0)');
+    }
 
+    if ($verifyPult) {
+        $pultList = spult_pult_list($parameters['spult_pult_guid'] ?? null);
         if ($pultList['invalid'] !== []) {
             // Список стал короче из-за опечатки. Поток не карантиним,
             // но пишем: иначе админ узнает об опечатке по пропущенному сигналу.
