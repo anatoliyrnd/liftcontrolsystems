@@ -36,7 +36,8 @@ import { duplicateTicketModal } from "./js/components/duplicate-ticket-modal.js"
 import { queuePageTemplate } from "./js/route/pages/queue.js";
 import { QueueController } from "./js/queue-controller.js";
 import { startTour, stopTour } from "./js/tour/index.js";
-
+import { contextMenu } from "./js/components/context-menu.js";
+import { quickActionModal } from "./js/components/quick-action-modal.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -72,13 +73,106 @@ const TENANT_TTL = 5 * 60 * 1000;
  * До этого работает только локальный per-user кэш.
  */
 const SERVER_SETTINGS_ENABLED = false;
+// --- Проверка обновления приложения (пункт системного блока меню) ---
+const SW_SCOPE = "/ui/";
+let swUpdateFn = null;
+let swUpdateReady = false;
+let swChecking = false;
 
+async function getSwRegistration() {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    return (
+      (await navigator.serviceWorker.getRegistration(SW_SCOPE)) ||
+      (await navigator.serviceWorker.getRegistration())
+    );
+  } catch (e) {
+    return null;
+  }
+}
+
+function promptSwUpdate() {
+  notify.warning("Доступна новая версия приложения", {
+    timeout: 0,
+    persistent: true,
+    actionText: "Обновить сейчас",
+    onAction: () => swUpdateFn?.(true),
+  });
+}
+
+/**
+ * Три исхода: найдено сейчас / уже скачано (waiting) / актуальная версия.
+ * Детект по флагу onNeedRefresh и reg.waiting, не по состоянию сразу
+ * после update(): новый воркер может ещё быть в installing.
+ */
+async function checkAppUpdate() {
+  if (swChecking) return;
+  if (!("serviceWorker" in navigator)) {
+    notify.info("Проверка обновлений доступна только в собранном приложении.");
+    return;
+  }
+  if (!navigator.onLine) {
+    notify.info("Проверка обновлений недоступна без соединения.");
+    return;
+  }
+  swChecking = true;
+  try {
+    const reg = await getSwRegistration();
+    if (!reg) {
+      notify.info(
+        "Проверка обновлений доступна только в собранном приложении.",
+      );
+      return;
+    }
+    if (swUpdateReady || reg.waiting) {
+      swUpdateReady = true;
+      promptSwUpdate();
+      return;
+    }
+    await reg.update().catch(() => {});
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      if (swUpdateReady || reg.waiting) {
+        swUpdateReady = true;
+        promptSwUpdate();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    notify.success("У вас установлена актуальная версия приложения.", {
+      once: true,
+    });
+  } finally {
+    swChecking = false;
+  }
+}
+
+function systemMenuItems() {
+  if (!("serviceWorker" in navigator)) return [];
+  return [
+    {
+      id: "check-update",
+      label: "Проверить обновление приложения",
+      disabled: !navigator.onLine || swChecking,
+      hint: !navigator.onLine ? "Недоступно без соединения" : "",
+      onSelect: () => {
+        checkAppUpdate();
+      },
+    },
+  ];
+}
+
+quickActionModal.init(api);
+openTicketsCtrl.setSystemMenuProvider(systemMenuItems);
+closedTicketsCtrl.setSystemMenuProvider(systemMenuItems);
 /**
  * Единая точка очистки перед сменой маршрута.
  * Вызывается ДО замены DOM, поэтому unmount видит старую разметку.
  */
 function leaveAll() {
-  stopTour(); // ← закрыть тур до замены DOM
+  stopTour();
+  contextMenu.hide();
+  quickActionModal.close();
   const targets = [
     ["openTicketsCtrl", openTicketsCtrl],
     ["closedTicketsCtrl", closedTicketsCtrl],
@@ -566,7 +660,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   window.addEventListener("refreshSyncState", refreshSyncUi);
-
+  // Быстрое закрытие из журнала: закрытый список устарел.
+  window.addEventListener("tickets:invalidate", (e) => {
+    if (e.detail?.scope !== "close") return;
+    closedTicketsCtrl.isLoaded = false;
+    if (closedTicketsCtrl.isActive) {
+      closedTicketsCtrl.refreshSilently(closedTicketsArray).catch(() => {});
+    }
+  });
   window.addEventListener("auth:updated", syncAuthUI);
 
   window.addEventListener("auth:loggedin", async () => {
@@ -756,12 +857,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const updateSW = registerSW({
     onNeedRefresh() {
-      notify.warning("Доступна новая версия приложения", {
-        timeout: 0,
-        persistent: true,
-        actionText: "Обновить сейчас",
-        onAction: () => updateSW(true),
-      });
+      swUpdateReady = true;
+      promptSwUpdate();
+    },
+    onRegisteredSW(_swUrl, registration) {
+      if (registration?.waiting) swUpdateReady = true;
     },
     onOfflineReady() {
       notify.success("Приложение готово к работе офлайн", { once: true });
@@ -770,6 +870,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.error("❌ Ошибка регистрации SW:", error);
     },
   });
+  swUpdateFn = updateSW;
 
   router._handleRoute();
 });
