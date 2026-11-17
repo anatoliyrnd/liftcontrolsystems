@@ -665,3 +665,21 @@ WHERE NOT EXISTS (
 UPDATE lift_options SET option_value = '1' WHERE option_name = 'spult_verify_pult_guid';
 SELECT option_name, option_value FROM lift_options
 WHERE option_name IN ('spult_verify_pult_guid','spult_pult_guid');
+-- 1) Дом: год постройки
+ALTER TABLE `lift_home`
+  ADD COLUMN `year_built` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Год постройки' AFTER `home_key`;
+
+-- 2) Паспорт лифта (только нужные поля)
+CREATE TABLE `lift_metadata` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `object_id` INT(11) NOT NULL,
+  `serial` VARCHAR(128) DEFAULT NULL COMMENT 'Заводской номер',
+  `capacity_kg` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Грузоподъемность, кг',
+  `year_commissioned` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Год ввода в эксплуатацию',
+  `timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_metadata_object` (`object_id`),
+  KEY `idx_metadata_serial` (`serial`),
+  CONSTRAINT `fk_metadata_object`
+    FOREIGN KEY (`object_id`) REFERENCES `lift_object` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci;

@@ -59,7 +59,13 @@ export function flattenAddresses(serverResponse) {
     // Ключ сортировки — из ЧИСТЫХ имён, без маркеров. Сортировать по
     // display_name нельзя: «ул.» и «пр-кт» в начале снова соберут все
     // улицы под «у» и «п», и вынос типа в street_type потеряет смысл.
-    const sortKey = `${cName} ${sName} ${hName} ${oName}`.toLowerCase();
+    // Паритет с Address::sortKey: пустой компонент не даёт висящего
+    // пробела, иначе офлайн- и серверный ключ одного адреса разойдутся.
+    const sortKey = [cName, sName, hName, oName]
+      .map((p) => String(p ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
 
     // Поиск — по сырым именам, как раньше: normalizeSearchString сам
     // снимает маркеры своим словарём стоп-слов. Менять источник здесь
