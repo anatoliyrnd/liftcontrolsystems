@@ -36,15 +36,34 @@ export function flattenAddresses(serverResponse) {
     const c = cityMap.get(s.city_id);
     if (!c) continue;
 
-    const cName = c.city_name.trim();
-    const sName = s.street_name.trim();
-    const hName = h.home_name.trim();
-    const oName = obj.object_name.trim();
+    const cName = String(c.city_name ?? "").trim();
+    const sName = String(s.street_name ?? "").trim();
+    const hName = String(h.home_name ?? "").trim();
+    const oName = String(obj.object_name ?? "").trim();
 
-    const houseDisplay = `${cName}, ${sName}, д. ${hName}`;
-    const displayName = `${houseDisplay}, ${oName}`;
+    // Подпись собирает СЕРВЕР (Address::formatStreet / formatHome).
+    // Здесь был четвёртый форматировщик: он приклеивал «д.» к home_name
+    // безусловно и терял тип улицы, которого в street_name больше нет.
+    //
+    // Фолбэк на сырое имя нужен для старого кэша в IndexedDB и для
+    // ответа, пришедшего до выкатки серверной правки: без него пустой
+    // *_display обнулил бы адрес в пикере.
+    const sDisplay = String(s.street_display ?? "").trim() || sName;
+    const hDisplay = String(h.home_display ?? "").trim() || hName;
 
-    // ИСПОЛЬЗУЕМ ОЧИЩЕННУЮ СТРОКУ ДЛЯ ПОИСКА
+    // filter(Boolean), а не шаблон через запятую: при пустом компоненте
+    // шаблон давал «…, , д. » — висящие разделители в подписи.
+    const houseDisplay = [cName, sDisplay, hDisplay].filter(Boolean).join(", ");
+    const displayName = [houseDisplay, oName].filter(Boolean).join(", ");
+
+    // Ключ сортировки — из ЧИСТЫХ имён, без маркеров. Сортировать по
+    // display_name нельзя: «ул.» и «пр-кт» в начале снова соберут все
+    // улицы под «у» и «п», и вынос типа в street_type потеряет смысл.
+    const sortKey = `${cName} ${sName} ${hName} ${oName}`.toLowerCase();
+
+    // Поиск — по сырым именам, как раньше: normalizeSearchString сам
+    // снимает маркеры своим словарём стоп-слов. Менять источник здесь
+    // значит смешать две нормализации.
     const rawSearch = `${cName} ${sName} ${hName} ${oName}`;
     const searchString = normalizeSearchString(rawSearch);
 
@@ -57,6 +76,7 @@ export function flattenAddresses(serverResponse) {
       home_name: hName,
       display_name: displayName,
       house_display: houseDisplay,
+      sort_key: sortKey,
       search_string: searchString,
     });
   }
