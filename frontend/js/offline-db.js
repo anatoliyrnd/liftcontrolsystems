@@ -34,7 +34,26 @@ function toSeconds(value, fallback) {
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n > 9999999999 ? Math.floor(n / 1000) : n;
 }
+/**
+ * Один коллатор на модуль: Intl.Collator дорогой в создании, а вызывается
+ * он на каждое сравнение при сортировке тысяч записей.
+ *
+ * numeric: true — «д. 2»_before_«д. 10» и «п.2»_before_«п.10».
+ * Без него лексикографика ставила 10 раньше 2, и порядок домов в
+ * списке не совпадал с порядком на табличке.
+ */
+const ADDRESS_COLLATOR = new Intl.Collator("ru", {
+  numeric: true,
+  sensitivity: "base",
+});
 
+function addressSortKey(item) {
+  return String(item?.sort_key || item?.display_name || "");
+}
+
+function compareAddress(a, b) {
+  return ADDRESS_COLLATOR.compare(addressSortKey(a), addressSortKey(b));
+}
 function nowSec() {
   return Math.floor(Date.now() / 1000);
 }
@@ -135,7 +154,7 @@ class OfflineDB {
     return this._open();
   }
 
-   _open() {
+  _open() {
     if (this._promise) return this._promise;
 
     // Локальный на попытку открытия: ready шлём только если реально
@@ -170,7 +189,9 @@ class OfflineDB {
 
       blocked: () => {
         wasBlocked = true;
-        console.warn("[OfflineDB] Обновление БД заблокировано другой вкладкой.");
+        console.warn(
+          "[OfflineDB] Обновление БД заблокировано другой вкладкой.",
+        );
         window.dispatchEvent(new CustomEvent("db:upgrade-blocked"));
       },
 
@@ -271,31 +292,50 @@ class OfflineDB {
     );
   }
 
-  async searchAddresses(cityId, query) {
+  /**
+   * Поиск адресов по городу.
+   *
+   * Сортировка обязана происходить ДО обрезки: прежний break на 50
+   * отбирал первые 50 записей в порядке курсора (city_id, затем id
+   * объекта) и только потом их показывал. Отсортируй их на клиенте —
+   * получишь алфавитный порядок по случайной подвыборке, а нужной
+   * улицы в списке может не оказаться вовсе.
+   *
+   * Поэтому собираем ВСЕ совпадения, сортируем и режем. Полный проход
+   * по городу — несколько тысяч записей в памяти, единицы миллисекунд;
+   * прежний код всё равно сканировал весь город при селективном запросе.
+   *
+   * Ключ — sort_key из чистых имён (без «ул.» и «д.»): сортировка по
+   * display_name снова собрала бы улицы под «у», а проспекты под «п».
+   * Фолбэк на display_name — для записей старого кэша без sort_key.
+   */
+  async searchAddresses(cityId, query, limit = 50) {
     const db = await this.dbPromise;
     const tx = db.transaction("address_flat", "readonly");
     const index = tx.objectStore("address_flat").index("city_id");
-
-    const q = String(query || "").toLowerCase().trim();
+    const q = String(query || "")
+      .toLowerCase()
+      .trim();
     const tokens = q ? q.split(/\s+/).filter(Boolean) : [];
-    const results = [];
 
+    const matches = [];
     let cursor = await index.openCursor(IDBKeyRange.only(Number(cityId)));
     while (cursor) {
       const item = cursor.value;
       if (tokens.length === 0) {
-        results.push(item);
+        matches.push(item);
       } else {
         const words = String(item.search_string || "").split(" ");
-        if (tokens.every((t) => words.some((w) => w.startsWith(t))))
-          results.push(item);
+        if (tokens.every((t) => words.some((w) => w.startsWith(t)))) {
+          matches.push(item);
+        }
       }
-      if (results.length >= 50) break;
       cursor = await cursor.continue();
     }
-
     await tx.done;
-    return results;
+
+    matches.sort(compareAddress);
+    return matches.slice(0, limit);
   }
 
   // =========================================================================

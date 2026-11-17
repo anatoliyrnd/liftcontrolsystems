@@ -91,17 +91,39 @@ export function createAddressPicker(opts = {}) {
 
   const normalize = normalizeSearchString;
 
+  function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /**
+   * Подсветка совпадений.
+   *
+   * Было два дефекта. Первый: токен уходил в new RegExp без экранирования
+   * метасимволов — ввод «ленина (юг» или «п.1\» бросал SyntaxError, и
+   * выпадающий список ломался на обычном тексте. escapeHtml экранирует
+   * HTML, а не regexp, и от этого не спасал.
+   *
+   * Второй: сначала escapeHtml, потом replace — запрос «amp» вставлял
+   * <b> внутрь сущности &amp; и рвал разметку. Теперь режем СЫРОЙ текст
+   * и экранируем каждый кусок отдельно.
+   */
   function highlight(text, query) {
-    if (!query) return escapeHtml(text);
-    let safeText = escapeHtml(text);
-    const tokens = query.split(" ").filter((t) => t.length > 0);
+    const raw = String(text ?? "");
+    if (!query) return escapeHtml(raw);
 
-    tokens.forEach((token) => {
-      const regex = new RegExp(`(${escapeHtml(token)})`, "gi");
-      safeText = safeText.replace(regex, "<b>$1</b>");
-    });
+    const tokens = [...new Set(query.split(" ").filter(Boolean))];
+    if (tokens.length === 0) return escapeHtml(raw);
 
-    return safeText;
+    // Одна.capture-группа с альтернацией: split возвращает
+    // [текст, совпадение, текст, …], нечётные индексы — совпадения.
+    const re = new RegExp("(" + tokens.map(escapeRegExp).join("|") + ")", "gi");
+
+    return raw
+      .split(re)
+      .map((part, i) =>
+        i % 2 === 1 ? "<b>" + escapeHtml(part) + "</b>" : escapeHtml(part),
+      )
+      .join("");
   }
 
   function getRecentAddresses(cityId) {
@@ -143,7 +165,18 @@ export function createAddressPicker(opts = {}) {
       }
     }
   }
-  window.addEventListener("addresses:updated", loadCities);
+  /**
+   * Кнопка «Обновить кэш адресов» меняет справочник под открытым пикером.
+   * Без повторного поиска список продолжал бы показывать записи старого
+   * кэша до следующего ввода — выглядело бы как «обновление не сработало».
+   */
+  async function onAddressesUpdated() {
+    await loadCities();
+    if (dropdown.style.display !== "none" && citySelect.value) {
+      triggerSearch(searchInput.value.trim());
+    }
+  }
+  window.addEventListener("addresses:updated", onAddressesUpdated);
   function handleCityChange() {
     const cityId = citySelect.value;
     if (!cityId) {
@@ -302,11 +335,7 @@ export function createAddressPicker(opts = {}) {
         const pill = document.createElement("button");
         pill.type = "button";
         pill.className = "address-pill";
-        pill.innerHTML = highlight(
-          elev.object_name || elev.display_name.split(", ").pop(),
-          query,
-        );
-
+        pill.innerHTML = highlight(elevatorLabel(elev), query);
         pill.onclick = () => selectAddress(elev, "elevator");
         focusableElements.push(pill);
         pillsWrap.appendChild(pill);
@@ -316,7 +345,7 @@ export function createAddressPicker(opts = {}) {
       dropdown.appendChild(groupEl);
     });
 
-    if (results.length === 50) {
+    if (results.length >= RESULT_LIMIT) {
       const footer = document.createElement("div");
       footer.style.cssText =
         "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
@@ -326,7 +355,20 @@ export function createAddressPicker(opts = {}) {
 
     showDropdown();
   }
-
+  /**
+   * Подпись лифта. Отрезаем префикс дома, а не split(", ").pop():
+   * имя лифта само может содержать запятую («п.1, пасс.»), и pop()
+   * возвращал бы только «пасс.». Фолбэк на случай старого кэша,
+   * где object_name ещё нет.
+   */
+  function elevatorLabel(elev) {
+    if (elev.object_name) return String(elev.object_name);
+    const full = String(elev.display_name || "");
+    const house = String(elev.house_display || "");
+    const tail =
+      house && full.startsWith(house) ? full.slice(house.length) : full;
+    return tail.replace(/^,\s*/, "") || `Лифт №${elev.id}`;
+  }
   function selectAddress(item, type) {
     const isHouse = type === "house";
     selectedData = {
@@ -341,13 +383,22 @@ export function createAddressPicker(opts = {}) {
     onChange(selectedData);
   }
 
+  const RESULT_LIMIT = 50;
   let debounceTimer = null;
+  let searchSeq = 0;
 
   async function triggerSearch(val) {
     const cityId = parseInt(citySelect.value, 10);
     if (!cityId) return;
+
+    const seq = ++searchSeq;
     const q = normalize(val);
-    const results = await offlineDB.searchAddresses(cityId, q);
+    const results = await offlineDB.searchAddresses(cityId, q, RESULT_LIMIT);
+
+    // Ответ устаревшего запроса не перерисовывает список: при быстром
+    // вводе порядок разрешения async-вызовов не гарантирован, и медленный
+    // ранний поиск затирал бы результат свежего.
+    if (seq !== searchSeq) return;
     renderDropdown(results);
   }
 
@@ -412,7 +463,8 @@ export function createAddressPicker(opts = {}) {
     setValue: (val) => {
       if (!val) return;
       selectedData = val;
-      searchInput.value = val.address;
+      // Черновик из sessionStorage мог сохраниться до появления address.
+      searchInput.value = val.address || val.display_name || "";
       searchWrap.style.display = "block";
 
       const stringCityId = String(val.city_id);
@@ -435,7 +487,7 @@ export function createAddressPicker(opts = {}) {
       if (debounceTimer) clearTimeout(debounceTimer);
 
       // Удаляем глобальные слушатели
-      window.removeEventListener("addresses:updated", loadCities);
+      window.removeEventListener("addresses:updated", onAddressesUpdated);
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("scroll", onWindowScroll, true);
       document.removeEventListener("click", onDocClick);

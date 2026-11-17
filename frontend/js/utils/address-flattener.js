@@ -74,6 +74,10 @@ export function flattenAddresses(serverResponse) {
       street_id: s.id,
       home_id: h.id,
       home_name: hName,
+      // Пикер читает elev.object_name для подписи пилюли. Поля не было,
+      // и он всегда падал на display_name.split(", ").pop() — имя лифта
+      // с запятой («п.1, пасс.») теряло первую половину.
+      object_name: oName,
       display_name: displayName,
       house_display: houseDisplay,
       sort_key: sortKey,
