@@ -117,10 +117,20 @@ export const outboxQueue = {
     // Клиент офлайн срок не задаёт.
     delete enriched.repair_time;
 
+    // Ключ сортировки — метаданные строки таблицы, а не поле заявки.
+    // Переезжает на верхний уровень команды: addOutboxCommand сохраняет
+    // через spread, mergeIntoOfflineCreate перезаписывает только payload,
+    // поэтому ключ переживёт правки. В payload не остаётся — сервер
+    // собирает address_sort_key сам после синхронизации.
+    const addressSortKey = enriched.sort_key ?? null;
+    delete enriched.sort_key;
+
     const cmd = baseCommand("CreateTicket", enriched, {
       ticket_id: null,
       offline_uuid: generateOfflineUuid(),
     });
+    cmd.address_sort_key = addressSortKey;
+
     const result = await offlineDB.addOutboxCommand(cmd);
     notifyQueueChanged();
     return result;
