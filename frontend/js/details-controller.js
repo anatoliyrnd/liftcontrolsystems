@@ -21,12 +21,13 @@ import {
 } from "./details/views/notes-view.js";
 import { createEditForm } from "./details/views/edit-form.js";
 import { createCloseForm } from "./details/views/close-form.js";
+import { resolveTicketPermissions } from "./utils/ticket-permissions.js";
 
 const AUTO_RETURN_MS = UI.AUTO_RETURN_MS;
 const ERROR_UNLOCK_MS = UI.ERROR_UNLOCK_MS;
 
 export class DetailsController {
-   constructor(apiInstance, routerInstance) {
+  constructor(apiInstance, routerInstance) {
     this.api = apiInstance;
     this.router = routerInstance;
     this.notesComposer = null;
@@ -275,26 +276,13 @@ export class DetailsController {
     const pendingClose = t._pendingClose || null;
     const isClosed = t.type === "close" || !!pendingClose;
     const isOpen = !isClosed;
-    const isAssigned = userStore.isAssignedTo(t, userStore.userId);
 
-    const canEdit =
-      isOpen &&
-      !isOffline &&
-      !pendingClose &&
-      (t.can_edit !== undefined
-        ? t.can_edit
-        : userStore.can("add_details", { isAssigned }));
-
-    const canClose =
-      isOpen &&
-      !isOffline &&
-      !pendingClose &&
-      (t.can_close !== undefined
-        ? t.can_close
-        : userStore.can("close_ticket", { isAssigned }) ||
-          Number(t.closureallowed) === 1);
-
-    const canComment = t.can_comment !== undefined ? t.can_comment : true;
+    // Единый резолвер прав — общий с контекстным меню журнала.
+    // Закрытая заявка: сервер отдаёт can_edit/can_close/can_comment = false,
+    // резолвер повторяет это и по клиентской ветке.
+    const { canEdit, canClose, canComment } = resolveTicketPermissions(t, {
+      pendingClose: !!pendingClose,
+    });
 
     const pendingList = this.state.pendingCommands || [];
     const hasPendingEdit = pendingList.some(
@@ -334,6 +322,9 @@ export class DetailsController {
 
     this._renderStaffSlots();
 
+    // Рендер заметок не меняется: у закрытой заявки note приходит
+    // с сервера через fetchById (в списке close он пуст) и показывается,
+    // хотя добавление новых сервер отклоняет.
     const notesContainer = document.getElementById("notesContainerDOM");
     const notesBadge = document.getElementById("notesCountBadge");
     if (notesContainer && notesBadge) {
