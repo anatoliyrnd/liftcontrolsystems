@@ -30,19 +30,51 @@ final class Address
      * в API_PROTOCOL §5/§7 обновить вместе с выкаткой.
      */
     public const HOME_PREFIX = 'д. ';
-public const CITY_TYPES = [
-    'г' => 'г. ', 'п' => 'п. ', 'пгт' => 'пгт ',
-    'с' => 'с. ', 'д' => 'д. ', 'х' => 'х. ', 'ст' => 'ст-ца ',
-    'пос'=>'пос.'
-];
+/** Типы населённых пунктов. Ключ — код в lift_city.city_type. */
+    public const CITY_TYPES = [
+        'г'   => 'г. ',
+        'п'   => 'п. ',
+        'пгт' => 'пгт ',
+        'с'   => 'с. ',
+        'д'   => 'д. ',
+        'х'   => 'х. ',
+        'ст'  => 'ст-ца ',
+    ];
 
-public static function formatCity(string $name, string $type = 'г'): string
-{
-    $n = self::plain($name);
-    if ($n === '') return '';
-    $prefix = self::CITY_TYPES[$type] ?? '';
-    return $prefix . $n;   // неизвестный тип → чистое имя, без выдуманного «г.»
-}
+    /**
+     * Подпись населённого пункта. Тип — данные (lift_city.city_type),
+     * а не константа форматировщика: посёлки, станицы и хутора иначе
+     * получили бы ложное «г.'.
+     *
+     * Неизвестный или пустой тип → «н.п.»: честная общая подпись
+     * вместо угадывания. Если имя уже несёт маркер (до миграции),
+     * тип выводится из него. В sort_key тип не входит никогда.
+     *
+     * НЕ используется в format(): та строка кормит guid-сравнение
+     * СПульт и обязана остаться plain.
+     */
+    public static function formatCity(string $name, ?string $type = null): string
+    {
+        $n = self::plain($name);
+        if ($n === '') {
+            return '';
+        }
+
+        $code = trim((string) $type);
+        if ($code === '' && preg_match('/^(г|п|пгт|с|д|х|ст-ца)\.?\s/u', $n, $m)) {
+            $code = $m[1];
+        }
+
+        // Защита от двойного маркера: имя могло сохраниться с «г.»
+        // (lift_options.city_default исторически был частью значения).
+        $stripped = preg_replace('/^(?:г|п|пгт|с|д|х|ст-ца|н\.п\.)\.?\s+/u', '', $n);
+        if (is_string($stripped) && $stripped !== '') {
+            $n = $stripped;
+        }
+
+        $prefix = self::CITY_TYPES[$code] ?? 'н.п. ';
+        return $prefix . $n;
+    }
     /**
      * Закрытая карта ходовых типов, а не классификатор ГАР (300+ позиций).
      * Трек А живёт 6–8 месяцев, полный словарь — AddressProvider в Треке Б.
