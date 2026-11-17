@@ -23,7 +23,7 @@ import {
   isOfflineTicket,
 } from "./utils/ticket-permissions.js";
 import { buildTicketText, copyToClipboard } from "./utils/ticket-copy.js";
-
+import { appState } from "./app-state.js";
 /** Unix-метка в секундах; миллисекунды outbox приводим. */
 function toSeconds(value) {
   const n = Number(value);
@@ -885,6 +885,11 @@ export class TicketsController {
    * остальные поля — из объекта заявки: колонка «Адрес» может быть
    * скрыта серверными настройками.
    */
+  /**
+   * Провайдер пунктов контекстного меню. Из DOM берётся только id,
+   * остальные поля — из объекта заявки: колонка «Адрес» может быть
+   * скрыта серверными настройками.
+   */
   _contextMenuProvider(row) {
     const idCell = row.querySelector('td[data-col-id="id"]');
     const ticketId = idCell ? idCell.textContent.trim() : "";
@@ -928,6 +933,35 @@ export class TicketsController {
         },
       },
     ];
+
+    // Повторная заявка по тому же объекту — только из закрытых.
+    // Тот же контракт, что «Закрыть и создать новую» в карточке:
+    // appState.pendingCreateAddress читается в create-controller.mount.
+    if (this.dataType === "close") {
+      const hasObject = ticket.object_id != null && ticket.object_id !== "";
+      items.push({
+        id: "recreate",
+        label: "Создать новую по этому адресу",
+        disabled: !hasObject,
+        hint: hasObject
+          ? "Откроет форму создания с адресом этой заявки"
+          : "Адрес не привязан к объекту — выберите адрес вручную",
+        onSelect: () => {
+          appState.pendingCreateAddress = {
+            from_ticket_id: offline ? null : ticketId,
+            address,
+            city_id: ticket.city_id || null,
+            street_id: ticket.street_id || null,
+            home_id: ticket.home_id || null,
+            object_id: ticket.object_id || null,
+          };
+          logHistoryAction(
+            `Создание новой заявки по адресу закрытой №${ticketId}.`,
+          );
+          this.router.navigate("#/create");
+        },
+      });
+    }
 
     // Офлайн-заявка редактируется сворачиванием в CreateTicket —
     // быстрые действия для неё скрыты, как и в карточке.
