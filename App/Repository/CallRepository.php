@@ -88,7 +88,11 @@ final class CallRepository
                u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
                d.type_name AS department,
                r.type_name AS request,
-               g.type_name AS group_name
+                g.type_name AS group_name,
+               ac.city_name    AS addr_city_name,
+               ast.street_name AS addr_street_name,
+               ah.home_name    AS addr_home_name,
+               ao.object_name  AS addr_object_name
         FROM lift_calls c
         LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
         LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
@@ -96,6 +100,10 @@ final class CallRepository
         LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
         LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
         LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        LEFT JOIN lift_city   ac  ON c.address_city   = ac.id
+        LEFT JOIN lift_street ast ON c.address_street = ast.id
+        LEFT JOIN lift_home   ah  ON c.address_home   = ah.id
+        LEFT JOIN lift_object ao  ON c.address_lift   = ao.id
         WHERE c.call_status = 0 ";
 
               $params = [];
@@ -120,7 +128,11 @@ final class CallRepository
                u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
                d.type_name AS department,
                r.type_name AS request,
-               g.type_name AS group_name
+                 g.type_name AS group_name,
+               ac.city_name    AS addr_city_name,
+               ast.street_name AS addr_street_name,
+               ah.home_name    AS addr_home_name,
+               ao.object_name  AS addr_object_name
         FROM lift_calls c
         LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
         LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
@@ -128,6 +140,10 @@ final class CallRepository
         LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
         LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
         LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        LEFT JOIN lift_city   ac  ON c.address_city   = ac.id
+        LEFT JOIN lift_street ast ON c.address_street = ast.id
+        LEFT JOIN lift_home   ah  ON c.address_home   = ah.id
+        LEFT JOIN lift_object ao  ON c.address_lift   = ao.id
         WHERE c.call_status = 1 AND c.call_date2 >= :date_close ";
 
         $params = ['date_close' => $dateClose];
@@ -264,6 +280,7 @@ final class CallRepository
                 'street_id' => (int) $c['address_street'],
                 'home_id' => (int) $c['address_home'],
                 'object_id' => (int) $c['address_lift'],
+                'address_sort_key' => $this->addressSortKey($c),
                 'details' => $c['call_details'],
                 'staff_id'   => $c['call_staff'] ? (int) $c['call_staff'] : null,
                 'staff_name' => $c['staff_name'] ?? null,
@@ -300,8 +317,38 @@ final class CallRepository
             ];
         }
 
-        return $result;
+           return $result;
     }
+
+    /**
+     * Ключ сортировки адреса. Имена берём из справочника, а не из
+     * call_adres: хранимая строка собрана при создании и несёт маркеры
+     * «д.»/«ул.», по которым сортировка снова соберёт дома под «д»,
+     * а улицы под «у».
+     *
+     * null, когда JOIN не собрался (скрытый или удалённый родитель).
+     * Пустую строку клиент принял бы за валидный ключ и обнулил порядок;
+     * отсутствие значения включает фолбэк на видимый текст.
+     */
+    private function addressSortKey(array $row): ?string
+    {
+        $city   = $row['addr_city_name'] ?? null;
+        $street = $row['addr_street_name'] ?? null;
+        $home   = $row['addr_home_name'] ?? null;
+        $object = $row['addr_object_name'] ?? null;
+
+        if ($city === null || $street === null || $home === null || $object === null) {
+            return null;
+        }
+
+        return \App\Support\Address::sortKey(
+            (string) $city,
+            (string) $street,
+            (string) $home,
+            (string) $object
+        );
+    }
+
     /**
      * Поиск ВСЕХ активных дубликатов на объекте с учётом отдела (§5).
      *
@@ -376,7 +423,11 @@ final class CallRepository
                u3.user_name AS staff_name3, u3.user_phone AS staff_phone3,
                d.type_name AS department,
                r.type_name AS request,
-               g.type_name AS group_name
+                             g.type_name AS group_name,
+               ac.city_name    AS addr_city_name,
+               ast.street_name AS addr_street_name,
+               ah.home_name    AS addr_home_name,
+               ao.object_name  AS addr_object_name
         FROM lift_calls c
         LEFT JOIN lift_users u1 ON c.call_staff  = u1.user_id
         LEFT JOIN lift_users u2 ON c.call_staff2 = u2.user_id
@@ -384,6 +435,10 @@ final class CallRepository
         LEFT JOIN lift_types d ON c.call_department = d.type_id AND d.type = 1
         LEFT JOIN lift_types r ON c.call_request    = r.type_id AND r.type = 2
         LEFT JOIN lift_types g ON c.call_group      = g.type_id AND g.type = 3
+        LEFT JOIN lift_city   ac  ON c.address_city   = ac.id
+        LEFT JOIN lift_street ast ON c.address_street = ast.id
+        LEFT JOIN lift_home   ah  ON c.address_home   = ah.id
+        LEFT JOIN lift_object ao  ON c.address_lift   = ao.id
         WHERE c.call_id = :id";
 
         $call = $this->db->fetchOne($sql, ['id' => $callId]);
@@ -468,6 +523,7 @@ final class CallRepository
             'street_id' => (int)$call['address_street'],
             'home_id' => (int)$call['address_home'],
             'object_id' => (int)$call['address_lift'],
+            'address_sort_key' => $this->addressSortKey($call),
             'details' => $call['call_details'],
             'date' => (int)$call['call_date'],
             'repair_time' => (int)$call['expected_repair_time'],
