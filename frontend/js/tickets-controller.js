@@ -15,6 +15,14 @@ import {
   getOpenFilters,
   setOpenFilters,
 } from "./table/settings.js";
+import { contextMenu } from "./components/context-menu.js";
+import { quickActionModal } from "./components/quick-action-modal.js";
+import { notify } from "./components/notify.js";
+import {
+  resolveTicketPermissions,
+  isOfflineTicket,
+} from "./utils/ticket-permissions.js";
+import { buildTicketText, copyToClipboard } from "./utils/ticket-copy.js";
 
 /** Unix-метка в секундах; миллисекунды outbox приводим. */
 function toSeconds(value) {
@@ -61,6 +69,8 @@ export class TicketsController {
     this._pendingCommandMap = new Map();
     this._pendingCloseMap = new Map();
     this._openCache = [];
+    this._renderedRows = [];
+    this._systemMenuProvider = null;
   }
 
   /** Публичный флаг активности для main.js (п. 1.15). */
@@ -97,7 +107,10 @@ export class TicketsController {
 
     dataTable.setAttribute("data-mode", this.dataType);
     dataTable.setAttribute("data-scope", this.dataType);
-
+    contextMenu.init({
+      container: dataTable,
+      provider: (row) => this._contextMenuProvider(row),
+    });
     if (this.dataType === "open") {
       await this._initFilters();
       if (isStale()) return;
@@ -222,7 +235,8 @@ export class TicketsController {
   unmount() {
     this._mountId++;
     this._isActive = false;
-
+    contextMenu.destroy();
+    this._renderedRows = [];
     if (this.refreshIntervalId) {
       clearInterval(this.refreshIntervalId);
       this.refreshIntervalId = null;
@@ -432,6 +446,7 @@ export class TicketsController {
     }
 
     renderTableBody(dataTable, filteredData);
+    this._renderedRows = filteredData;
     this._applyPendingRowDecorations(dataTable);
     this._paintSortIndicators(dataTable);
     this._refreshRowsCache();
@@ -843,7 +858,146 @@ export class TicketsController {
     this._renderTableFull(dataTable, this._currentTicketsRef);
     if (this.currentSortColumnId !== -1) this._reApplyCurrentSort();
   }
+  /** Системный блок меню задаёт main.js — контроллер про SW не знает. */
+  setSystemMenuProvider(fn) {
+    this._systemMenuProvider = typeof fn === "function" ? fn : null;
+  }
 
+  /**
+   * Объект заявки по номеру строки. Сначала видимые строки (в close
+   * есть синтетические записи локальных закрытий, их нет в ref),
+   * затем полный список в памяти.
+   */
+  getTicketById(id) {
+    if (id == null) return null;
+    const key = String(id);
+    const match = (t) =>
+      String(t.id) === key || String(t.call_number ?? "") === key;
+    return (
+      (this._renderedRows || []).find(match) ||
+      (this._currentTicketsRef || []).find(match) ||
+      null
+    );
+  }
+
+  /**
+   * Провайдер пунктов контекстного меню. Из DOM берётся только id,
+   * остальные поля — из объекта заявки: колонка «Адрес» может быть
+   * скрыта серверными настройками.
+   */
+  _contextMenuProvider(row) {
+    const idCell = row.querySelector('td[data-col-id="id"]');
+    const ticketId = idCell ? idCell.textContent.trim() : "";
+    if (!ticketId) return null;
+
+    const ticket = this.getTicketById(ticketId);
+    if (!ticket) return null;
+
+    const offline = isOfflineTicket(ticket);
+    const address = ticket.fullAddress || ticket.address || "";
+    const snapshot = {
+      title: offline ? "Локальная заявка" : `Заявка №${ticketId}`,
+      subtitle: address,
+    };
+
+    const pendingClose = this._pendingCloseMap.has(String(ticketId));
+    const perms = resolveTicketPermissions(ticket, { pendingClose });
+
+    const items = [
+      {
+        id: "view",
+        label: "Посмотреть подробнее",
+        onSelect: () =>
+          this.router.navigate("#/ticket/" + encodeURIComponent(ticketId)),
+      },
+      {
+        id: "copy",
+        label: "Копировать данные заявки",
+        onSelect: async () => {
+          const text = buildTicketText(ticket, this.dataType);
+          const result = await copyToClipboard(text);
+          if (result.ok) {
+            notify.success("Данные заявки скопированы в буфер обмена.", {
+              once: true,
+            });
+          } else {
+            notify.error(
+              "Не удалось скопировать: " + (result.error || "отказ браузера"),
+            );
+          }
+        },
+      },
+    ];
+
+    // Офлайн-заявка редактируется сворачиванием в CreateTicket —
+    // быстрые действия для неё скрыты, как и в карточке.
+    if (!offline && perms.canComment) {
+      items.push({
+        id: "comment",
+        label: "Добавить комментарий",
+        onSelect: () =>
+          quickActionModal.show({
+            mode: "comment",
+            ticket,
+            snapshot,
+            returnFocus: row,
+            onDone: (r) => this._afterQuickAction(r),
+          }),
+      });
+    }
+
+    if (!offline && perms.canClose) {
+      items.push({
+        id: "close",
+        label: "Закрыть заявку",
+        onSelect: () =>
+          quickActionModal.show({
+            mode: "close",
+            ticket,
+            snapshot,
+            returnFocus: row,
+            onDone: (r) => this._afterQuickAction(r),
+          }),
+      });
+    }
+
+    let systemItems = [];
+    try {
+      systemItems = this._systemMenuProvider?.() || [];
+    } catch (e) {
+      console.warn("[TicketsController] system menu provider failed:", e);
+    }
+
+    return { snapshot, items, systemItems };
+  }
+
+  /**
+   * Обновление журнала после быстрого действия.
+   * Офлайн: refreshFromMemory перечитает pending-карты и поставит ⏳
+   * либо уберёт строку из открытых. Онлайн-закрытие: строку убираем
+   * сами и помечаем закрытый журнал устаревшим.
+   */
+  async _afterQuickAction({ mode, offline, ticketId, failed } = {}) {
+    if (!this._isActive) return;
+    const ref = this._currentTicketsRef;
+    if (!Array.isArray(ref)) return;
+
+    if (mode === "close" && !failed) {
+      if (!offline) {
+        const idx = ref.findIndex((t) => String(t.id) === String(ticketId));
+        if (idx >= 0) ref.splice(idx, 1);
+      }
+      window.dispatchEvent(
+        new CustomEvent("tickets:invalidate", { detail: { scope: "close" } }),
+      );
+    }
+
+    try {
+      await this.refreshFromMemory(ref);
+    } catch (e) {
+      console.warn("[TicketsController] refresh after quick action failed:", e);
+    }
+  }
   async _updateSyncButton() {
     // 1.11: кнопка таблицы принадлежит только активному экрану.
     // Шапка (syncIndicator) обновляется одноимённым модулем на
