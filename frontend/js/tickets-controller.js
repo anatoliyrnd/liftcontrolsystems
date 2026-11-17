@@ -293,6 +293,10 @@ export class TicketsController {
           isOffline: true,
           address: p.fullAddress || p.address || "",
           fullAddress: p.fullAddress || p.address || "",
+          // Ключ заморожен на команде при создании. У легаси-записей
+          // его нет — null, рендер не поставит атрибут, сортировка
+          // возьмёт видимый текст (прежнее поведение).
+          address_sort_key: o.address_sort_key ?? null,
           date: toSeconds(p.opened_at) ?? toSeconds(o.created_at),
           repair_time: null,
         };
@@ -954,6 +958,10 @@ export class TicketsController {
             street_id: ticket.street_id || null,
             home_id: ticket.home_id || null,
             object_id: ticket.object_id || null,
+            // Заявка-источник уже несёт ключ: серверный address_sort_key
+            // либо замороженный офлайн. Прокидываем, чтобы «создать новую
+            // по этому адресу» офлайн не потеряла порядок в таблице.
+            sort_key: ticket.address_sort_key ?? null,
           };
           logHistoryAction(
             `Создание новой заявки по адресу закрытой №${ticketId}.`,
