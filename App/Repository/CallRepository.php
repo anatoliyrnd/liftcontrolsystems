@@ -347,7 +347,8 @@ final class CallRepository
             (string) $city,
             (string) $street,
             (string) $home,
-            (string) $object
+            (string) $object,
+            $streetType
         );
     }
 

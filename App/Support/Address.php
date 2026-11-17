@@ -257,17 +257,26 @@ final class Address
      * пробелы, поэтому plain() нужен только городу и объекту — у них
      * ни типов, ни маркеров, терять символы нельзя.
      */
-    public static function sortKey(string $city, string $street, string $home, string $object): string
-    {
+    public static function sortKey(
+        string $city,
+        string $street,
+        string $home,
+        string $object,
+        ?string $streetType = null
+    ): string {
+        // Тип известен из справочника — имя чистое, не разбираем:
+        // иначе «23-я линия» потеряет «линию» и разойдётся с
+        // клиентским ключом (flattener берёт сырое имя).
+        $streetName = trim((string) $streetType) !== ''
+            ? trim($street)
+            : self::parseStreet($street)['name'];
+
         $parts = [
             self::plain($city),
-            self::parseStreet($street)['name'],
+            $streetName,
             self::parseHome($home)['name'],
             self::plain($object),
         ];
-
-        // Пустой компонент не должен давать висящий пробел: «ленина  20/1»
-        // и «ленина 20/1» — разные строки для коллатора.
         $parts = array_filter($parts, static fn (string $p): bool => $p !== '');
 
         return mb_strtolower(implode(' ', $parts), 'UTF-8');
@@ -295,14 +304,22 @@ final class Address
      * sort_key и guid-путь (format) эту функцию не используют для типа:
      * там имя уже чистое, parseStreet вернёт его без изменений.
      */
-    public static function formatStreet(string $name, ?string $type = null): string
+       public static function formatStreet(string $name, ?string $type = null): string
     {
-        $p = self::parseStreet($name);
-        $base = $p['name'] !== '' ? $p['name'] : trim($name);
-        if ($base === '') return '';
-
         $code = trim((string) $type);
-        if ($code === '') $code = (string) ($p['type'] ?? '');
+        $base = trim($name);
+
+        // Имя из lift_street уже чистое: тип живёт в соседней колонке.
+        // parseStreet здесь съедал легитимное типовое слово в имени
+        // («23-я линия» → «23-я»): алиасы знают «линия» как тип.
+        // Разбор оставляем ТОЛЬКО легаси-строкам без типа.
+        if ($code === '') {
+            $p = self::parseStreet($base);
+            if ($p['name'] !== '') $base = $p['name'];
+            $code = (string) ($p['type'] ?? '');
+        }
+
+        if ($base === '') return '';
         if ($code === '') return $base;
 
         $label = self::STREET_TYPE_LABELS[$code] ?? $code . ' ';
