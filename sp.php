@@ -350,11 +350,18 @@ try {
     }
 
     // --- Проверка организации ---
-    $pultName = (string) $xml['Name'];
-    if ($pultName !== ($parameters['spult_organization_name'] ?? '')) {
+    // Пустая настройка = проверка выключена, а не «ожидается пустое имя»:
+    // строгое сравнение с '' отправило бы в карантин каждый сигнал
+    // с непустым Name. Семантика как у GUID-проверки: включено,
+    // но проверять нечем → skip + лог, а не молчаливый отказ потока.
+    $orgExpected = trim((string) ($parameters['spult_organization_name'] ?? ''));
+    $pultName = trim((string) $xml['Name']);
+    if ($orgExpected === '') {
+        error_log('SPult ORG: spult_organization_name empty, check skipped');
+    } elseif ($pultName !== $orgExpected) {
         // Не 403: при опечатке в настройке пульт получил бы отказ на каждый сигнал.
         $st['meta']['got'] = $pultName;
-        $st['meta']['expected'] = $parameters['spult_organization_name'] ?? '';
+                $st['meta']['expected'] = $orgExpected;
         spult_finish(
             $st, 'quarantine', 'OK: accepted', 'org_mismatch',
             'Сигнал отклонён: имя организации не совпало с настройкой («' . $pultName . '»)'
