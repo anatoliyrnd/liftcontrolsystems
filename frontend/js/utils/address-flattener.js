@@ -50,10 +50,17 @@ export function flattenAddresses(serverResponse) {
     // *_display обнулил бы адрес в пикере.
     const sDisplay = String(s.street_display ?? "").trim() || sName;
     const hDisplay = String(h.home_display ?? "").trim() || hName;
+    // Тип населённого пункта — данные сервера (city_type → city_display).
+    // Клиент префикс НЕ выдумывает: посёлки, станицы и хутора иначе
+    // получили бы ложное «г.'. Фолбэк на чистое имя — старый кэш и
+    // ответ до выкатки серверной правки; лечится bump версии addresses.
+    const cDisplay = String(c.city_display ?? "").trim() || cName;
 
     // filter(Boolean), а не шаблон через запятую: при пустом компоненте
     // шаблон давал «…, , д. » — висящие разделители в подписи.
-    const houseDisplay = [cName, sDisplay, hDisplay].filter(Boolean).join(", ");
+    const houseDisplay = [cDisplay, sDisplay, hDisplay]
+      .filter(Boolean)
+      .join(", ");
     const displayName = [houseDisplay, oName].filter(Boolean).join(", ");
 
     // Ключ сортировки — из ЧИСТЫХ имён, без маркеров. Сортировать по

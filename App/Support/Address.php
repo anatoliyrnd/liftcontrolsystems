@@ -30,7 +30,19 @@ final class Address
      * в API_PROTOCOL §5/§7 обновить вместе с выкаткой.
      */
     public const HOME_PREFIX = 'д. ';
+public const CITY_TYPES = [
+    'г' => 'г. ', 'п' => 'п. ', 'пгт' => 'пгт ',
+    'с' => 'с. ', 'д' => 'д. ', 'х' => 'х. ', 'ст' => 'ст-ца ',
+    'пос'=>'пос.'
+];
 
+public static function formatCity(string $name, string $type = 'г'): string
+{
+    $n = self::plain($name);
+    if ($n === '') return '';
+    $prefix = self::CITY_TYPES[$type] ?? '';
+    return $prefix . $n;   // неизвестный тип → чистое имя, без выдуманного «г.»
+}
     /**
      * Закрытая карта ходовых типов, а не классификатор ГАР (300+ позиций).
      * Трек А живёт 6–8 месяцев, полный словарь — AddressProvider в Треке Б.

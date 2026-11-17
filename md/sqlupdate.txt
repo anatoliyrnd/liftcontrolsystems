@@ -683,3 +683,6 @@ CREATE TABLE `lift_metadata` (
   CONSTRAINT `fk_metadata_object`
     FOREIGN KEY (`object_id`) REFERENCES `lift_object` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci;
+
+ALTER TABLE lift_city
+  ADD COLUMN city_type VARCHAR(10) NOT NULL DEFAULT 'г' AFTER city_name;
