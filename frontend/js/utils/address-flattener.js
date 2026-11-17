@@ -50,10 +50,10 @@ export function flattenAddresses(serverResponse) {
     // *_display обнулил бы адрес в пикере.
     const sDisplay = String(s.street_display ?? "").trim() || sName;
     const hDisplay = String(h.home_display ?? "").trim() || hName;
-    // Тип населённого пункта — данные сервера (city_type → city_display).
-    // Клиент префикс НЕ выдумывает: посёлки, станицы и хутора иначе
-    // получили бы ложное «г.'. Фолбэк на чистое имя — старый кэш и
-    // ответ до выкатки серверной правки; лечится bump версии addresses.
+    // Тип н.п. — данные сервера (city_type → city_display). Клиент
+    // префикс не выдумывает: ни «г.', ни «н.п.» — иначе старый кэш
+    // получил бы подпись, которой сервер не подтверждал. Фолбэк на
+    // сырое имя — переходное состояние до bump версии addresses.
     const cDisplay = String(c.city_display ?? "").trim() || cName;
 
     // filter(Boolean), а не шаблон через запятую: при пустом компоненте
@@ -84,6 +84,7 @@ export function flattenAddresses(serverResponse) {
       id: obj.id,
       city_id: c.id,
       city_name: cName,
+      city_display: cDisplay,
       street_id: s.id,
       home_id: h.id,
       home_name: hName,

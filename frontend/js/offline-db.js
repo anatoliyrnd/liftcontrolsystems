@@ -283,6 +283,10 @@ class OfflineDB {
         citiesMap.set(item.city_id, {
           id: item.city_id,
           name: item.city_name || `Город ${item.city_id}`,
+          // Подпись с типом н.п. — для выпадашек. name остаётся сырым:
+          // на нём держатся фильтры и поиск.
+          display:
+            item.city_display || item.city_name || `Город ${item.city_id}`,
         });
       }
     }
