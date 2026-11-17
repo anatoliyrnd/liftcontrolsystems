@@ -280,6 +280,13 @@ export function createCreateFormView({ onChange }) {
       if (navigator.onLine) {
         payload.repair_time = repairPicker?.getTimestamp() || null;
       }
+
+      // Зеркально сроку: ключ сортировки нужен только офлайн-заявке.
+      // Онлайн сервер соберёт address_sort_key сам из справочника,
+      // клиентское значение было бы лишним полем в контракте callnew.
+      if (!navigator.onLine && addressData.sort_key) {
+        payload.sort_key = addressData.sort_key;
+      }
       return payload;
     },
 
