@@ -694,7 +694,8 @@ class CallService
                 (string) $address['street_name'],
                 (string) $address['home_name'],
                 (string) $address['object_name'],
-                $address['city_type'] ?? null
+                $address['city_type'] ?? null,
+                $address['street_type'] ?? null
             ),
             'group_id' => (int) ($address['group_id'] ?? 1),
             'vis' => (bool) ($address['vis'] ?? true),

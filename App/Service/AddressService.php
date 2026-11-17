@@ -51,11 +51,14 @@ final class AddressService
                 static function (array $r): array {
                     // Защитно: даже если в справочник руками вписали
                     // «ул. Ленина», маркер не задвоится.
-                    $r['street_display'] = Address::formatStreet((string) $r['street_name']);
+                     $r['street_display'] = Address::formatStreet(
+                        (string) $r['street_name'],
+                        $r['street_type'] ?? null
+                    );
                     return $r;
                 },
                 $this->db->fetchAll(
-                    "SELECT id, street_name, city_id FROM lift_street WHERE vis = 1 ORDER BY street_name"
+                    "SELECT id, street_name, street_type, city_id FROM lift_street WHERE vis = 1 ORDER BY street_name"
                 )
             ),
 

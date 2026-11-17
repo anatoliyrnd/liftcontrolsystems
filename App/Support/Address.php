@@ -69,16 +69,17 @@ final class Address
      * Display-подпись адреса для call_adres и справочника.
      * НЕ используется в guid-пути: там остаётся format() (plain).
      */
-    public static function formatDisplay(
+       public static function formatDisplay(
         string $city,
         string $street,
         string $home,
         string $object,
-        ?string $cityType = null
+        ?string $cityType = null,
+        ?string $streetType = null
     ): string {
         $parts = array_filter([
             self::formatCity($city, $cityType),
-            self::formatStreet($street),
+            self::formatStreet($street, $streetType),
             self::formatHome($home),
             self::plain($object),
         ], static fn (string $p): bool => $p !== '');
@@ -279,22 +280,33 @@ final class Address
         return $n === '' ? '' : self::HOME_PREFIX . $n;
     }
 
-    public static function formatStreet(string $raw): string
+        /** Подписи типов улиц. Ключ — код из lift_street.street_type. */
+    public const STREET_TYPE_LABELS = [
+        'ул' => 'ул. ', 'пер' => 'пер. ', 'пр' => 'пр. ', 'пр-кт' => 'пр. ',
+        'проспект' => 'пр. ', 'мкр' => 'мкр. ', 'ш' => 'ш. ', 'шоссе' => 'ш. ',
+        'б-р' => 'б-р ', 'бульвар' => 'б-р ', 'пл' => 'пл. ', 'площадь' => 'пл. ',
+        'наб' => 'наб. ', 'туп' => 'туп. ', 'проезд' => 'пр-д ', 'аллея' => 'аллея ',
+    ];
+
+    /**
+     * Подпись улицы. Тип приходит из lift_street.street_type; если пуст —
+     * защитно разбираем сырую строку (легаси-строки с маркером внутри).
+     * Неизвестный код берём как есть без точки, чтобы не выдумывать «ул.».
+     * sort_key и guid-путь (format) эту функцию не используют для типа:
+     * там имя уже чистое, parseStreet вернёт его без изменений.
+     */
+    public static function formatStreet(string $name, ?string $type = null): string
     {
-        $p = self::parseStreet($raw);
-        if ($p['name'] === '') {
-            return '';
-        }
-        if ($p['type'] === null) {
-            return $p['name'];
-        }
+        $p = self::parseStreet($name);
+        $base = $p['name'] !== '' ? $p['name'] : trim($name);
+        if ($base === '') return '';
 
-        $def   = self::TYPES[$p['type']];
-        $label = $p['type'] . ($def['pos'] === 'prefix' ? '.' : '');
+        $code = trim((string) $type);
+        if ($code === '') $code = (string) ($p['type'] ?? '');
+        if ($code === '') return $base;
 
-        return $def['pos'] === 'prefix'
-            ? $label . ' ' . $p['name']
-            : $p['name'] . ' ' . $label;
+        $label = self::STREET_TYPE_LABELS[$code] ?? $code . ' ';
+        return $label . $base;
     }
 
     /**
