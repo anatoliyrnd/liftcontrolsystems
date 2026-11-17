@@ -800,7 +800,7 @@ export class TicketsController {
       cb.checked = this._filters.cities.includes(Number(city.id));
 
       const span = document.createElement("span");
-      span.textContent = city.name;
+      span.textContent = city.display || city.name;
 
       item.appendChild(cb);
       item.appendChild(span);

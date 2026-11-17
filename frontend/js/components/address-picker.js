@@ -151,7 +151,7 @@ export function createAddressPicker(opts = {}) {
     currentCities.forEach((c) => {
       const opt = document.createElement("option");
       opt.value = String(c.id);
-      opt.textContent = c.name;
+      opt.textContent = c.display || c.name;
       citySelect.appendChild(opt);
     });
 
