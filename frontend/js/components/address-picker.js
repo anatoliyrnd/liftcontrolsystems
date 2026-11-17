@@ -88,6 +88,13 @@ export function createAddressPicker(opts = {}) {
   let pendingCityId = null;
   let focusableElements = [];
   let activeIndex = -1;
+  // Пагинация отрисовки: поиск в памяти, лимит — только окно DOM.
+  let searchResults = [];
+  let groupedResults = [];
+  let renderedGroups = 0;
+  let renderedItems = 0;
+  let footerEl = null;
+  let currentQuery = "";
 
   const normalize = normalizeSearchString;
 
@@ -248,16 +255,92 @@ export function createAddressPicker(opts = {}) {
   window.addEventListener("resize", onWindowResize);
   window.addEventListener("scroll", onWindowScroll, true);
   document.addEventListener("click", onDocClick);
+  const onDropdownScroll = () => {
+    if (dropdown.style.display === "none") return;
+    if (renderedGroups >= groupedResults.length) return;
+    if (
+      dropdown.scrollTop + dropdown.clientHeight >=
+      dropdown.scrollHeight - 60
+    ) {
+      appendPage(renderedItems + PAGE_ITEMS);
+    }
+  };
+  dropdown.addEventListener("scroll", onDropdownScroll);
+
+  function renderGroup(group, query) {
+    const groupEl = document.createElement("div");
+    groupEl.className = "address-group";
+    groupEl.style.cssText =
+      "padding: 10px 12px; border-bottom: 1px solid var(--border-color);";
+    const houseEl = document.createElement("div");
+    houseEl.className = "address-house-header";
+    houseEl.style.cssText =
+      "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
+    houseEl.innerHTML = highlight(group.house_display, query);
+    if (mode === "house" || mode === "any") {
+      houseEl.style.cursor = "pointer";
+      houseEl.classList.add("selectable-house");
+      houseEl.onclick = () => selectAddress(group, "house");
+      focusableElements.push(houseEl);
+    }
+    groupEl.appendChild(houseEl);
+    const pillsWrap = document.createElement("div");
+    pillsWrap.className = "address-pills-wrap";
+    pillsWrap.style.cssText = "display: flex; flex-wrap: wrap; gap: 6px;";
+    group.elevators.forEach((elev) => {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "address-pill";
+      pill.innerHTML = highlight(elevatorLabel(elev), query);
+      pill.onclick = () => selectAddress(elev, "elevator");
+      focusableElements.push(pill);
+      pillsWrap.appendChild(pill);
+    });
+    groupEl.appendChild(pillsWrap);
+    return groupEl;
+  }
+
+  function updateFooter() {
+    if (!footerEl) return;
+    const total = searchResults.length;
+    const capped = total >= SEARCH_LIMIT;
+    if (renderedItems >= total && !capped) {
+      footerEl.style.display = "none";
+      return;
+    }
+    footerEl.style.display = "block";
+    footerEl.textContent = capped
+      ? `Показано ${renderedItems} из ${SEARCH_LIMIT}+ совпадений. Уточните запрос.`
+      : `Показано ${renderedItems} из ${total}. Прокрутите список, чтобы загрузить ещё.`;
+  }
+
+  /** Дорисовывает группы, пока не наберётся targetItems объектов. */
+  function appendPage(targetItems) {
+    while (
+      renderedGroups < groupedResults.length &&
+      renderedItems < targetItems
+    ) {
+      const group = groupedResults[renderedGroups++];
+      // Футер всегда последний: группы вставляются перед ним.
+      dropdown.insertBefore(renderGroup(group, currentQuery), footerEl);
+      renderedItems += group.elevators.length;
+    }
+    updateFooter();
+  }
 
   function renderDropdown(results) {
     dropdown.innerHTML = "";
     focusableElements = [];
     activeIndex = -1;
-
+    searchResults = results;
+    groupedResults = [];
+    renderedGroups = 0;
+    renderedItems = 0;
+    footerEl = null;
     const cityId = citySelect.value;
     const rawQuery = searchInput.value.trim();
     const query = normalize(rawQuery);
-
+    currentQuery = query;
     const recent = !query ? getRecentAddresses(cityId) : [];
     if (recent.length > 0) {
       const title = document.createElement("div");
@@ -265,7 +348,6 @@ export function createAddressPicker(opts = {}) {
       title.style.cssText =
         "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
       dropdown.appendChild(title);
-
       recent.forEach((item) => {
         const el = document.createElement("div");
         el.className = "recent-address-item";
@@ -276,14 +358,12 @@ export function createAddressPicker(opts = {}) {
         dropdown.appendChild(el);
       });
     }
-
     if (results.length === 0 && recent.length === 0) {
       dropdown.innerHTML =
         '<div style="padding: 10px; font-size: 13px; color: var(--text-secondary); text-align: center;">Ничего не найдено</div>';
       showDropdown();
       return;
     }
-
     if (results.length > 0 && recent.length > 0) {
       const divider = document.createElement("div");
       divider.style.cssText =
@@ -291,7 +371,6 @@ export function createAddressPicker(opts = {}) {
       divider.textContent = "Результаты поиска";
       dropdown.appendChild(divider);
     }
-
     const grouped = new Map();
     results.forEach((item) => {
       if (!grouped.has(item.home_id)) {
@@ -305,54 +384,12 @@ export function createAddressPicker(opts = {}) {
       }
       grouped.get(item.home_id).elevators.push(item);
     });
-
-    grouped.forEach((group) => {
-      const groupEl = document.createElement("div");
-      groupEl.className = "address-group";
-      groupEl.style.cssText =
-        "padding: 10px 12px; border-bottom: 1px solid var(--border-color);";
-
-      const houseEl = document.createElement("div");
-      houseEl.className = "address-house-header";
-      houseEl.style.cssText =
-        "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
-      houseEl.innerHTML = highlight(group.house_display, query);
-
-      if (mode === "house" || mode === "any") {
-        houseEl.style.cursor = "pointer";
-        houseEl.classList.add("selectable-house");
-        houseEl.onclick = () => selectAddress(group, "house");
-        focusableElements.push(houseEl);
-      }
-
-      groupEl.appendChild(houseEl);
-
-      const pillsWrap = document.createElement("div");
-      pillsWrap.className = "address-pills-wrap";
-      pillsWrap.style.cssText = "display: flex; flex-wrap: wrap; gap: 6px;";
-
-      group.elevators.forEach((elev) => {
-        const pill = document.createElement("button");
-        pill.type = "button";
-        pill.className = "address-pill";
-        pill.innerHTML = highlight(elevatorLabel(elev), query);
-        pill.onclick = () => selectAddress(elev, "elevator");
-        focusableElements.push(pill);
-        pillsWrap.appendChild(pill);
-      });
-
-      groupEl.appendChild(pillsWrap);
-      dropdown.appendChild(groupEl);
-    });
-
-    if (results.length >= RESULT_LIMIT) {
-      const footer = document.createElement("div");
-      footer.style.cssText =
-        "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
-      footer.textContent = "Показаны первые 50 результатов. Уточните запрос.";
-      dropdown.appendChild(footer);
-    }
-
+    groupedResults = [...grouped.values()];
+    footerEl = document.createElement("div");
+    footerEl.style.cssText =
+      "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
+    dropdown.appendChild(footerEl);
+    appendPage(PAGE_ITEMS);
     showDropdown();
   }
   /**
@@ -388,7 +425,10 @@ export function createAddressPicker(opts = {}) {
     onChange(selectedData);
   }
 
-  const RESULT_LIMIT = 50;
+  // Потолок выборки совпадений из локального поиска.
+  const SEARCH_LIMIT = 300;
+  // Сколько объектов дорисовываем за один шаг пагинации.
+  const PAGE_ITEMS = 50;
   let debounceTimer = null;
   let searchSeq = 0;
 
@@ -398,7 +438,7 @@ export function createAddressPicker(opts = {}) {
 
     const seq = ++searchSeq;
     const q = normalize(val);
-    const results = await offlineDB.searchAddresses(cityId, q, RESULT_LIMIT);
+    const results = await offlineDB.searchAddresses(cityId, q, SEARCH_LIMIT);
 
     // Ответ устаревшего запроса не перерисовывает список: при быстром
     // вводе порядок разрешения async-вызовов не гарантирован, и медленный
@@ -443,6 +483,13 @@ export function createAddressPicker(opts = {}) {
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      // На последней отрисованной строке стрелка догружает следующую порцию.
+      if (
+        activeIndex >= focusableElements.length - 1 &&
+        renderedGroups < groupedResults.length
+      ) {
+        appendPage(renderedItems + PAGE_ITEMS);
+      }
       if (activeIndex < focusableElements.length - 1) activeIndex++;
       updateActiveElement();
     } else if (e.key === "ArrowUp") {
@@ -496,6 +543,7 @@ export function createAddressPicker(opts = {}) {
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("scroll", onWindowScroll, true);
       document.removeEventListener("click", onDocClick);
+      dropdown.removeEventListener("scroll", onDropdownScroll);
 
       // Удаляем подложку
       backdrop.removeEventListener("click", onBackdropClick);
