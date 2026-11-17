@@ -645,6 +645,10 @@ export class DetailsController {
         street_id: this.ticket.street_id || null,
         home_id: this.ticket.home_id || null,
         object_id: this.ticket.object_id || null,
+        // Тот же контракт, что у контекстного меню: ключ сортировки
+        // наследуется от заявки-источника, чтобы созданная офлайн
+        // заявка не выпала из порядка до синхронизации.
+        sort_key: this.ticket.address_sort_key ?? null,
       };
       this.router.navigate("#/create");
     }, UI.CLOSE_AND_CREATE_REDIRECT_MS);
