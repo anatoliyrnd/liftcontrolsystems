@@ -57,6 +57,19 @@ export function renderTableBody(tableElement, serverData) {
       td.setAttribute("data-col-id", col.id);
       td.setAttribute("data-label", col.name);
 
+      // Ключ сортировки — только для адреса: сортировать по подписи
+      // значит снова группировать улицы под «у», а дома под «д».
+      // Ставим ТОЛЬКО при непустом значении: пустой атрибут sorting.js
+      // прочитал бы优先 над текстом и обнулил порядок хуже, чем без него.
+      // Номерной колонке ключ не нужен — нечисловой offline_… уезжает
+      // в конец сам, это и есть политика «своя нумерация отдельно».
+      if (col.id === "address") {
+        const sortKey = rowData.address_sort_key;
+        if (sortKey != null && String(sortKey).trim() !== "") {
+          td.setAttribute("data-sort-key", String(sortKey));
+        }
+      }
+
       const finalWidth = col.width || `${col.minWidth}px`;
       td.style.width = finalWidth;
       td.style.minWidth = `${col.minWidth}px`;
