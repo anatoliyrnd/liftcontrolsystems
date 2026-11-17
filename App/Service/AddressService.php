@@ -34,8 +34,17 @@ final class AddressService
     public function getAddresses(): array
     {
         return [
-            'city' => $this->db->fetchAll(
-                "SELECT id, city_name FROM lift_city WHERE vis = 1 ORDER BY city_name"
+            'city' => array_map(
+                static function (array $r): array {
+                    $r['city_display'] = Address::formatCity(
+                        (string) $r['city_name'],
+                        $r['city_type'] ?? null
+                    );
+                    return $r;
+                },
+                $this->db->fetchAll(
+                    "SELECT id, city_name, city_type FROM lift_city WHERE vis = 1 ORDER BY city_name"
+                )
             ),
 
             'street' => array_map(
