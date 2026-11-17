@@ -284,7 +284,10 @@ export function createCreateFormView({ onChange }) {
       // Зеркально сроку: ключ сортировки нужен только офлайн-заявке.
       // Онлайн сервер соберёт address_sort_key сам из справочника,
       // клиентское значение было бы лишним полем в контракте callnew.
-      if (!navigator.onLine && addressData.sort_key) {
+      // Ключ кладём всегда: при таймауте онлайн-запроса этот же payload
+      // уезжает в saveOffline, и офлайн-строка не теряет сортировку.
+      // Онлайн-репозиторий снимает ключ перед callnew (контракт чист).
+      if (addressData.sort_key) {
         payload.sort_key = addressData.sort_key;
       }
       return payload;

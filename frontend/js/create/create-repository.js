@@ -6,6 +6,8 @@ export const createRepository = {
   // 🔥 ДОБАВЛЕН 3-й аргумент options
   async saveOnline(api, payload, options = {}) {
     const body = { action: "callnew", ...payload };
+    // sort_key — метаданные строки таблицы, не поле контракта callnew.
+    delete body.sort_key;
     if (options.force_create) {
       body.force_create = true;
     }
