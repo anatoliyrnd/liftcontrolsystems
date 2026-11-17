@@ -44,6 +44,7 @@ final class CallRepository
     {
         $sql = "SELECT 
                     c.city_name, 
+                    c.city_type,
                     s.street_name, 
                     h.home_name, 
                     o.object_name,

@@ -689,11 +689,12 @@ class CallService
             // справочника, где маркер уже был, получалось «д.д. 20/1».
             // Address нормализует защитно — даже если кто-то руками
             // впишет «д.20/1» в справочник, двойного маркера не будет.
-            'full_address' => Address::format(
+             'full_address' => Address::formatDisplay(
                 (string) $address['city_name'],
                 (string) $address['street_name'],
                 (string) $address['home_name'],
-                (string) $address['object_name']
+                (string) $address['object_name'],
+                $address['city_type'] ?? null
             ),
             'group_id' => (int) ($address['group_id'] ?? 1),
             'vis' => (bool) ($address['vis'] ?? true),
