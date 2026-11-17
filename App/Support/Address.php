@@ -31,6 +31,7 @@ final class Address
      */
     public const HOME_PREFIX = 'д. ';
 /** Типы населённых пунктов. Ключ — код в lift_city.city_type. */
+        /** Типы населённых пунктов. Ключ — код в lift_city.city_type. */
     public const CITY_TYPES = [
         'г'   => 'г. ',
         'п'   => 'п. ',
@@ -42,38 +43,46 @@ final class Address
     ];
 
     /**
-     * Подпись населённого пункта. Тип — данные (lift_city.city_type),
-     * а не константа форматировщика: посёлки, станицы и хутора иначе
-     * получили бы ложное «г.'.
-     *
-     * Неизвестный или пустой тип → «н.п.»: честная общая подпись
-     * вместо угадывания. Если имя уже несёт маркер (до миграции),
-     * тип выводится из него. В sort_key тип не входит никогда.
-     *
-     * НЕ используется в format(): та строка кормит guid-сравнение
-     * СПульт и обязана остаться plain.
+     * Подпись н.п. Тип — данные (city_type), не константа форматировщика.
+     * Пустой/неизвестный тип → «н.п.»: честная общая подпись вместо
+     * угадывания «г.'. Если имя уже несёт маркер (до миграции) — тип
+     * выводится из него. В sort_key тип не входит никогда.
      */
     public static function formatCity(string $name, ?string $type = null): string
     {
         $n = self::plain($name);
-        if ($n === '') {
-            return '';
-        }
+        if ($n === '') return '';
 
         $code = trim((string) $type);
         if ($code === '' && preg_match('/^(г|п|пгт|с|д|х|ст-ца)\.?\s/u', $n, $m)) {
             $code = $m[1];
         }
-
-        // Защита от двойного маркера: имя могло сохраниться с «г.»
+        // Страховка от двойного маркера: имя могло сохраниться с «г.»
         // (lift_options.city_default исторически был частью значения).
         $stripped = preg_replace('/^(?:г|п|пгт|с|д|х|ст-ца|н\.п\.)\.?\s+/u', '', $n);
-        if (is_string($stripped) && $stripped !== '') {
-            $n = $stripped;
-        }
+        if (is_string($stripped) && $stripped !== '') $n = $stripped;
 
-        $prefix = self::CITY_TYPES[$code] ?? 'н.п. ';
-        return $prefix . $n;
+        return (self::CITY_TYPES[$code] ?? 'н.п. ') . $n;
+    }
+
+    /**
+     * Display-подпись адреса для call_adres и справочника.
+     * НЕ используется в guid-пути: там остаётся format() (plain).
+     */
+    public static function formatDisplay(
+        string $city,
+        string $street,
+        string $home,
+        string $object,
+        ?string $cityType = null
+    ): string {
+        $parts = array_filter([
+            self::formatCity($city, $cityType),
+            self::formatStreet($street),
+            self::formatHome($home),
+            self::plain($object),
+        ], static fn (string $p): bool => $p !== '');
+        return implode(', ', $parts);
     }
     /**
      * Закрытая карта ходовых типов, а не классификатор ГАР (300+ позиций).
