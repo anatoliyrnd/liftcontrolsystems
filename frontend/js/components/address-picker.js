@@ -377,6 +377,11 @@ export function createAddressPicker(opts = {}) {
       home_id: item.home_id,
       object_id: isHouse ? null : item.id,
       address: isHouse ? item.house_display : item.display_name,
+      // Ключ сортировки уезжает в офлайн-заявку: серверного у неё нет
+      // до синхронизации, а искать его по кэшу в синхронном рендерере
+      // нельзя. Берём из той же записи, что и подпись, — один момент,
+      // одно значение, расхождения не будет.
+      sort_key: item.sort_key ?? null,
     };
     searchInput.value = selectedData.address;
     hideDropdown();
