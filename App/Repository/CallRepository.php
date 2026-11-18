@@ -565,7 +565,7 @@ final class CallRepository
             'can_edit' => $canEdit,
             'can_close' => $canClose,
             'can_comment' => $canComment,
-            'closureallowed' => 0,
+
         ];
     }
     public function findTypeCategory(int $typeId): ?array
