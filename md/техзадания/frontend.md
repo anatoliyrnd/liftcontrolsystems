@@ -1,4 +1,13 @@
 offlineDB.tickets_cache не разделён по пользователям: при смене аккаунта офлайн getTickets("open") вернёт строки предыдущего. Массивы в памяти мы чистим (п.2), но кэш — нет. Это утечка данных между аккаунтами на одном устройстве, вне объёма 3.1–3.9 (там только настройки). Зафиксировать отдельной задачей: либо ключ кэша userId:type, либо clear при смене uid.
+для быстрого списка входа на стринце логина
+POST api.php {"action":"check_org_key"}
+→ {status:"ok", data:{enabled:true, valid:false, org_name:"…"}}
+
+POST api.php {"action":"check_org_key","org_key":"ABCD-EFGH-IJKL"}
+→ {status:"ok", data:{enabled:true, valid:true, org_name:"…"}}
+
+POST api.php {"action":"get_org_users","org_key":"ABCD-EFGH-IJKL"}
+→ {status:"ok", data:{org_name:"…", users:[{id:5,name:"Иванов И.И."}]}}
 
 # 📋 ТЗ: Фронтенд — правки
 

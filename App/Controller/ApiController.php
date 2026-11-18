@@ -16,7 +16,8 @@ use App\Service\{
     ConfigService,
     AddressService,
     NotificationsService,
-    AddressCacheService
+    AddressCacheService,
+    OrgLoginService
 };
 
 final class ApiController
@@ -37,6 +38,7 @@ final class ApiController
     private DB $db;
     private NotificationsService $notificationsService;
     private AddressCacheService $addressCacheService;
+    private OrgLoginService $orgLogin;
     private ?Tenant $tenant;
 
     private function __construct(
@@ -47,6 +49,7 @@ final class ApiController
         DB $db,
         NotificationsService $notificationsService,
         AddressCacheService $addressCacheService,
+        OrgLoginService $orgLogin,
         ?Tenant $tenant
     ) {
         $this->authService = $authService;
@@ -56,6 +59,7 @@ final class ApiController
         $this->db = $db;
         $this->notificationsService = $notificationsService;
         $this->addressCacheService = $addressCacheService;
+        $this->orgLogin = $orgLogin;
         $this->tenant = $tenant;
     }
 
@@ -68,12 +72,16 @@ final class ApiController
         $callRepo    = new CallRepository($db);
         $noteRepo    = new NoteRepository($db);
         $historyRepo = new HistoryRepository($db);
-        $legacyProxy = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
 
+        $legacyProxy = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
         $configService = new ConfigService($db, $tenant);
         $addressService = new AddressService($db);
         $notificationsService = new NotificationsService($db);
         $addressCacheService = new AddressCacheService($db);
+
+        // Тот же $userRepo, что у AuthService: второй экземпляр не нужен,
+        // соединение и так одно на тенант.
+        $orgLogin = new OrgLoginService($db, $userRepo, $tenant);
 
         $callService = new CallService(
             $callRepo,
@@ -94,12 +102,19 @@ final class ApiController
             $db,
             $notificationsService,
             $addressCacheService,
+            $orgLogin,
             $tenant
         );
     }
-
     public function handle(Request $request): Response
     {
+        // Публичные действия — ДО проверки bearer. Экран входа токена
+        // не имеет, и MissingToken прилетел бы раньше логики ключа.
+        $public = $this->handlePublicAction($request);
+        if ($public !== null) {
+            return $public;
+        }
+
         if ($request->bearer === null) {
             throw new ApiException(ErrorCode::MissingToken, 'Требуется авторизация');
         }
@@ -119,11 +134,40 @@ final class ApiController
             'ticket'        => Response::ok(['data' => $this->getTicket($request, $user)]),
 
             // B2.6: результат пачки — под data, как у ticket (§0.3).
-            // Клиент поддерживает оба варианта (resp.data || resp), так что
-            // выкатка не ломает уже открытый SPA.
             'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
 
             default => throw new ApiException(ErrorCode::UnknownAction, 'Неизвестное действие: ' . $request->action)
+        };
+    }
+
+    /**
+     * Публичные действия (B4.3) — единственный вход, обходящий bearer.
+     *
+     * Ветки match и есть белый список: добавление ветки открывает
+     * неаутентифицированный эндпоинт. Отдельного массива-списка нет
+     * намеренно — два источника разошлись бы, и «публичность» действия
+     * перестала бы быть очевидной при чтении кода.
+     *
+     * default => null означает «не публичное», управление уходит
+     * к проверке токена. Тенант при этом уже определён в create():
+     * ключ организации проверяется в БД конкретного тенанта, поэтому
+     * утечка ключа одной организации не открывает другие.
+     *
+     * Ответ под data (§0.3) — как у ticket и syncCommands.
+     */
+    private function handlePublicAction(Request $request): ?Response
+    {
+        // is_scalar: массив или объект в org_key дал бы «Array to string
+        // conversion», а set_error_handler из bootstrap превратил бы
+        // warning в ErrorException → internal_error вместо отказа ключа.
+        // Та же природа, что у versions в getNotifications.
+        $raw = $request->input('org_key');
+        $key = is_scalar($raw) ? (string) $raw : '';
+
+        return match ($request->action) {
+            'check_org_key' => Response::ok(['data' => $this->orgLogin->checkKey($key)]),
+            'get_org_users' => Response::ok(['data' => $this->orgLogin->listUsers($key)]),
+            default => null,
         };
     }
 
@@ -758,6 +802,9 @@ final class ApiController
             ErrorCode::Closed       => 'ticket_already_closed',
             ErrorCode::Forbidden    => 'no_rights',
             ErrorCode::MissingToken => 'auth_error',
+            // Org-key отдаёт явный reason и сюда не попадает. Ветка нужна
+            // для лимита в sync-пути (P3): без неё 429 стал бы unknown_error.
+            ErrorCode::RateLimited  => 'rate_limited',
             default                 => 'unknown_error'
         };
     }
