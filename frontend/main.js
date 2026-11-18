@@ -273,6 +273,7 @@ window.addEventListener("beforeunload", (e) => {
   if (navigator.onLine || !authStore.hasAccess()) return;
   if (!window.__hasPendingOutbox) return;
   e.preventDefault();
+   // Фолбэк для Safari (свойство устарело, но Safari без него не показывает окно)
   e.returnValue = "";
   return "";
 });

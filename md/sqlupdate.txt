@@ -686,3 +686,7 @@ CREATE TABLE `lift_metadata` (
 
 ALTER TABLE lift_city
   ADD COLUMN city_type VARCHAR(10) NOT NULL DEFAULT 'г' AFTER city_name;
+
+  INSERT INTO `lift_options` (`option_name`, `option_value`) 
+VALUES ('org_key', 'LIFT-XXXX-XXXX') 
+ON DUPLICATE KEY UPDATE `option_value` = VALUES(`option_value`);
