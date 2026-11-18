@@ -690,3 +690,17 @@ ALTER TABLE lift_city
   INSERT INTO `lift_options` (`option_name`, `option_value`) 
 VALUES ('org_key', 'LIFT-XXXX-XXXX') 
 ON DUPLICATE KEY UPDATE `option_value` = VALUES(`option_value`);
+
+INSERT INTO lift_options (option_name, option_value, name, comment, change_allowed, type)
+SELECT
+    'org_key',
+    '',
+    'Ключ организации',
+    'Ключ для быстрого входа диспетчера. Пусто = функция выключена. Формат XXXX-XXXX-XXXX, алфавит без 0/O и 1/I. Сравнение без учёта регистра и разделителей.',
+    1,
+    'text'
+FROM DUAL
+WHERE NOT EXISTS (
+    SELECT 1 FROM lift_options WHERE option_name = 'org_key'
+);
+ALTER TABLE lift_options ADD UNIQUE KEY uq_option_name (option_name);
