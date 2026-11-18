@@ -107,32 +107,62 @@ export class LoginController {
       }
     };
 
+        // Список быстрого входа — после привязки onsubmit.
     // Список быстрого входа — после привязки onsubmit.
     const orgKey = localStorage.getItem("org_key");
     if (orgKey && datalist && navigator.onLine) {
       try {
         const resp = await this.api.post(
           { data: "get_org_users", org_key: orgKey },
-          null,
-          "silent",
+          null,      // silent: статус-бар не трогаем
+          "login",   // тег: unmount() отменяет именно "login"
         );
         if (isStale()) return;
-        if (resp && resp.status === "ok" && Array.isArray(resp.users)) {
-          const liveList = document.getElementById("orgUsersList");
-          if (!liveList) return;
-          liveList.innerHTML = "";
-          for (const u of resp.users) {
-            const option = document.createElement("option");
-            option.value = u.name;
-            option.dataset.id = String(u.user_id);
-            liveList.appendChild(option);
+
+        if (resp && resp.status === "ok") {
+          const payload = resp.data || resp;
+          const usersList = payload.users;
+          if (Array.isArray(usersList)) {
+            const liveList = document.getElementById("orgUsersList");
+            if (!liveList) return;
+            liveList.innerHTML = "";
+
+            // Одинаковые ФИО неразличимы в datalist: find() по value
+            // вернёт первого, и вход уйдёт под чужим id — «неверный
+            // пароль» на верном пароле. Помечаем дубли номером;
+            // id уже отдан сервером, ничего нового не раскрываем.
+            const counts = new Map();
+            for (const u of usersList) {
+              const n = String(u.name ?? "");
+              counts.set(n, (counts.get(n) ?? 0) + 1);
+            }
+
+            for (const u of usersList) {
+              const n = String(u.name ?? "");
+              const option = document.createElement("option");
+              option.value = counts.get(n) > 1 ? `${n} (№${u.id})` : n;
+              option.dataset.id = String(u.id);
+              liveList.appendChild(option);
+            }
+          }
+        } else {
+          // Конверт ошибки бывает вложенным (api-service читает
+          // data.code || data.error?.code). Без всех трёх путей
+          // очистка ключа не сработает и список останется пустым
+          // без объяснения.
+          const reason =
+            resp?.reason ?? resp?.error?.reason ?? resp?.details?.reason ?? "";
+
+          if (reason === "invalid_org_key" || reason === "org_key_disabled") {
+            console.warn("[LoginController] Ключ организации недействителен:", reason);
+            localStorage.removeItem("org_key");
+            notify.info?.(
+              "Ссылка для быстрого входа устарела. Введите логин и пароль вручную.",
+            );
           }
         }
       } catch (e) {
-        console.warn(
-          "[LoginController] Не удалось загрузить список пользователей",
-          e,
-        );
+        console.warn("[LoginController] Сбой сети при загрузке списка:", e);
       }
     }
   }
