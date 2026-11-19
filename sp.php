@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 define('APP_ENTRY_POINT', true);
@@ -31,6 +32,11 @@ use App\Exceptions\ApiException;
  * Адресный путь сопоставляет по *_key и пишет ЧИСТЫЕ имена: маркер дома
  * и тип улицы в названии не хранятся, тип улицы живёт в street_type.
  * Маркеры добавляет только Address::format, ровно один раз, на выводе.
+ *
+ * ИНВАРИАНТ ЗАКРЫВАЕТСЯ В ОДНОЙ ТОЧКЕ — spult_finish(). Рассылка и
+ * уборка спула не имеют права impedir ответ: раньше сбой любого канала
+ * выходил в наружный catch, тот вызывал spult_finish повторно, и второй
+ * throw становился необработанным фаталом (HTTP 500 при живом сигнале).
  */
 
 // ---------------------------------------------------------------------------
@@ -58,6 +64,7 @@ function spult_spool_root(): string
         error_log('SPult SPOOL WARNING: root unavailable, web-root fallback: ' . $fallback);
         return $fallback;
     }
+
     return '';
 }
 
@@ -80,10 +87,12 @@ function spult_store(string $xml): ?string
     }
 
     $path = $dir . '/' . date('Ymd_His') . '_' . uniqid() . '_' . mt_rand(1000, 9999) . '.xml';
+
     if (@file_put_contents($path, $xml) === false) {
         error_log('SPult SPOOL CRITICAL: write failed, raw_b64=' . base64_encode($xml));
         return null;
     }
+
     return $path;
 }
 
@@ -104,6 +113,7 @@ function spult_settle(?string $file, string $bucket, string $reason, array $meta
     }
 
     $target = $dir . '/' . basename($file);
+
     if (!@rename($file, $target)) {
         error_log('SPult SPOOL WARNING: move failed ' . $file . ' -> ' . $bucket);
         return null;
@@ -122,11 +132,24 @@ function spult_settle(?string $file, string $bucket, string $reason, array $meta
     return $bucket . '/' . basename($file);
 }
 
-/** Единственная точка ответа пульту. Тело тоже с OK: «Error:» выглядело бы отказом. */
+/**
+ * Единственная точка ответа пульту. Тело тоже с OK: «Error:» выглядело бы отказом.
+ *
+ * Заголовки под try: если вывод уже начался (пробел/BOM в подключаемом
+ * файле, echo из зависимости), header() даёт warning, а set_error_handler
+ * превращает его в ErrorException. Фатал ЗДЕСЬ означал бы 500 на уже
+ * обработанном сигнале — то есть потерю сигнала из-за оформления ответа.
+ * Тело важнее заголовка.
+ */
 function spult_ok(string $text): never
 {
-    http_response_code(200);
-    header('Content-Type: text/plain; charset=utf-8');
+    try {
+        http_response_code(200);
+        header('Content-Type: text/plain; charset=utf-8');
+    } catch (\Throwable $e) {
+        error_log('SPult OUTPUT: headers failed — ' . $e->getMessage());
+    }
+
     echo $text;
     exit;
 }
@@ -139,8 +162,10 @@ function spult_ok(string $text): never
 function spult_norm(string $s): string
 {
     $s = trim($s);
+
     // /u на битой кодировке вернёт null — оставляем исходную строку.
     $s = preg_replace('/\s+/u', ' ', $s) ?? $s;
+
     return mb_strtolower($s, 'UTF-8');
 }
 
@@ -152,7 +177,7 @@ function spult_norm(string $s): string
  * отправила бы весь поток второго пульта в карантин.
  *
  * Каждый элемент проходит тот же normalizeGuid, что и пришедший из XML:
- * сравнение сырых строк ломалось бы на регистре, скобках и дефисах.
+ * сравнение сырых строк ломалось бы на регистре и дефисах.
  * Разделители — запятая, точка с запятой, пробел/перенос: поле заполняет
  * админ руками, опечатка в разделителе не должна терять сигналы.
  *
@@ -172,11 +197,15 @@ function spult_pult_list(?string $raw): array
         if ($item === '') {
             continue;
         }
+
         $n = CallRepository::normalizeGuid($item);
         if ($n === null) {
-            $invalid[] = mb_substr($item, 0, 64);
+            // Кодировка явно: обрезка для лога не должна зависеть
+            // от default_charset хостера.
+            $invalid[] = mb_substr($item, 0, 64, 'UTF-8');
             continue;
         }
+
         if (!in_array($n, $valid, true)) {
             $valid[] = $n;
         }
@@ -196,13 +225,23 @@ function spult_mail_event(string $kind): string
 
 /**
  * Разослать накопленные расхождения по трём каналам.
- * Каждый канал изолирован: сбой одного не отменяет остальные и не роняет приём.
+ *
+ * КАЖДЫЙ канал изолирован, включая решение «слать ли письмо».
+ * Раньше без try стояли events->record() и AdminAlert::notify():
+ * любой их throw выходил из spult_finish в наружный catch(Throwable),
+ * тот вызывал spult_finish ПОВТОРНО, тот же канал бросал снова —
+ * необработанный фатал и HTTP 500. Пульт не ретраит: расхождение
+ * в диагностике стоило самого сигнала, часто уже созданного.
+ *
+ * Изоляция notify поверх его собственного try осознанна: сервис может
+ * быть выкачен более старой версии без своей защиты, а инвариант
+ * приёма сигнала не должен зависеть от версии соседнего файла.
  */
 function spult_flush(array $st): void
 {
     foreach ($st['diag'] as $d) {
-        $kind = (string) $d['kind'];
-        $msg  = (string) $d['message'];
+        $kind = (string) ($d['kind'] ?? '');
+        $msg  = (string) ($d['message'] ?? '');
 
         // История заявки — только когда заявка есть и расхождение того требует.
         if (!empty($d['history']) && $st['ticket'] !== null && $st['history'] !== null) {
@@ -213,45 +252,76 @@ function spult_flush(array $st): void
             }
         }
 
+        // Журнал событий — долговременный канал разбора (30 дней).
         if ($st['events'] !== null) {
-            $st['events']->record(
-                $kind,
-                message:    $msg,
-                liftId:     $st['lift_id'],
-                ticketId:   $st['ticket'],
-                guid:       $st['guid'],
-                spultId:    $st['spult_id'],
-                xmlAddress: $st['xml_addr'],
-                dbAddress:  $st['db_addr'],
-                spoolFile:  $st['spool_rel'],
-                meta:       $st['meta']
-            );
+            try {
+                $st['events']->record(
+                    $kind,
+                    message:    $msg,
+                    liftId:     $st['lift_id'],
+                    ticketId:   $st['ticket'],
+                    guid:       $st['guid'],
+                    spultId:    $st['spult_id'],
+                    xmlAddress: $st['xml_addr'],
+                    dbAddress:  $st['db_addr'],
+                    spoolFile:  $st['spool_rel'],
+                    meta:       $st['meta']
+                );
+            } catch (\Throwable $e) {
+                error_log('SPult EVENTS failed: ' . $e->getMessage());
+            }
         }
 
-        if (SpultEventRepository::shouldAlertAdmin($kind)) {
-            AdminAlert::notify(
-                spult_mail_event($kind),
-                $msg,
-                ['reason' => $kind, 'address' => $st['xml_addr'], 'ticket_id' => $st['ticket']] + $st['meta'],
-                $st['db'],
-                $st['tenant']
-            );
+        // Решение и отправка под одним try: shouldAlertAdmin — тоже
+        // внешний код, его отказ не должен отменять ленту ниже.
+        try {
+            if (SpultEventRepository::shouldAlertAdmin($kind)) {
+                AdminAlert::notify(
+                    spult_mail_event($kind),
+                    $msg,
+                    ['reason' => $kind, 'address' => $st['xml_addr'], 'ticket_id' => $st['ticket']] + $st['meta'],
+                    $st['db'],
+                    $st['tenant']
+                );
+            }
+        } catch (\Throwable $e) {
+            error_log('SPult ALERT failed: ' . $e->getMessage());
         }
 
         if ($st['notify'] !== null) {
-            $st['notify']->spultError($kind, $msg, $st['ticket']);
+            try {
+                $st['notify']->spultError($kind, $msg, $st['ticket']);
+            } catch (\Throwable $e) {
+                error_log('SPult NOTIFY failed: ' . $e->getMessage());
+            }
         }
     }
 }
 
-/** Завершить приём: разослать диагностику, разложить спул, ответить 200. */
+/**
+ * Завершить приём: разложить спул, разослать диагностику, ответить 200.
+ *
+ * Уборка и рассылка под try — инвариант важнее их результата. Сигнал
+ * уже на диске (spult_store выполняется первым действием), поэтому
+ * сбой здесь деградирует до ответа без диагностики, а не до 500.
+ * Ответ выносится ЗА try: он обязан состояться при любом исходе.
+ */
 function spult_finish(array $st, string $bucket, string $okText, ?string $kind = null, string $message = ''): never
 {
     if ($kind !== null) {
         $st['diag'][] = ['kind' => $kind, 'message' => $message, 'history' => false];
     }
-    $st['spool_rel'] = spult_settle($st['spool'], $bucket, $kind ?? '', $st['meta']);
-    spult_flush($st);
+
+    try {
+        $st['spool_rel'] = spult_settle($st['spool'], $bucket, $kind ?? '', $st['meta']);
+        spult_flush($st);
+    } catch (\Throwable $e) {
+        // spool_rel останется null: событие запишется без пути к файлу,
+        // но файл в incoming/ и recoverable. Логируем с местом — иначе
+        // причину потери диагностики не найти.
+        error_log('SPult FINISH failed: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
+    }
+
     spult_ok($okText);
 }
 
@@ -317,7 +387,11 @@ try {
     }
 
     libxml_use_internal_errors(true);
-    $xml = simplexml_load_string($xmlRaw);
+
+    // LIBXML_NONET: эндпоинт публичный, без авторизации. Подстановка
+    // сущностей в PHP 8 и так выключена по умолчанию, флаг закрывает
+    // сетевой вектор окончательно. На корректный XML не влияет.
+    $xml = simplexml_load_string($xmlRaw, SimpleXMLElement::class, LIBXML_NONET);
     if ($xml === false) {
         $errors = [];
         foreach (libxml_get_errors() as $error) {
@@ -343,7 +417,7 @@ try {
     $parameters = [];
     foreach ($db->fetchAll(
         "SELECT option_name, option_value FROM lift_options
-                  WHERE option_name IN ('city_default','city_separator','spult_organization_name','XML_add',
+         WHERE option_name IN ('city_default','city_separator','spult_organization_name','XML_add',
                                'spult_pult_guid','spult_verify_pult_guid')"
     ) as $p) {
         $parameters[$p['option_name']] = $p['option_value'];
@@ -356,24 +430,26 @@ try {
     // но проверять нечем → skip + лог, а не молчаливый отказ потока.
     $orgExpected = trim((string) ($parameters['spult_organization_name'] ?? ''));
     $pultName = trim((string) $xml['Name']);
+
     if ($orgExpected === '') {
         error_log('SPult ORG: spult_organization_name empty, check skipped');
     } elseif ($pultName !== $orgExpected) {
         // Не 403: при опечатке в настройке пульт получил бы отказ на каждый сигнал.
         $st['meta']['got'] = $pultName;
-                $st['meta']['expected'] = $orgExpected;
+        $st['meta']['expected'] = $orgExpected;
         spult_finish(
             $st, 'quarantine', 'OK: accepted', 'org_mismatch',
             'Сигнал отклонён: имя организации не совпало с настройкой («' . $pultName . '»)'
         );
     }
 
-       // --- Опциональная проверка GUID пульта: перебор по списку ---
+    // --- Опциональная проверка GUID пульта: перебор по списку ---
     // Флаг — решение тенанта, а не общее для всех. Канон значения '1',
     // как у XML_add. Нераспознанное значение логируем: молча выключенная
     // проверка безопасности хуже опечатки, о которой никто не знает.
     $verifyRaw  = trim((string) ($parameters['spult_verify_pult_guid'] ?? ''));
     $verifyPult = $verifyRaw === '1';
+
     if (!$verifyPult && $verifyRaw !== '' && $verifyRaw !== '0') {
         error_log('SPult PULT GUID: значение spult_verify_pult_guid="' . $verifyRaw
             . '" не распознано, проверка ВЫКЛЮЧЕНА (ожидается 1 или 0)');
@@ -381,6 +457,7 @@ try {
 
     if ($verifyPult) {
         $pultList = spult_pult_list($parameters['spult_pult_guid'] ?? null);
+
         if ($pultList['invalid'] !== []) {
             // Список стал короче из-за опечатки. Поток не карантиним,
             // но пишем: иначе админ узнает об опечатке по пропущенному сигналу.
@@ -394,8 +471,11 @@ try {
         } else {
             $actualPult = CallRepository::normalizeGuid((string) ($xml['GUID'] ?? ''));
 
-            // Оба конца приведены одним normalizeGuid, поэтому регистр
-            // и формат записи (скобки, дефисы) на результат не влияют.
+            // Оба конца приведены одним normalizeGuid: регистр, дефисы
+            // и пробелы на результат не влияют. СКОБКИ НЕ нормализуются —
+            // запись {GUID} придёт невалидной и уйдёт в адресный путь.
+            // Владелец формата — CallRepository::normalizeGuid, править
+            // обход здесь нельзя: появится второй словарь формата.
             if ($actualPult === null || !in_array($actualPult, $pultList['valid'], true)) {
                 $st['meta']['pult_guid_got'] = (string) ($xml['GUID'] ?? '');
                 $st['meta']['pult_guid_expected'] = $pultList['valid'];
@@ -405,6 +485,21 @@ try {
                 );
             }
         }
+    }
+
+    // --- Структура сигнала ---
+    // DISP → STREET → HOME → LIFT обязательны. Без узла обращение к
+    // свойствам null даёт Warning → ErrorException, и сигнал уезжал в
+    // failed/ как «системный сбой» с письмом админу — при том что вина
+    // в данных пульта, а не в сервере. Проверка стоит ПОСЛЕ инициализации
+    // репозиториев: иначе карантин не породит ни события, ни уведомления
+    // (как это до сих пор происходит с bad_xml выше).
+    if (!isset($xml->DISP->STREET->HOME->LIFT)) {
+        $st['meta']['structure'] = 'DISP/STREET/HOME/LIFT missing';
+        spult_finish(
+            $st, 'quarantine', 'OK: accepted', 'bad_xml',
+            'Сигнал не обработан: в XML нет узла DISP/STREET/HOME/LIFT'
+        );
     }
 
     // --- Данные сигнала ---
@@ -418,6 +513,11 @@ try {
 
     $st['spult_id'] = $spultId;
 
+    // Оператор пульта нужен ветке дубликата: там meta['user'] читается,
+    // но нигде не заполнялся — в заметке всегда стояло «Дубликат»
+    // вместо фамилии, и понять, кто повторно нажал кнопку, было нечем.
+    $st['meta']['user'] = $userSpult;
+
     $statuses = [];
     if (isset($liftNode->ListStatus->Status)) {
         foreach ($liftNode->ListStatus->Status as $status) {
@@ -429,14 +529,16 @@ try {
     $guidRaw = (string) ($liftNode['GUID'] ?? '');
     $guid = CallRepository::normalizeGuid($guidRaw);
     $st['guid'] = $guid;
+
     if ($guid === null && trim($guidRaw) !== '') {
         error_log('SPult GUID: invalid format "' . $guidRaw . '", address path in use');
-        $st['meta']['guid_raw'] = mb_substr($guidRaw, 0, 64);
+        $st['meta']['guid_raw'] = mb_substr($guidRaw, 0, 64, 'UTF-8');
     }
 
     // --- Город/улица из XML: нужны для адреса и для сравнения ---
     $city   = $parameters['city_default'] ?? 'г. Ростов-на-Дону';
     $street = $streetRaw;
+
     $pos = strpos($streetRaw, \App\Support\OptionGuard::separator($parameters['city_separator'] ?? null));
     if ($pos !== false) {
         $city   = trim(substr($streetRaw, $pos + 1));
@@ -497,10 +599,12 @@ try {
         $cityName   = $cityParsed['name'];
         $cityType   = $cityParsed['type'] ?? '';
         $cityKey    = Address::plainKey($cityName);
+
         $cityRow = $db->fetchOne(
             "SELECT id FROM lift_city WHERE city_key = ? LIMIT 1",
             [$cityKey]
         );
+
         if (!$cityRow && $allowAdd) {
             $db->execute(
                 "INSERT INTO lift_city (city_name, city_type, city_key, vis) VALUES (?, ?, ?, 1)",
@@ -509,12 +613,14 @@ try {
             $cityRow = $db->fetchOne("SELECT id FROM lift_city WHERE city_key = ? LIMIT 1", [$cityKey]);
             $addressChanged = true;
         }
+
         $cityId = (int) ($cityRow['id'] ?? 0);
 
         // УЛИЦА. Тип вынесен в street_type и ВХОДИТ в ключ: «Ленина ул.»
         // и «Ленина пр-кт» — разные улицы одного города.
         $streetParsed = Address::parseStreet($street);
         $streetKey    = Address::streetKey($street);
+
         if ($streetParsed['type'] === null && $street !== '') {
             // Не угадываем: тип остался в названии. Логируем, чтобы словарь
             // пополнялся по факту приходящих данных, а не по догадкам.
@@ -525,6 +631,7 @@ try {
             "SELECT id FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
             [$cityId, $streetKey]
         ) : null;
+
         if (!$streetRow && $cityId && $allowAdd) {
             // Чистое имя + тип + ключ. Сырое значение больше не пишем:
             // иначе справочник сам плодит «ул. Ленина» рядом с «Ленина».
@@ -540,15 +647,18 @@ try {
             $newStreetId = (int) ($streetRow['id'] ?? 0);
             $addressChanged = true;
         }
+
         $streetId = (int) ($streetRow['id'] ?? 0);
 
         // ДОМ. Ведущий маркер снят, корпус/строение/дробь/литера сохранены.
         $homeParsed = Address::parseHome($homeRaw);
         $homeKey    = Address::homeKey($homeRaw);
+
         $homeRow = $streetId ? $db->fetchOne(
             "SELECT id FROM lift_home WHERE street_id = ? AND home_key = ? LIMIT 1",
             [$streetId, $homeKey]
         ) : null;
+
         if (!$homeRow && $streetId && $allowAdd) {
             $db->execute(
                 "INSERT INTO lift_home (home_name, home_key, street_id, vis) VALUES (?, ?, ?, 1)",
@@ -561,15 +671,18 @@ try {
             $newHomeId = (int) ($homeRow['id'] ?? 0);
             $addressChanged = true;
         }
+
         $homeId = (int) ($homeRow['id'] ?? 0);
 
         // ЛИФТ. Названия лифта не нормализуем по типам: «п.1 пасс.» —
         // целиком идентичность, терять символы нельзя.
         $liftKey = Address::plainKey($liftName);
+
         $liftRow = $homeId ? $db->fetchOne(
             "SELECT id FROM lift_object WHERE home_id = ? AND object_key = ? LIMIT 1",
             [$homeId, $liftKey]
         ) : null;
+
         if (!$liftRow && $homeId && $allowAdd) {
             // GUID и spult_id — сразу в INSERT, не отдельным UPDATE: иначе
             // между операциями второй сигнал не найдёт GUID и создаст дубль.
@@ -603,6 +716,7 @@ try {
                         $newHomeId = 0;
                     }
                 }
+
                 if ($newStreetId > 0) {
                     $used = $db->fetchOne("SELECT id FROM lift_home WHERE street_id = ? LIMIT 1", [$newStreetId]);
                     if (!$used) {
@@ -613,6 +727,7 @@ try {
                 }
             }
         }
+
         $liftId = (int) ($liftRow['id'] ?? 0);
 
         // Гонка при создании: GUID занят — берём владельца.
@@ -633,6 +748,7 @@ try {
             // Привязка GUID: только если поле пустое.
             if ($guid !== null) {
                 $bind = $callRepo->bindSpultGuid($liftId, $guid, $spultId);
+
                 if ($bind['status'] === 'conflict') {
                     $st['diag'][] = [
                         'kind'    => 'guid_conflict',
@@ -742,9 +858,10 @@ try {
     $classification = SpultClassifier::classify($note);
 
     // --- Описание: фильтр статусов + обязательный префикс ---
-    $exclude = array_map('spult_norm', (array) $cfg['status_exclude']);
+    $exclude = array_map('spult_norm', (array) ($cfg['status_exclude'] ?? []));
     $kept = [];
     $dropped = [];
+
     foreach ($statuses as $s) {
         $s = trim($s);
         if ($s === '') {
@@ -758,13 +875,19 @@ try {
     }
 
     $body = $kept !== [] ? implode(', ', $kept) : trim($note);
-    $prefix = trim((string) $cfg['description_prefix']);
+    $prefix = trim((string) ($cfg['description_prefix'] ?? ''));
     if ($prefix === '') {
         $prefix = 'Создана из SPult';   // страховка от пустого описания
     }
+
     $description = $body !== '' ? $prefix . '. ' . $body : $prefix;
 
     if ($dropped !== []) {
+        // ТЕХДОЛГ (решение отложено, поведение не меняем): info_status —
+        // штатная работа фильтра, а не расхождение, но уходит в ленту как
+        // spult_error с timeout 0 и висит до ручного закрытия. Гасить надо
+        // в словаре kinds / агрегации NotificationsService, а не здесь:
+        // история заявки обязана сохранить отфильтрованные статусы.
         $st['diag'][] = [
             'kind'    => 'info_status',
             'message' => 'Информационные статусы пульта (не включены в описание): ' . implode(', ', $dropped),
@@ -823,7 +946,6 @@ try {
         $st, 'processed',
         'OK: ' . ($result['message'] ?? 'Created') . ($st['ticket'] ? ' #' . $st['ticket'] : '')
     );
-
 } catch (ApiException $e) {
     $reason  = $e->reason ?? '';
     $message = $e->getMessage();
@@ -842,6 +964,7 @@ try {
         }
 
         $existingId = (int) ($duplicates[0]['ticket_id'] ?? 0);
+
         if ($existingId > 0 && $st['db'] !== null) {
             try {
                 $noteText = sprintf(
@@ -851,8 +974,10 @@ try {
                     implode(', ', (array) ($st['meta']['statuses'] ?? [])),
                     $st['xml_addr']
                 );
+
                 (new NoteRepository($st['db']))->add($existingId, 0, $noteText);
                 error_log('SPult DUPLICATE: note added to ticket #' . $existingId);
+
                 $st['ticket'] = $existingId;
                 spult_finish($st, 'processed', 'OK: Updated existing ticket #' . $existingId);
             } catch (\Throwable $noteError) {
@@ -889,12 +1014,12 @@ try {
         'Сигнал не обработан (' . ($reason !== '' ? $reason : 'api_error') . '): ' . $message
         . '. Адрес: ' . $st['xml_addr']
     );
-
 } catch (Throwable $e) {
     // Системный сбой: БД, тенант, фатал. Вина сервера → failed/.
     error_log('SPult FAILED: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
     $st['meta']['exception'] = $e->getMessage();
     $st['meta']['at'] = $e->getFile() . ':' . $e->getLine();
+
     spult_finish(
         $st, 'failed', 'OK: accepted', 'fatal',
         'Системный сбой приёма сигнала: ' . $e->getMessage() . '. Адрес: ' . $st['xml_addr']
