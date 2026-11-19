@@ -1,8 +1,11 @@
 <?php
+
 declare(strict_types=1);
+
 namespace Company\Admin\Support;
 
 use App\Database\DB;
+use App\Support\Logger;
 use App\Tenant;
 use Company\Admin\Repositories\Contracts\UserRepositoryInterface;
 use Company\Admin\Repositories\Db\DbUserRepository;
@@ -16,17 +19,29 @@ final class Bootstrap
         // Явный charset: default_charset задаёт ini хостера, а не мы.
         header('Content-Type: text/html; charset=utf-8');
 
-        self::startSession();
-
         try {
             $tenant = Tenant::fromRequest();
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            // Класс исключения в логе обязателен: без него «тенант не найден»
+            // и «упала БД реестра» неразличимы. Разделение 404/500 сделаем,
+            // когда класс будет известен по факту, а не по догадке.
+            Logger::error('CompanyAdmin: tenant resolve failed', [
+                'class' => $e::class,
+                'msg'   => $e->getMessage(),
+                'at'    => $e->getFile() . ':' . $e->getLine(),
+                'host'  => (string) ($_SERVER['HTTP_HOST'] ?? ''),
+            ]);
             http_response_code(404);
-            echo 'Not Found';
+            echo 'Tenant not resolved';
             return;
         }
 
         try {
+            // Сессия внутри обёртки: session_start умеет Warn'ить
+            // (активная сессия, недоступный save_path), а bootstrap
+            // превращает Warning в ErrorException.
+            self::startSession();
+
             $db = DB::forTenant($tenant);
             $container = self::buildContainer($db);
 
@@ -51,11 +66,15 @@ final class Bootstrap
             $routes = require __DIR__ . '/../Config/routes.php';
             (new Router($routes, $container))->dispatch($page, $action);
         } catch (\Throwable $e) {
-            // Стек наружу не отдаём: display_errors задаёт хостер, а
-            // bootstrap превращает Warning в ErrorException — без обёртки
-            // сбой БД показал бы пользователю пути и конфиг.
-            error_log('CompanyAdmin FAIL: ' . $e->getMessage()
-                . ' at ' . $e->getFile() . ':' . $e->getLine());
+            // Стек наружу не отдаём: display_errors задаёт хостер.
+            // Если вывод уже начался, код 500 не выставится — ограничение
+            // любой такой обёртки, здесь не лечится.
+            Logger::error('CompanyAdmin: request failed', [
+                'class' => $e::class,
+                'msg'   => $e->getMessage(),
+                'at'    => $e->getFile() . ':' . $e->getLine(),
+                'page'  => (string) ($_GET['page'] ?? ''),
+            ]);
             http_response_code(500);
             echo 'Сервис временно недоступен';
         }
@@ -63,8 +82,22 @@ final class Bootstrap
 
     private static function startSession(): void
     {
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            // Изоляция не удалась: имя LIFTCS_ADMIN ставится только
+            // до старта сессии. Кто-то открыл её раньше — это дефект.
+            Logger::error('CompanyAdmin: session already active', [
+                'name' => session_name(),
+            ]);
+            return;
+        }
+
         $secure = ($_SERVER['HTTPS'] ?? '') !== ''
             || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+
+        // Строгий режим: отказ от неинициализированных ID (фиксация).
+        ini_set('session.use_strict_mode', '1');
+        // Cookie живёт 8 часов — gc должен жить столько же.
+        ini_set('session.gc_maxlifetime', '28800');
 
         session_name('LIFTCS_ADMIN');
         session_set_cookie_params([
@@ -80,12 +113,18 @@ final class Bootstrap
     private static function buildContainer(DB $db): Container
     {
         $c = new Container();
-        $c->bind(DbUserRepository::class,       static fn() => new DbUserRepository($db));
-        $c->bind(UserRepositoryInterface::class, static fn(Container $c) => $c->get(DbUserRepository::class));
-        $c->bind(AuditService::class,            static fn() => new AuditService($db));
-        $c->bind(SessionAuth::class,             static fn(Container $c) =>
-            new SessionAuth($c->get(UserRepositoryInterface::class)));
-        $c->bind(View::class,                    static fn() => new View());
+        $c->bind(DbUserRepository::class, static fn() => new DbUserRepository($db));
+        $c->bind(
+            UserRepositoryInterface::class,
+            static fn(Container $c) => $c->get(DbUserRepository::class)
+        );
+        $c->bind(AuditService::class, static fn() => new AuditService($db));
+        $c->bind(
+            SessionAuth::class,
+            static fn(Container $c) => new SessionAuth($c->get(UserRepositoryInterface::class))
+        );
+        $c->bind(View::class, static fn() => new View());
+
         return $c;
     }
 }
