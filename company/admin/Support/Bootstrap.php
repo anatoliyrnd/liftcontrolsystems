@@ -22,9 +22,10 @@ final class Bootstrap
         try {
             $tenant = Tenant::fromRequest();
         } catch (\Throwable $e) {
-            // Класс исключения в логе обязателен: без него «тенант не найден»
-            // и «упала БД реестра» неразличимы. Разделение 404/500 сделаем,
-            // когда класс будет известен по факту, а не по догадке.
+            // Класс в логе обязателен: Tenant бросает ApiException в четырёх
+            // местах, и без класса «хост не зарегистрирован» не отличить
+            // от «упала БД реестра». Разделение 404/500 — после того,
+            // как будет известен FQCN ApiException.
             Logger::error('CompanyAdmin: tenant resolve failed', [
                 'class' => $e::class,
                 'msg'   => $e->getMessage(),
@@ -66,9 +67,8 @@ final class Bootstrap
             $routes = require __DIR__ . '/../Config/routes.php';
             (new Router($routes, $container))->dispatch($page, $action);
         } catch (\Throwable $e) {
-            // Стек наружу не отдаём: display_errors задаёт хостер.
-            // Если вывод уже начался, код 500 не выставится — ограничение
-            // любой такой обёртки, здесь не лечится.
+            // Стек наружу не отдаём. Если вывод уже начался, код 500
+            // не выставится — ограничение любой обёртки, здесь не лечится.
             Logger::error('CompanyAdmin: request failed', [
                 'class' => $e::class,
                 'msg'   => $e->getMessage(),
@@ -83,8 +83,8 @@ final class Bootstrap
     private static function startSession(): void
     {
         if (session_status() === PHP_SESSION_ACTIVE) {
-            // Изоляция не удалась: имя LIFTCS_ADMIN ставится только
-            // до старта сессии. Кто-то открыл её раньше — это дефект.
+            // Изоляция не удалась: имя ставится только до старта.
+            // Кто-то открыл сессию раньше — это дефект, он должен быть виден.
             Logger::error('CompanyAdmin: session already active', [
                 'name' => session_name(),
             ]);
@@ -94,9 +94,10 @@ final class Bootstrap
         $secure = ($_SERVER['HTTPS'] ?? '') !== ''
             || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
 
-        // Строгий режим: отказ от неинициализированных ID (фиксация).
+        // Отказ от неинициализированных ID: иначе сервер примет навязанный SID.
         ini_set('session.use_strict_mode', '1');
-        // Cookie живёт 8 часов — gc должен жить столько же.
+        // Cookie живёт 8 часов — данные сессии должны жить столько же,
+        // иначе дефолтный gc 1440 с выкинет админа через 24 минуты.
         ini_set('session.gc_maxlifetime', '28800');
 
         session_name('LIFTCS_ADMIN');
