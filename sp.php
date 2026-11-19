@@ -437,7 +437,7 @@ try {
     // --- Город/улица из XML: нужны для адреса и для сравнения ---
     $city   = $parameters['city_default'] ?? 'г. Ростов-на-Дону';
     $street = $streetRaw;
-    $pos = strpos($streetRaw, $parameters['city_separator'] ?? '#');
+    $pos = strpos($streetRaw, \App\Support\OptionGuard::separator($parameters['city_separator'] ?? null));
     if ($pos !== false) {
         $city   = trim(substr($streetRaw, $pos + 1));
         $street = trim(substr($streetRaw, 0, $pos));
