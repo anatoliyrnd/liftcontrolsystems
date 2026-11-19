@@ -490,15 +490,21 @@ try {
         $allowAdd = (($parameters['XML_add'] ?? '0') === '1');
 
         // ГОРОД. Типа у города нет, ключ — регистр/пробелы/точки.
-        $cityKey = Address::plainKey($city);
+        // Тип н.п. — данные, имя — без маркера. Ключ из чистого имени:
+        // иначе city_default с «г.» даёт ключ, которого нет в справочнике,
+        // и INSERT создаёт второй Ростов на каждом сигнале.
+        $cityParsed = Address::parseCity($city);
+        $cityName   = $cityParsed['name'];
+        $cityType   = $cityParsed['type'] ?? '';
+        $cityKey    = Address::plainKey($cityName);
         $cityRow = $db->fetchOne(
             "SELECT id FROM lift_city WHERE city_key = ? LIMIT 1",
             [$cityKey]
         );
         if (!$cityRow && $allowAdd) {
             $db->execute(
-                "INSERT INTO lift_city (city_name, city_key, vis) VALUES (?, ?, 1)",
-                [Address::plain($city), $cityKey]
+                "INSERT INTO lift_city (city_name, city_type, city_key, vis) VALUES (?, ?, ?, 1)",
+                [$cityName, $cityType, $cityKey]
             );
             $cityRow = $db->fetchOne("SELECT id FROM lift_city WHERE city_key = ? LIMIT 1", [$cityKey]);
             $addressChanged = true;
