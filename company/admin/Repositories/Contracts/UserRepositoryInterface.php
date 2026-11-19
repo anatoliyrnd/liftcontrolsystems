@@ -39,15 +39,11 @@ interface UserRepositoryInterface
      * Вызывается ТОЛЬКО при неверном пароле. Заблокированную учётку не
      * инкрементируем: иначе каждый запрос продлевал бы блокировку — DoS
      * на конкретный логин без единой верной попытки.
-     *
-     * Реализация — UPDATE ... = login_attempts + 1 и чтение обратно. Между
-     * ними возможна гонка: параллельные запросы увидят одно значение и
-     * заблокируют на попытку позже. Для порога 10 несущественно.
      */
     public function registerFailedLogin(int $userId): int;
 
     /**
-     * Блокировка до абсолютной метки. Запись — FROM_UNIXTIME(:ts).
+     * Блокировка входа до абсолютной метки. Запись — FROM_UNIXTIME(:ts).
      *
      * @param int $until Unix-время окончания блокировки
      */
@@ -64,8 +60,58 @@ interface UserRepositoryInterface
      *
      * В PHP строку DATETIME не разбирать: зона MySQL сейчас SYSTEM, а PHP
      * зафиксирован на Europe/Moscow — strtotime() дал бы скос на 3 часа.
-     * Вызывать только когда locked_until !== null: в обычном потоке это
-     * лишний запрос на пустом месте.
      */
     public function isLocked(int $userId): bool;
+
+    /**
+     * Все пользователи для раздела «Пользователи», сортировка по имени.
+     *
+     * БЕЗ user_password: хэши не должны попадать в HTML списка.
+     * Пагинации нет осознанно — учётных записей десятки, не тысячи.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function list(): array;
+
+    /**
+     * Создание учётной записи, возвращает новый user_id.
+     *
+     * Пароль отдельно от $fields: хэш считает контроллер через Password::hash,
+     * репозиторий только сохраняет. Ключи $fields — имена колонок; ключ вне
+     * белого списка реализации → InvalidArgumentException, а не молчаливый
+     * пропуск (иначе опечатка в контроллере теряется бесследно).
+     *
+     * @param array<string, mixed> $fields
+     */
+    public function create(array $fields, string $passwordHash): int;
+
+    /**
+     * Обновление полей. Пароль НЕ трогаем — для него updatePasswordHash.
+     * Ключ вне белого списка → InvalidArgumentException.
+     *
+     * @param array<string, mixed> $fields
+     */
+    public function update(int $userId, array $fields): void;
+
+    /**
+     * Мягкая блокировка: user_block = 1/0, без удаления записи.
+     *
+     * Установка целевого состояния, а не инверсия: toggle потребовал бы
+     * чтения текущего значения и дал бы гонку при двух администраторах.
+     *
+     * Сброс rate-limit при разблокировке — решение контроллера
+     * (resetLoginState отдельным вызовом), не этого метода.
+     */
+    public function setBlocked(int $userId, bool $blocked): void;
+
+    /**
+     * Занятость логина или email другим пользователем.
+     *
+     * Один запрос вместо двух exists*: WHERE (login = ? OR email = ?)
+     * AND user_id <> $exceptId. Возвращает 'login', 'email' или null —
+     * UI должен сказать, что именно занято, а не «что-то дублируется».
+     *
+     * @param int $exceptId 0 при создании, id записи при редактировании
+     */
+    public function findIdentityConflict(string $login, string $email, int $exceptId = 0): ?string;
 }
