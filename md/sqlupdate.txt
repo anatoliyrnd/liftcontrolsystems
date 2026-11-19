@@ -704,3 +704,19 @@ WHERE NOT EXISTS (
     SELECT 1 FROM lift_options WHERE option_name = 'org_key'
 );
 ALTER TABLE lift_options ADD UNIQUE KEY uq_option_name (option_name);
+
+-- ============================================================================
+-- Миграция 1.5 — ограничение попыток входа в панель компании (Company\Admin)
+-- Дата: 20.11.2026
+-- Основание: AUTH_PROTOCOL §3.2 (модель счётчика), пороги владельца: 10 / 20 мин.
+-- Только ADD COLUMN. Существующие данные не меняются. Идемпотентна.
+-- Запускать на каждой тенантской БД, где включается панель.
+-- ============================================================================
+
+ALTER TABLE `lift_users`
+    ADD COLUMN IF NOT EXISTS `login_attempts` INT UNSIGNED NOT NULL DEFAULT 0
+        COMMENT 'Неудачные проверки пароля подряд. Сброс при успехе и после истечения блокировки'
+        AFTER `user_password`,
+    ADD COLUMN IF NOT EXISTS `locked_until` DATETIME NULL DEFAULT NULL
+        COMMENT 'Вход запрещён до метки; NULL = не заблокирован. Запись FROM_UNIXTIME, сравнение NOW()'
+        AFTER `login_attempts`;
