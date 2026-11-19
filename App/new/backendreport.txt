@@ -1,0 +1,888 @@
+
+## Файл 1 — `app/Support/ReportsQueryBuilder.php` (новый)
+
+**Commit:** `feat(reports): единый конструктор WHERE отчётов с уникальными плейсхолдерами`
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Support;
+
+/**
+ * Единый WHERE для reports_stats / reports_list / reports_export.
+ * Три экшена обязаны работать на идентичной выборке — иначе сводка
+ * и таблица разъезжаются, и пользователь не понимает, чему верить.
+ *
+ * Плейсхолдеры УНИКАЛЬНЫ: PDO::ATTR_EMULATE_PREPARES = false, а в
+ * нативном режиме повтор одного именованного маркера — HY093.
+ * Фильтр по ответственному и область чтения занимают по три слота,
+ * поэтому имена нумерованные (:staff1..3, :scope1..3, :dep0..n).
+ *
+ * LIMIT/OFFSET сюда не входят: в нативном режиме строковая привязка
+ * LIMIT ломается, числа подставляет репозиторий после (int).
+ *
+ * Класс чистый: строка + params, без БД. Область чтения спрашивает
+ * CallScope::readAll — инвариант «видимость в списке = видимость
+ * карточки» сохраняется и для отчётов.
+ */
+final class ReportsQueryBuilder
+{
+    /** JOIN'ы адресной цепочки — только для сортировки по адресу. */
+    public const ADDRESS_JOINS =
+        ' LEFT JOIN lift_city ci ON ci.id = c.address_city' .
+        ' LEFT JOIN lift_street st ON st.id = c.address_street' .
+        ' LEFT JOIN lift_home h ON h.id = c.address_home' .
+        ' LEFT JOIN lift_object o ON o.id = c.address_lift';
+
+    /** Ключ сортировки — чистые имена, паритет с Address::sortKey. */
+    public const ADDRESS_KEY_EXPR =
+        "LOWER(CONCAT_WS(' ', NULLIF(ci.city_name,''), NULLIF(st.street_name,'')," .
+        " NULLIF(h.home_name,''), NULLIF(o.object_name,'')))";
+
+    private array $f;
+    private array $user;
+
+    public function __construct(array $filters, array $user)
+    {
+        $this->f = $filters;
+        $this->user = $user;
+    }
+
+    /** @return array{0:string,1:array<string,mixed>} */
+    public function buildWhere(): array
+    {
+        $w = [];
+        $p = [];
+
+        $closed = ($this->f['date_type'] ?? 'created') === 'closed';
+        $dateCol = $closed ? 'c.call_date2' : 'c.call_date';
+        $w[] = "$dateCol >= :date_from";
+        $p['date_from'] = (int) ($this->f['date_from'] ?? 0);
+        $w[] = "$dateCol <= :date_to";
+        $p['date_to'] = (int) ($this->f['date_to'] ?? 0);
+        if ($closed) {
+            $w[] = 'c.call_status = 1';
+        }
+
+        $status = (string) ($this->f['status'] ?? 'all');
+        if ($status === 'open') {
+            $w[] = 'c.call_status = 0';
+        } elseif ($status === 'close') {
+            $w[] = 'c.call_status = 1';
+        }
+
+        // Отделы: включающий фильтр. Пусто → условия НЕТ вовсе:
+        // новые отделы подтягиваются сами, а «все галочки» ≠ «без фильтра».
+        $deps = array_values(array_unique(array_filter(
+            array_map('intval', (array) ($this->f['department_ids'] ?? [])),
+            static fn (int $i): bool => $i > 0
+        )));
+        if ($deps !== []) {
+            $ph = [];
+            foreach ($deps as $i => $id) {
+                $ph[] = ":dep$i";
+                $p["dep$i"] = $id;
+            }
+            $w[] = 'c.call_department IN (' . implode(', ', $ph) . ')';
+        }
+
+        // Адрес: самый специфичный побеждает; city_only гасит нижние.
+        $cityOnly = (bool) ($this->f['city_only'] ?? false);
+        $objectId = (int) ($this->f['object_id'] ?? 0);
+        $homeId   = (int) ($this->f['home_id'] ?? 0);
+        $streetId = (int) ($this->f['street_id'] ?? 0);
+        $cityId   = (int) ($this->f['city_id'] ?? 0);
+        if ($cityOnly) {
+            if ($cityId > 0) {
+                $w[] = 'c.address_city = :city_id';
+                $p['city_id'] = $cityId;
+            }
+        } elseif ($objectId > 0) {
+            $w[] = 'c.address_lift = :object_id';
+            $p['object_id'] = $objectId;
+        } elseif ($homeId > 0) {
+            $w[] = 'c.address_home = :home_id';
+            $p['home_id'] = $homeId;
+        } elseif ($streetId > 0) {
+            $w[] = 'c.address_street = :street_id';
+            $p['street_id'] = $streetId;
+        } elseif ($cityId > 0) {
+            $w[] = 'c.address_city = :city_id';
+            $p['city_id'] = $cityId;
+        }
+
+        $staffId = (int) ($this->f['staff_id'] ?? 0);
+        if ($staffId > 0) {
+            $w[] = '(c.call_staff = :staff1 OR c.call_staff2 = :staff2 OR c.call_staff3 = :staff3)';
+            $p['staff1'] = $p['staff2'] = $p['staff3'] = $staffId;
+        }
+
+        // Область чтения. Инженеру staff_id не игнорируем молча:
+        // условие пересекается с его областью через AND.
+        if (!CallScope::readAll($this->user)) {
+            $uid = (int) ($this->user['id'] ?? 0);
+            $w[] = '(c.call_staff = :scope1 OR c.call_staff2 = :scope2 OR c.call_staff3 = :scope3)';
+            $p['scope1'] = $p['scope2'] = $p['scope3'] = $uid;
+        }
+
+        // Полнотекст: только при доме/объекте и длине >= 6, иначе молча
+        // игнорируется (защита от коротких запросов и DoS). LIKE-символы
+        // экранируем через '!', чтобы «100%» не стал шаблоном.
+        $textable = !$cityOnly && ($homeId > 0 || $objectId > 0);
+        if ($textable) {
+            foreach (['details_text' => 'c.call_details', 'solution_text' => 'c.call_solution'] as $key => $column) {
+                $text = trim((string) ($this->f[$key] ?? ''));
+                if (mb_strlen($text, 'UTF-8') >= 6) {
+                    $w[] = "$column LIKE :like_$key ESCAPE '!'";
+                    $p["like_$key"] = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $text) . '%';
+                }
+            }
+        }
+
+        return [implode(' AND ', $w), $p];
+    }
+
+    /** Детерминирующий хвост call_id DESC — всегда. */
+    public function sortClause(string $sort, string $dateType): string
+    {
+        if ($sort === 'address') {
+            return "ORDER BY (address_sort_key = '') ASC, address_sort_key ASC, c.call_id DESC";
+        }
+        if ($sort === 'department') {
+            return 'ORDER BY c.call_department ASC, c.call_id DESC';
+        }
+        $col = $dateType === 'closed' ? 'c.call_date2' : 'c.call_date';
+        return "ORDER BY $col DESC, c.call_id DESC";
+    }
+}
+```
+
+---
+
+## Файл 2 — `app/Repository/ReportsRepository.php` (новый)
+
+**Commit:** `feat(reports): репозиторий отчётов — справочники, агрегаты, список, выгрузка`
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Repository;
+
+use App\Database\DB;
+use App\Support\ReportsQueryBuilder;
+
+/**
+ * Чтение отчётов. Только SELECT: отчёты не меняют данные, поэтому
+ * транзакции и идемпотентность здесь не нужны.
+ *
+ * Все JOIN — LEFT и БЕЗ vis: внешних ключей в БД нет, осиротевшие
+ * ссылки штатны, а скрытый позже адрес обязан остаться в истории.
+ * NULL-корзины группировок подписываются явно («Без отдела»): молча
+ * потерять заявки диспетчер принял бы за пропажу.
+ */
+final class ReportsRepository
+{
+    public function __construct(private DB $db)
+    {
+    }
+
+    public function getFiltersData(): array
+    {
+        $departments = $this->db->fetchAll(
+            'SELECT type_id, type_name FROM lift_types WHERE type = 1 ORDER BY type_name'
+        );
+        // user_hiden nullable: условие без IS NULL обнулило бы список.
+        $staff = $this->db->fetchAll(
+            'SELECT user_id, user_name, user_position FROM lift_users
+             WHERE user_block <> 1 AND (user_hiden IS NULL OR user_hiden = 0)
+             ORDER BY user_name, user_id'
+        );
+        $cities = $this->db->fetchAll(
+            'SELECT id, city_name FROM lift_city WHERE vis = 1 ORDER BY city_name'
+        );
+
+        return [
+            'departments' => array_map(
+                static fn (array $r): array => ['id' => (string) $r['type_id'], 'name' => (string) $r['type_name']],
+                $departments
+            ),
+            'staff' => array_map(
+                static fn (array $r): array => [
+                    'id' => (int) $r['user_id'],
+                    'name' => (string) $r['user_name'],
+                    'position' => ($r['user_position'] ?? '') !== '' ? (string) $r['user_position'] : null,
+                ],
+                $staff
+            ),
+            'cities' => array_map(
+                static fn (array $r): array => ['id' => (int) $r['id'], 'name' => (string) $r['city_name']],
+                $cities
+            ),
+        ];
+    }
+
+    public function getStats(array $f, array $user): array
+    {
+        $qb = new ReportsQueryBuilder($f, $user);
+        [$where, $p] = $qb->buildWhere();
+
+        $main = $this->db->fetchOne(
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(c.call_status = 0), 0) AS open_cnt,
+                    COALESCE(SUM(c.call_status = 1), 0) AS close_cnt,
+                    AVG(CASE WHEN c.call_status = 1 THEN c.call_date2 - c.call_date END) AS avg_close
+             FROM lift_calls c WHERE $where",
+            $p
+        ) ?? [];
+
+        $rep = $this->db->fetchOne(
+            "SELECT COALESCE(SUM(c.repair_time_is_default = 1), 0) AS d_cnt,
+                    COALESCE(SUM(c.repair_time_is_default = 0), 0) AS c_cnt,
+                    AVG(CASE WHEN c.repair_time_is_default = 1 AND c.call_status = 1
+                             THEN c.expected_repair_time - c.call_date END) AS d_avg,
+                    AVG(CASE WHEN c.repair_time_is_default = 0 AND c.call_status = 1
+                             THEN c.expected_repair_time - c.call_date END) AS c_avg
+             FROM lift_calls c WHERE $where",
+            $p
+        ) ?? [];
+
+        return [
+            'total' => (int) ($main['total'] ?? 0),
+            'open' => (int) ($main['open_cnt'] ?? 0),
+            'closed' => (int) ($main['close_cnt'] ?? 0),
+            'avg_close_time_seconds' => $main['avg_close'] !== null
+                ? (int) round((float) $main['avg_close'])
+                : null,
+            'by_department' => $this->grouped(
+                'LEFT JOIN lift_types d ON d.type_id = c.call_department AND d.type = 1',
+                'd.type_id', 'd.type_name', $where, $p, 'Без отдела'
+            ),
+            'by_city' => $this->grouped(
+                'LEFT JOIN lift_city ci ON ci.id = c.address_city',
+                'ci.id', 'ci.city_name', $where, $p, 'Без адреса'
+            ),
+            'by_group' => $this->grouped(
+                'LEFT JOIN lift_types g ON g.type_id = c.call_group AND g.type = 3',
+                'g.type_id', 'g.type_name', $where, $p, 'Без группы'
+            ),
+            'by_request' => $this->grouped(
+                'LEFT JOIN lift_types r ON r.type_id = c.call_request AND r.type = 2',
+                'r.type_id', 'r.type_name', $where, $p, 'Без типа запроса'
+            ),
+            'by_alert_level' => array_map(
+                static fn (array $r): array => ['level' => (int) $r['level'], 'count' => (int) $r['cnt']],
+                $this->db->fetchAll(
+                    "SELECT c.alert_level AS level, COUNT(*) AS cnt
+                     FROM lift_calls c WHERE $where
+                     GROUP BY c.alert_level ORDER BY c.alert_level ASC",
+                    $p
+                )
+            ),
+            'avg_repair_time' => [
+                'default' => (int) ($rep['d_cnt'] ?? 0),
+                'custom' => (int) ($rep['c_cnt'] ?? 0),
+                'avg_default_seconds' => $rep['d_avg'] !== null ? (int) round((float) $rep['d_avg']) : null,
+                'avg_custom_seconds' => $rep['c_avg'] !== null ? (int) round((float) $rep['c_avg']) : null,
+            ],
+        ];
+    }
+
+    public function countTotal(array $f, array $user): int
+    {
+        $qb = new ReportsQueryBuilder($f, $user);
+        [$where, $p] = $qb->buildWhere();
+        return (int) $this->db->fetchColumn("SELECT COUNT(*) FROM lift_calls c WHERE $where", $p);
+    }
+
+    public function getList(array $f, array $user, int $limit, int $offset, string $sort): array
+    {
+        $rows = $this->selectRows($f, $user, $sort, $limit, $offset);
+        return array_map([$this, 'mapItem'], $rows);
+    }
+
+    /** Сырые строки для CSV: LIMIT 2001 режет вызывающий сервис. */
+    public function getExportRows(array $f, array $user, string $sort, int $limit): array
+    {
+        return $this->selectRows($f, $user, $sort, $limit, 0);
+    }
+
+    private function selectRows(array $f, array $user, string $sort, int $limit, int $offset): array
+    {
+        $qb = new ReportsQueryBuilder($f, $user);
+        [$where, $p] = $qb->buildWhere();
+        $dateType = (string) ($f['date_type'] ?? 'created');
+
+        $keySel = $sort === 'address'
+            ? ', ' . ReportsQueryBuilder::ADDRESS_KEY_EXPR . ' AS address_sort_key'
+            : '';
+        $joins = $sort === 'address' ? ReportsQueryBuilder::ADDRESS_JOINS : '';
+
+        // LIMIT/OFFSET — числами после (int): нативный prepare не примет строку.
+        $sql = "SELECT c.call_id, c.call_status, c.call_adres, c.call_details, c.call_solution,
+                       c.call_last_name, c.call_last_name_close, c.call_first_name,
+                       c.call_date, c.call_date2, c.expected_repair_time, c.alert_level,
+                       c.call_department,
+                       c.call_staff, c.call_staff2, c.call_staff3,
+                       c.call_staff_status, c.call_staff_status2, c.call_staff_status3,
+                       c.call_staff_date, c.call_staff_date2, c.call_staff_date3,
+                       d.type_name AS department,
+                       u1.user_name AS staff_name,
+                       u2.user_name AS staff_name2,
+                       u3.user_name AS staff_name3$keySel
+                FROM lift_calls c
+                LEFT JOIN lift_types d  ON d.type_id = c.call_department
+                LEFT JOIN lift_users u1 ON u1.user_id = c.call_staff
+                LEFT JOIN lift_users u2 ON u2.user_id = c.call_staff2
+                LEFT JOIN lift_users u3 ON u3.user_id = c.call_staff3
+                $joins
+                WHERE $where
+                " . $qb->sortClause($sort, $dateType) . "
+                LIMIT $limit OFFSET $offset";
+
+        return $this->db->fetchAll($sql, $p);
+    }
+
+    private function grouped(
+        string $join,
+        string $idExpr,
+        string $nameExpr,
+        string $where,
+        array $p,
+        string $nullLabel
+    ): array {
+        $rows = $this->db->fetchAll(
+            "SELECT $idExpr AS id, $nameExpr AS name, COUNT(*) AS cnt
+             FROM lift_calls c $join
+             WHERE $where
+             GROUP BY id, name
+             ORDER BY cnt DESC, name ASC",
+            $p
+        );
+        return array_map(
+            static fn (array $r): array => [
+                'id' => $r['id'] !== null ? (string) $r['id'] : null,
+                'name' => ($r['name'] ?? '') !== '' ? (string) $r['name'] : $nullLabel,
+                'count' => (int) $r['cnt'],
+            ],
+            $rows
+        );
+    }
+
+    private function mapItem(array $r): array
+    {
+        $closed = (int) $r['call_status'] === 1;
+        $closeName = (string) ($r['call_last_name'] ?? '');
+        if ($closeName === '') {
+            $closeName = (string) ($r['call_last_name_close'] ?? '');
+        }
+
+        return [
+            'id' => (int) $r['call_id'],
+            'call_id' => (int) $r['call_id'],
+            'call_number' => (string) $r['call_id'],
+            'type' => $closed ? 'close' : 'open',
+            'fullAddress' => (string) $r['call_adres'],
+            'details' => (string) $r['call_details'],
+            'date' => (int) $r['call_date'],
+            'repair_time' => (int) $r['expected_repair_time'] > 0 ? (int) $r['expected_repair_time'] : null,
+            'close_date' => $closed && (int) $r['call_date2'] > 0 ? (int) $r['call_date2'] : null,
+            'close_name' => $closed ? ($closeName !== '' ? $closeName : '—') : '—',
+            'solution' => $closed ? ((string) $r['call_solution'] !== '' ? (string) $r['call_solution'] : '—') : '—',
+            'department' => $r['department'] !== null ? (string) $r['department'] : null,
+            'department_id' => (string) $r['call_department'],
+            'alert_level' => (int) $r['alert_level'],
+            'staff_id' => (int) $r['call_staff'] > 0 ? (int) $r['call_staff'] : null,
+            'staff_name' => $r['staff_name'] !== null ? (string) $r['staff_name'] : null,
+            'notify_status' => $r['call_staff_status'] !== null ? (int) $r['call_staff_status'] : null,
+            'notify_date' => $r['call_staff_date'] !== null ? (int) $r['call_staff_date'] : null,
+            'staff_id2' => (int) ($r['call_staff2'] ?? 0) > 0 ? (int) $r['call_staff2'] : null,
+            'staff_name2' => $r['staff_name2'] !== null ? (string) $r['staff_name2'] : null,
+            'notify_status2' => $r['call_staff_status2'] !== null ? (int) $r['call_staff_status2'] : null,
+            'notify_date2' => $r['call_staff_date2'] !== null ? (int) $r['call_staff_date2'] : null,
+            'staff_id3' => (int) ($r['call_staff3'] ?? 0) > 0 ? (int) $r['call_staff3'] : null,
+            'staff_name3' => $r['staff_name3'] !== null ? (string) $r['staff_name3'] : null,
+            'notify_status3' => $r['call_staff_status3'] !== null ? (int) $r['call_staff_status3'] : null,
+            'notify_date3' => $r['call_staff_date3'] !== null ? (int) $r['call_staff_date3'] : null,
+        ];
+    }
+}
+```
+
+---
+
+## Файл 3 — `app/Service/ReportsExporter.php` (новый)
+
+**Commit:** `feat(reports): CSV-экспорт с BOM, защитой от формул и суффиксами §1.3`
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Service;
+
+/**
+ * Сборка CSV отчёта. Потоково в php://temp: 2000 строк не держим в
+ * памяти единой строкой до base64.
+ *
+ * Суффиксы каналов — зеркало §1.3 БЕЗ эмодзи: те же слова, что рисует
+ * body-render в таблице, иначе UI и CSV разойдутся. getStatusWord() из
+ * карточки не используем: он даёт «web онлайн» — третью формулировку.
+ *
+ * «Wrap text» и «автофильтр» не заявляются: CSV метаданных форматирования
+ * не хранит, это перенесено в волну 3 (XLSX).
+ */
+final class ReportsExporter
+{
+    private const SUFFIXES = [
+        1 => 'по телефону',
+        2 => 'онлайн',
+        3 => 'в телеграм',
+        4 => 'в макс',
+        5 => 'в вк',
+        6 => 'по смс',
+        7 => 'по email',
+    ];
+
+    public function renderCsv(array $rows): string
+    {
+        $h = fopen('php://temp', 'r+');
+        if ($h === false) {
+            return '';
+        }
+        fwrite($h, "\xEF\xBB\xBF");
+        fputcsv($h, ['ID', 'Адрес', 'Описание', 'Закрытие', 'Отв. 1', 'Отв. 2', 'Отв. 3'], ';', '"', '');
+
+        foreach ($rows as $r) {
+            $closed = (int) ($r['call_status'] ?? 0) === 1;
+            $address = (string) ($r['call_adres'] ?? '')
+                . "\n" . date('d.m.Y H:i', (int) ($r['call_date'] ?? 0))
+                . ' · ' . (string) ($r['call_first_name'] ?? '');
+            $close = $closed
+                ? date('d.m.Y H:i', (int) ($r['call_date2'] ?? 0)) . "\n"
+                    . (((string) ($r['call_last_name'] ?? '')) !== ''
+                        ? (string) $r['call_last_name']
+                        : (((string) ($r['call_last_name_close'] ?? '')) !== '' ? (string) $r['call_last_name_close'] : '—'))
+                : '—';
+
+            fputcsv($h, [
+                self::cell((string) ($r['call_id'] ?? '')),
+                self::cell($address),
+                self::cell((string) ($r['call_details'] ?? '')),
+                self::cell($close),
+                self::cell($this->staffCell($r, 1)),
+                self::cell($this->staffCell($r, 2)),
+                self::cell($this->staffCell($r, 3)),
+            ], ';', '"', '');
+        }
+
+        rewind($h);
+        $out = stream_get_contents($h);
+        fclose($h);
+        return $out === false ? '' : $out;
+    }
+
+    private function staffCell(array $r, int $slot): string
+    {
+        $name = (string) ($r["staff_name$slot"] ?? '');
+        $id = (int) ($r["call_staff$slot"] ?? 0);
+        if ($id <= 0 || $name === '') {
+            return '—';
+        }
+        $status = $r["call_staff_status$slot"] !== null ? (int) $r["call_staff_status$slot"] : 0;
+        $date = $r["call_staff_date$slot"] !== null ? (int) $r["call_staff_date$slot"] : 0;
+        if ($status <= 0) {
+            return $name . "\nНе уведомлен";
+        }
+        $suffix = self::SUFFIXES[$status] ?? 'неизвестный канал (' . $status . ')';
+        $line = $date > 0
+            ? 'Статус: ' . $suffix . ' · ' . date('d.m.Y H:i', $date)
+            : 'Статус: ' . $suffix;
+        return $name . "\n" . $line;
+    }
+
+    /**
+     * Защита от CSV-инъекции: Excel трактует ведущие = + - @ как формулу.
+     * Префикс-апостроф виден в ячейке, но формула не выполняется.
+     */
+    private static function cell(string $value): string
+    {
+        return $value !== '' && str_contains('=+-@', $value[0]) ? "'" . $value : $value;
+    }
+}
+```
+
+---
+
+## Файл 4 — `app/Support/ExportRateLimiter.php` (новый)
+
+**Commit:** `feat(reports): файловый rate-limit экспорта 1/30с на пользователя тенанта`
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Support;
+
+/**
+ * Первый rate-limiter проекта (§20): 1 экспорт на пользователя тенанта
+ * в окно 30 секунд. Состояние — файл вне web-root, как _alerts/_orgkey:
+ * в web-root его быть не должно, иначе метку можно прочитать и согреть.
+ *
+ * flock обязателен: два параллельных экспорта одной учётки иначе оба
+ * прошли бы проверку до записи метки.
+ *
+ * Деградация осознанная: каталог недоступен → лимит отключается
+ * (return null), экспорт не блокируется. Отказ лимита не должен
+ * обесточивать выгрузку из-за прав на папку; энтропия окна и так
+ * делает злоупотребление дорогим.
+ */
+final class ExportRateLimiter
+{
+    public function __construct(private int $windowSec = 30)
+    {
+    }
+
+    /** null = разрешено; int = секунд до конца окна (retry_after). */
+    public function tryAcquire(string $tenantId, int $userId): ?int
+    {
+        // __DIR__ = …/app/Support → dirname(...,3) = …/domains (сосед web-root).
+        $dir = dirname(__DIR__, 3) . '/_reports';
+        if (!is_dir($dir) && !@mkdir($dir, 0750, true)) {
+            $dir = sys_get_temp_dir();
+        }
+        $file = $dir . '/export_' . md5($tenantId . ':' . $userId) . '.lock';
+
+        $fp = @fopen($file, 'c');
+        if ($fp === false) {
+            return null;
+        }
+        try {
+            if (!flock($fp, LOCK_EX)) {
+                return null;
+            }
+            $now = time();
+            $last = (int) @filemtime($file);
+            $left = $last > 0 ? $last + $this->windowSec - $now : 0;
+            if ($left > 0) {
+                return max(1, $left);
+            }
+            touch($file, $now);
+            return null;
+        } finally {
+            flock($fp, LOCK_UN);
+            fclose($fp);
+        }
+    }
+}
+```
+
+---
+
+## Файл 5 — `app/Service/ReportsService.php` (новый)
+
+**Commit:** `feat(reports): сервис отчётов — гейт прав, валидация дат, лимиты экспорта`
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\Exceptions\ApiException;
+use App\Http\ErrorCode;
+use App\Repository\ReportsRepository;
+use App\Support\ExportRateLimiter;
+use App\Tenant;
+
+/**
+ * Оркестрация отчётов: права → нормализация фильтров → валидация дат →
+ * репозиторий. SQL здесь не живёт — он в ReportsQueryBuilder/Repository.
+ *
+ * Права проверяются НА СЕРВЕРЕ с первого дня: это осознанный отход от
+ * долга §20 для нового модуля. Иначе инженер или гость получили бы
+ * выгрузку всего тенанта через DevTools.
+ *
+ * Невалидные даты → data:null, не исключение: пользователь видит
+ * пустой результат, а не ошибку там, где виновата форма.
+ * Исключение — только период > 90 дней и лимиты экспорта.
+ */
+final class ReportsService
+{
+    public function __construct(
+        private ReportsRepository $repo,
+        private ?Tenant $tenant
+    ) {
+    }
+
+    private function gate(array $user): void
+    {
+        $role = (string) ($user['role'] ?? '');
+        if ($role === 'guest' || $role === 'reserved') {
+            throw new ApiException(
+                ErrorCode::Forbidden,
+                'Отчёты недоступны для этой роли',
+                reason: 'no_rights'
+            );
+        }
+    }
+
+    /** Нормализация входа: всё приводится к типу, мусор не проходит. */
+    private function filters(array $body): array
+    {
+        $status = $body['status'] ?? null;
+        return [
+            'date_from' => (int) ($body['date_from'] ?? 0),
+            'date_to' => (int) ($body['date_to'] ?? 0),
+            'date_type' => ($body['date_type'] ?? '') === 'closed' ? 'closed' : 'created',
+            'city_id' => (int) ($body['city_id'] ?? 0),
+            'street_id' => (int) ($body['street_id'] ?? 0),
+            'home_id' => (int) ($body['home_id'] ?? 0),
+            'object_id' => (int) ($body['object_id'] ?? 0),
+            'city_only' => (bool) ($body['city_only'] ?? false),
+            'department_ids' => is_array($body['department_ids'] ?? null) ? $body['department_ids'] : [],
+            'status' => in_array($status, ['open', 'close'], true) ? $status : 'all',
+            'staff_id' => (int) ($body['staff_id'] ?? 0),
+            'details_text' => (string) ($body['details_text'] ?? ''),
+            'solution_text' => (string) ($body['solution_text'] ?? ''),
+        ];
+    }
+
+    /** Порядок проверок фиксирован: сначала «пусто», потом «слишком длинно». */
+    private function validateDates(array $f): bool
+    {
+        $from = (int) $f['date_from'];
+        $to = (int) $f['date_to'];
+        if ($from <= 0 || $from > $to || $to > strtotime('today 23:59:59')) {
+            return false;
+        }
+        if ($to - $from > 90 * 86400) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Период не может превышать 90 дней',
+                reason: 'date_range_too_long'
+            );
+        }
+        return true;
+    }
+
+    private function sort(array $body): string
+    {
+        return in_array($body['sort'] ?? null, ['address', 'department'], true)
+            ? (string) $body['sort']
+            : 'date';
+    }
+
+    public function getFiltersData(array $user): array
+    {
+        $this->gate($user);
+        return $this->repo->getFiltersData();
+    }
+
+    public function getStats(array $user, array $body): ?array
+    {
+        $this->gate($user);
+        $f = $this->filters($body);
+        if (!$this->validateDates($f)) {
+            return null;
+        }
+        return $this->repo->getStats($f, $user);
+    }
+
+    public function getList(array $user, array $body): ?array
+    {
+        $this->gate($user);
+        $f = $this->filters($body);
+        if (!$this->validateDates($f)) {
+            return null;
+        }
+        $limit = min(200, max(10, (int) ($body['limit'] ?? 50)));
+        $page = max(1, (int) ($body['page'] ?? 1));
+        $sort = $this->sort($body);
+
+        $total = $this->repo->countTotal($f, $user);
+        return [
+            'items' => $this->repo->getList($f, $user, $limit, ($page - 1) * $limit, $sort),
+            'pagination' => [
+                'total_items' => $total,
+                'current_page' => $page,
+                'total_pages' => (int) ceil($total / $limit),
+                'limit' => $limit,
+            ],
+        ];
+    }
+
+    /**
+     * Обёртка ответа экспорта: пустая выборка — data:null с message,
+     * а не ошибка (пользователь сузил период и получил честный ноль).
+     */
+    public function exportResponse(array $user, array $body): array
+    {
+        $data = $this->export($user, $body);
+        if ($data === null) {
+            return ['data' => null, 'message' => 'По вашему запросу ничего не найдено'];
+        }
+        return ['data' => $data];
+    }
+
+    private function export(array $user, array $body): ?array
+    {
+        $this->gate($user);
+        if ((string) ($body['format'] ?? '') !== 'csv') {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Неподдерживаемый формат выгрузки',
+                reason: 'unsupported_format'
+            );
+        }
+
+        $retry = (new ExportRateLimiter(30))->tryAcquire(
+            $this->tenant?->id ?? 'unknown',
+            (int) ($user['id'] ?? 0)
+        );
+        if ($retry !== null) {
+            // details уйдёт в ответ плоско (retry_after), §16.1.
+            throw new ApiException(
+                ErrorCode::RateLimited,
+                'Слишком много запросов. Повторите позже.',
+                reason: 'rate_limited',
+                details: ['retry_after' => $retry]
+            );
+        }
+
+        $f = $this->filters($body);
+        if (!$this->validateDates($f)) {
+            return null;
+        }
+
+        // 2001: ровно 2000 валидно, 2001-я строка — признак переполнения.
+        // LIMIT 2000 не отличил бы «ровно 2000» от «больше».
+        $rows = $this->repo->getExportRows($f, $user, $this->sort($body), 2001);
+        if (count($rows) > 2000) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Слишком много результатов. Сузьте период поиска.',
+                reason: 'export_too_many_rows'
+            );
+        }
+        if ($rows === []) {
+            return null;
+        }
+
+        $csv = (new ReportsExporter())->renderCsv($rows);
+        return [
+            'file_base64' => base64_encode($csv),
+            'filename' => 'report_' . date('Y-m-d') . '.csv',
+            'mime_type' => 'text/csv',
+            'rows_count' => count($rows),
+        ];
+    }
+}
+```
+
+---
+
+## Файл 6 — `app/Controller/ApiController.php` (патч, 6 замен)
+
+**Commit:** `feat(reports): четыре экшена отчётов в шлюзе api.php`
+
+**6.1. Найти:**
+```php
+use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository};
+```
+**Заменить:**
+```php
+use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository, ReportsRepository};
+```
+
+**6.2. Найти:**
+```php
+AddressCacheService,
+OrgLoginService
+};
+```
+**Заменить:**
+```php
+AddressCacheService,
+OrgLoginService,
+ReportsService
+};
+```
+
+**6.3. Найти:**
+```php
+    private OrgLoginService $orgLogin;
+    private ?Tenant $tenant;
+```
+**Заменить:**
+```php
+    private OrgLoginService $orgLogin;
+    private ReportsService $reportsService;
+    private ?Tenant $tenant;
+```
+
+**6.4. Найти:**
+```php
+        OrgLoginService $orgLogin,
+        ?Tenant $tenant
+    ) {
+```
+**Заменить:**
+```php
+        OrgLoginService $orgLogin,
+        ReportsService $reportsService,
+        ?Tenant $tenant
+    ) {
+```
+
+**6.5. Найти:**
+```php
+        $this->orgLogin = $orgLogin;
+        $this->tenant = $tenant;
+```
+**Заменить:**
+```php
+        $this->orgLogin = $orgLogin;
+        $this->reportsService = $reportsService;
+        $this->tenant = $tenant;
+```
+
+**6.6. Найти:**
+```php
+        $orgLogin = new OrgLoginService($db, $userRepo, $tenant);
+```
+**Заменить:**
+```php
+        $orgLogin = new OrgLoginService($db, $userRepo, $tenant);
+        $reportsService = new ReportsService(new ReportsRepository($db), $tenant);
+```
+
+**6.7. Найти:**
+```php
+            $orgLogin,
+            $tenant
+        );
+```
+**Заменить:**
+```php
+            $orgLogin,
+            $reportsService,
+            $tenant
+        );
+```
+
+**6.8. Найти:**
+```php
+            'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
+```
+**Заменить:**
+```php
+            'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
+            // Отчёты (§15 v6.2): ответ под data, права проверяет сервис.
+            'reports_filters_data' => Response::ok(['data' => $this->reportsService->getFiltersData($user)]),
+            'reports_stats'        => Response::ok(['data' => $this->reportsService->getStats($user, $request->body)]),
+            'reports_list'         => Response::ok(['data' => $this->reportsService->getList($user, $request->body)]),
+            'reports_export'       => Response::ok($this->reportsService->exportResponse($user, $request->body)),
+```
+
