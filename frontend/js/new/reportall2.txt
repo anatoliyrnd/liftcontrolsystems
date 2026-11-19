@@ -1,0 +1,780 @@
+
+**Одно уточнение решения по МСК (фиксирую явно).** В таблице даты рендерим `formatTs` (локальная зона) — как журналы: `body-render` форматирует колонки `dataType:"date"` сам, и править его нельзя (общий с журналами). МСК остаётся там, где он действительно нужен: границы периода (`mskDayStartTs/mskDayEndTs`), строка «Период МСК: …» под фильтрами (`formatTsMsk`) и CSV на сервере. Для пользователей в МСК это тождественно; расхождение UI≠CSV исчезает по построению, а не по соглашению. Подсветка просрочки `repair_time` при этом сохраняется (число, а не строка).
+
+---
+
+## Файл 6 — `js/route/pages/reports.js` (новый)
+
+**Commit:** `feat(reports): шаблон страницы отчётов с тремя вкладками`
+
+```js
+import { REPORTS } from "../../config.js";
+
+/**
+ * Шаблон экрана отчётов. Строка, как у остальных страниц (router
+ * вставляет её innerHTML): статический шаблон — разрешённое исключение
+ * правила «DOM через createElement».
+ *
+ * Все id с префиксом rep*: unmount журналов не защищён guard и трогает
+ * #searchInput / #cityFilterBackdrop / #refreshBtn по глобальному
+ * getElementById — совпадение имени сломало бы чужой teardown.
+ *
+ * Таблица — своя (#reportsTable), не #dataTable: CSS зебры/липких
+ * колонок журналов привязан к #dataTable, а тур и sync-кнопка ищут
+ * журнальную разметку. data-scope/data-mode="report" дают settings.js
+ * и body-render свою ширину липкого id и свой набор колонок.
+ */
+export function reportsPageTemplate() {
+  const tabBtn = (tab, label) =>
+    `<button type="button" class="theme-toggle-btn rep-tab" data-tab="${tab}" style="border-radius:8px;width:auto;padding:0 16px;font-size:13px;">${label}</button>`;
+  return `<div class="container">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;gap:12px;flex-wrap:wrap;">
+      <h1 style="margin:0;">Отчеты</h1>
+      <div style="display:flex;gap:8px;" id="repTabs">
+        ${tabBtn("summary", REPORTS.TABS.summary)}
+        ${tabBtn("byId", REPORTS.TABS.byId)}
+        ${tabBtn("advanced", REPORTS.TABS.advanced)}
+      </div>
+    </div>
+    <div id="repOfflineStub" class="rep-stub" style="display:none;">
+      Отчеты доступны только при наличии интернета.
+    </div>
+    <div id="repTabById" class="rep-panel" style="display:none;">
+      <div style="display:flex;gap:8px;align-items:center;max-width:420px;">
+        <input id="repTicketId" type="text" class="search-input" placeholder="Номер заявки" autocomplete="off">
+        <button id="repByIdBtn" class="theme-toggle-btn" style="border-radius:8px;width:auto;padding:0 16px;font-size:13px;">Найти</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">
+        Поиск по ID игнорирует остальные фильтры: откроется карточка заявки.
+      </div>
+    </div>
+    <div id="repTabMain" class="rep-panel">
+      <div id="repFiltersHost"></div>
+      <div id="repStatsHost"></div>
+      <div class="table-wrapper">
+        <table id="reportsTable" data-scope="report" data-mode="report">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+        <div id="repEmptyStub" style="display:none;text-align:center;padding:2rem;color:var(--text-secondary);font-size:14px;">
+          По вашему запросу ничего не найдено. Попробуйте изменить параметры поиска.
+        </div>
+      </div>
+      <div id="repPagination" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;font-size:13px;color:var(--text-secondary);"></div>
+    </div>
+  </div>`;
+}
+```
+
+---
+
+## Файл 7 — `js/reports/reports-repository.js` (новый)
+
+**Commit:** `feat(reports): сетевой слой отчётов с тегом reports и таймаутом экспорта`
+
+```js
+import { REPORTS } from "../config.js";
+
+/**
+ * Изоляция api.post для отчётов. Контроллер классифицирует ответы
+ * сам: offline === true — отказ канала, code:"aborted" без offline —
+ * отмена при unmount, http_* — ошибка сервера, не офлайн.
+ *
+ * Тег "reports" обязателен: unmount гасит только свои запросы и не
+ * задевает журнальные. filters_data идёт silent (null): справочники
+ * не должны мигать статус-баром поверх работы пользователя.
+ */
+export function createReportsRepository(api) {
+  const tag = "reports";
+  return {
+    fetchFiltersData: () =>
+      api.post({ action: "reports_filters_data" }, null, tag),
+    fetchStats: (filters) =>
+      api.post({ action: "reports_stats", ...filters }, "Формирование сводки...", tag),
+    fetchList: (filters, page, limit) =>
+      api.post(
+        { action: "reports_list", ...filters, page, limit },
+        "Загрузка отчёта...",
+        tag,
+      ),
+    // 30 с: 2000 строк CSV не укладываются в дефолтные 15 с.
+    // Бюджет цепочки api-service масштабируется от этого значения.
+    exportCsv: (filters) =>
+      api.post(
+        { action: "reports_export", format: "csv", ...filters },
+        "Генерация CSV...",
+        tag,
+        { timeoutMs: REPORTS.EXPORT_TIMEOUT_MS },
+      ),
+  };
+}
+```
+
+---
+
+## Файл 8 — `js/reports/reports-state.js` (новый)
+
+**Commit:** `feat(reports): per-user состояние фильтров отчёта (scope report)`
+
+```js
+import { REPORTS } from "../config.js";
+import { getReportFilters, setReportFilters } from "../table/settings.js";
+import { mskTodayYmd } from "../utils/date-utils.js";
+
+/**
+ * Состояние экрана отчётов: фильтры, вкладка, страница.
+ * Хранение — только через table/settings.js (правило 4): ключ содержит
+ * user_id, читается в mount после авторизации, до логина работают
+ * дефолты. Прямых ключей localStorage здесь нет.
+ *
+ * departmentIds === null означает «ключ не сохранён» — контроллер
+ * подставит все отделы из справочника. Пустой массив — валидное
+ * состояние, но UI его не создаёт (минимум один отдел).
+ */
+function ymdMinusDays(days) {
+  const d = new Date(Date.now() + 3 * 3600 * 1000 - days * 86400 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+
+export function defaultReportState() {
+  return {
+    fromYmd: ymdMinusDays(REPORTS.DEFAULT_PERIOD_DAYS - 1),
+    toYmd: mskTodayYmd(),
+    dateType: "created",
+    address: null,
+    cityOnly: false,
+    departmentIds: null,
+    status: "all",
+    staffEnabled: false,
+    staffId: null,
+    detailsText: "",
+    solutionText: "",
+    sort: REPORTS.SORT_DEFAULT,
+    tab: REPORTS.TAB_DEFAULT,
+    page: 1,
+  };
+}
+
+export function loadReportState() {
+  const saved = getReportFilters();
+  const base = defaultReportState();
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) return base;
+  return { ...base, ...saved };
+}
+
+export function saveReportState(state) {
+  setReportFilters(state);
+}
+```
+
+---
+
+## Файл 9 — `js/reports/views/filters-view.js` (новый)
+
+**Commit:** `feat(reports): панель фильтров с валидацией периода и защитой последнего отдела`
+
+```js
+import { REPORTS } from "../../config.js";
+import { createAddressPicker } from "../../components/address-picker.js";
+import { notify } from "../../components/notify.js";
+import {
+  mskDayStartTs,
+  mskDayEndTs,
+  mskTodayYmd,
+  formatTsMsk,
+} from "../../utils/date-utils.js";
+
+const TEXT_HINT = "Выберите конкретный дом или лифт для полнотекстового поиска";
+
+function el(tag, attrs = {}, text = null) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "style") node.style.cssText = v;
+    else node.setAttribute(k, v);
+  }
+  if (text != null) node.textContent = text;
+  return node;
+}
+const label = (text) =>
+  el("label", {
+    class: "rep-label",
+    style:
+      "font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;display:block;margin-bottom:4px;",
+  }, text);
+
+/**
+ * Панель фильтров отчёта. Вся разметка — createElement + textContent
+ * (правило 1): значения справочников приходят с сервера и не должны
+ * иметь пути в innerHTML.
+ *
+ * Бизнес-защиты из ТЗ:
+ *  — нельзя снять галочку с последнего отдела (notify.warning);
+ *  — полнотекст заблокирован без дома/лифта и при city_only;
+ *  — даты: «до» не больше сегодня, «от» не больше «до», дельта ≤ 90
+ *    календарных дней; нарушение — красная обводка и блокировка кнопок.
+ */
+export function createFiltersView(opts) {
+  const {
+    departments = [],
+    staff = [],
+    canStaffFilter = false,
+    initial = null,
+    onSubmit,
+    onExport,
+    onReset,
+  } = opts;
+
+  const v = initial || {};
+  const root = el("div", { class: "rep-filters" });
+  let busy = false;
+
+  // --- период -------------------------------------------------------
+  const fromInput = el("input", { type: "date", class: "search-input rep-date", id: "repDateFrom" });
+  const toInput = el("input", { type: "date", class: "search-input rep-date", id: "repDateTo" });
+  toInput.max = mskTodayYmd();
+  fromInput.value = v.fromYmd || "";
+  toInput.value = v.toYmd || "";
+  const createdRadio = el("input", { type: "radio", name: "repDateType", value: "created" });
+  const closedRadio = el("input", { type: "radio", name: "repDateType", value: "closed" });
+  (v.dateType === "closed" ? closedRadio : createdRadio).checked = true;
+  const periodEl = el("div", {
+    class: "rep-period",
+    style: "font-size:11px;color:var(--text-secondary);margin-top:4px;",
+  });
+  const msgEl = el("div", {
+    class: "rep-msg",
+    style: "display:none;font-size:12px;color:#ef4444;margin-top:4px;",
+  });
+
+  // --- адрес --------------------------------------------------------
+  const cityOnlyCb = el("input", { type: "checkbox", id: "repCityOnly" });
+  cityOnlyCb.checked = v.cityOnly === true;
+  const picker = createAddressPicker({
+    mode: "any",
+    autoOpen: false,
+    onChange: () => {
+      refreshTextEnabled();
+      scheduleChange();
+    },
+  });
+  const addressWrap = el("div", { class: "rep-address", style: "min-width:260px;flex:1;" });
+  addressWrap.appendChild(picker.element);
+  if (v.address) picker.setValue(v.address);
+
+  // --- полнотекст ---------------------------------------------------
+  const detailsInput = el("input", { type: "text", class: "search-input", id: "repDetailsText", placeholder: "Поиск по описанию" });
+  const solutionInput = el("input", { type: "text", class: "search-input", id: "repSolutionText", placeholder: "Поиск по решению" });
+  detailsInput.value = v.detailsText || "";
+  solutionInput.value = v.solutionText || "";
+
+  // --- отделы -------------------------------------------------------
+  const selected = new Set(
+    Array.isArray(v.departmentIds) && v.departmentIds.length > 0
+      ? v.departmentIds.map(String)
+      : departments.map((d) => String(d.id)),
+  );
+  const deptBox = el("div", {
+    class: "rep-dept",
+    style: "display:flex;flex-wrap:wrap;gap:4px 14px;max-height:88px;overflow-y:auto;",
+  });
+  for (const dep of departments) {
+    const cb = el("input", { type: "checkbox", value: String(dep.id) });
+    cb.checked = selected.has(String(dep.id));
+    cb.addEventListener("change", () => {
+      const checked = cb.checked === true;
+      cb.checked = checked;
+      if (checked) {
+        selected.add(String(dep.id));
+      } else {
+        // Защита последнего отдела: preventDefault на change не
+        // работает, состояние задаём явно и возвращаем галочку.
+        if (selected.size <= 1) {
+          cb.checked = true;
+          notify.warning("Выберите хотя бы один отдел");
+          return;
+        }
+        selected.delete(String(dep.id));
+      }
+      scheduleChange();
+    });
+    const item = el("label", { class: "city-checkbox-item" });
+    item.appendChild(cb);
+    item.appendChild(el("span", {}, dep.name));
+    deptBox.appendChild(item);
+  }
+
+  // --- статус, сортировка, ответственный ----------------------------
+  const statusBox = el("div", { style: "display:flex;gap:12px;" });
+  const statusRadios = {};
+  for (const [value, text] of [["all", "Все"], ["open", "Открытые"], ["close", "Закрытые"]]) {
+    const r = el("input", { type: "radio", name: "repStatus", value });
+    r.checked = (v.status || "all") === value;
+    statusRadios[value] = r;
+    const item = el("label", { class: "city-checkbox-item" });
+    item.appendChild(r);
+    item.appendChild(el("span", {}, text));
+    statusBox.appendChild(item);
+  }
+  const sortSelect = el("select", { class: "search-input", id: "repSort", style: "width:auto;min-width:160px;" });
+  for (const [value, text] of Object.entries(REPORTS.SORTS)) {
+    sortSelect.appendChild(el("option", { value }, text));
+  }
+  sortSelect.value = REPORTS.SORTS[v.sort] ? v.sort : REPORTS.SORT_DEFAULT;
+
+  const staffToggle = el("input", { type: "checkbox", id: "repStaffToggle" });
+  staffToggle.checked = v.staffEnabled === true;
+  const staffSelect = el("select", { class: "search-input", id: "repStaffSelect", style: "width:auto;min-width:200px;" });
+  staffSelect.appendChild(el("option", { value: "" }, "— выберите —"));
+  for (const s of staff) {
+    staffSelect.appendChild(el("option", { value: String(s.id) }, s.name));
+  }
+  if (v.staffId != null) staffSelect.value = String(v.staffId);
+  const staffRow = el("div", { style: canStaffFilter ? "" : "display:none;" });
+
+  // --- кнопки -------------------------------------------------------
+  const searchBtn = el("button", { type: "button", class: "menu-item", id: "repSearchBtn" }, "Найти");
+  const exportBtn = el("button", { type: "button", class: "menu-item", id: "repExportBtn" }, "Выгрузить CSV");
+  const resetBtn = el("button", { type: "button", class: "menu-item", id: "repResetBtn" }, "Сбросить");
+
+  // --- сборка -------------------------------------------------------
+  const row1 = el("div", { class: "rep-row", style: "display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;" });
+  const periodCol = el("div", { style: "display:flex;gap:8px;align-items:flex-end;" });
+  const fromCol = el("div");
+  fromCol.appendChild(label("От"));
+  fromCol.appendChild(fromInput);
+  const toCol = el("div");
+  toCol.appendChild(label("До"));
+  toCol.appendChild(toInput);
+  periodCol.appendChild(fromCol);
+  periodCol.appendChild(toCol);
+  const dateTypeCol = el("div", { style: "display:flex;gap:10px;padding-bottom:6px;" });
+  for (const [r, text] of [[createdRadio, "по созданию"], [closedRadio, "по закрытию"]]) {
+    const item = el("label", { class: "city-checkbox-item" });
+    item.appendChild(r);
+    item.appendChild(el("span", {}, text));
+    dateTypeCol.appendChild(item);
+  }
+  row1.appendChild(periodCol);
+  row1.appendChild(dateTypeCol);
+  const cityOnlyCol = el("div", { style: "padding-bottom:6px;" });
+  const cityOnlyLabel = el("label", { class: "city-checkbox-item" });
+  cityOnlyLabel.appendChild(cityOnlyCb);
+  cityOnlyLabel.appendChild(el("span", {}, "Искать только по городу"));
+  cityOnlyCol.appendChild(cityOnlyLabel);
+  row1.appendChild(cityOnlyCol);
+  row1.appendChild(addressWrap);
+
+  const row2 = el("div", { class: "rep-row", style: "display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;" });
+  const detailsCol = el("div", { style: "flex:1;min-width:220px;" });
+  detailsCol.appendChild(label("Поиск по описанию"));
+  detailsCol.appendChild(detailsInput);
+  const solutionCol = el("div", { style: "flex:1;min-width:220px;" });
+  solutionCol.appendChild(label("Поиск по решению"));
+  solutionCol.appendChild(solutionInput);
+  row2.appendChild(detailsCol);
+  row2.appendChild(solutionCol);
+
+  const row3 = el("div", { class: "rep-row", style: "display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;" });
+  const deptCol = el("div", { style: "flex:2;min-width:260px;" });
+  deptCol.appendChild(label("Отделы"));
+  deptCol.appendChild(deptBox);
+  const statusCol = el("div");
+  statusCol.appendChild(label("Статус"));
+  statusCol.appendChild(statusBox);
+  const sortCol = el("div");
+  sortCol.appendChild(label("Сортировка"));
+  sortCol.appendChild(sortSelect);
+  row3.appendChild(deptCol);
+  row3.appendChild(statusCol);
+  row3.appendChild(sortCol);
+  staffRow.appendChild(label("Фильтр по ответственному"));
+  const staffLine = el("div", { style: "display:flex;gap:10px;align-items:center;" });
+  const staffToggleLabel = el("label", { class: "city-checkbox-item" });
+  staffToggleLabel.appendChild(staffToggle);
+  staffToggleLabel.appendChild(el("span", {}, "включить"));
+  staffLine.appendChild(staffToggleLabel);
+  staffLine.appendChild(staffSelect);
+  staffRow.appendChild(staffLine);
+  row3.appendChild(staffRow);
+
+  const row4 = el("div", {
+    class: "rep-row",
+    style: "display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;align-items:center;",
+  });
+  row4.appendChild(searchBtn);
+  row4.appendChild(exportBtn);
+  row4.appendChild(resetBtn);
+
+  root.appendChild(row1);
+  root.appendChild(msgEl);
+  root.appendChild(periodEl);
+  root.appendChild(row2);
+  root.appendChild(row3);
+  root.appendChild(row4);
+
+  // --- логика -------------------------------------------------------
+  let changeTimer = null;
+  const scheduleChange = () => {
+    if (changeTimer) clearTimeout(changeTimer);
+    changeTimer = setTimeout(() => validate(), 120);
+  };
+
+  function refreshTextEnabled() {
+    const sel = picker.getValue();
+    const ok =
+      !cityOnlyCb.checked &&
+      !!sel &&
+      ((Number(sel.home_id) || 0) > 0 || (Number(sel.object_id) || 0) > 0);
+    for (const inp of [detailsInput, solutionInput]) {
+      inp.disabled = !ok;
+      inp.title = ok ? "" : TEXT_HINT;
+    }
+  }
+
+  function validate() {
+    const from = mskDayStartTs(fromInput.value);
+    const to = mskDayEndTs(toInput.value);
+    let msg = "";
+    if (from === null || to === null) msg = "Укажите даты периода";
+    else if (from > to) msg = "Дата «от» не может быть больше даты «до»";
+    else if (to > mskDayEndTs(mskTodayYmd())) msg = "Дата «до» не может быть больше сегодняшней";
+    else if (to - from > REPORTS.MAX_RANGE_DAYS * 86400)
+      msg = `Период не может превышать ${REPORTS.MAX_RANGE_DAYS} дней`;
+    msgEl.textContent = msg;
+    msgEl.style.display = msg ? "block" : "none";
+    fromInput.classList.toggle("rep-invalid", !!msg);
+    toInput.classList.toggle("rep-invalid", !!msg);
+    periodEl.textContent =
+      !msg && from !== null
+        ? `Период МСК: ${formatTsMsk(from)} — ${formatTsMsk(to)}`
+        : "";
+    searchBtn.disabled = !!msg || busy;
+    exportBtn.disabled = !!msg || busy;
+    return !msg;
+  }
+
+  function getPayload() {
+    const sel = picker.getValue();
+    const useLower = !cityOnlyCb.checked && !!sel;
+    return {
+      date_from: mskDayStartTs(fromInput.value),
+      date_to: mskDayEndTs(toInput.value),
+      date_type: closedRadio.checked ? "closed" : "created",
+      city_id: sel ? Number(sel.city_id) || null : null,
+      street_id: useLower ? Number(sel.street_id) || null : null,
+      home_id: useLower ? Number(sel.home_id) || null : null,
+      object_id: useLower ? Number(sel.object_id) || null : null,
+      city_only: cityOnlyCb.checked,
+      department_ids: [...selected],
+      status: statusRadios.open.checked ? "open" : statusRadios.close.checked ? "close" : "all",
+      staff_id:
+        canStaffFilter && staffToggle.checked
+          ? Number(staffSelect.value) || null
+          : null,
+      details_text: detailsInput.disabled ? "" : detailsInput.value.trim(),
+      solution_text: solutionInput.disabled ? "" : solutionInput.value.trim(),
+      sort: sortSelect.value,
+    };
+  }
+
+  function snapshot() {
+    const sel = picker.getValue();
+    return {
+      fromYmd: fromInput.value,
+      toYmd: toInput.value,
+      dateType: closedRadio.checked ? "closed" : "created",
+      address: sel,
+      cityOnly: cityOnlyCb.checked,
+      departmentIds: [...selected],
+      status: statusRadios.open.checked ? "open" : statusRadios.close.checked ? "close" : "all",
+      staffEnabled: staffToggle.checked,
+      staffId: Number(staffSelect.value) || null,
+      detailsText: detailsInput.value,
+      solutionText: solutionInput.value,
+      sort: sortSelect.value,
+    };
+  }
+
+  function setValues(next) {
+    fromInput.value = next.fromYmd || "";
+    toInput.value = next.toYmd || "";
+    (next.dateType === "closed" ? closedRadio : createdRadio).checked = true;
+    cityOnlyCb.checked = next.cityOnly === true;
+    if (next.address) picker.setValue(next.address);
+    else picker.reset();
+    for (const dep of departments) {
+      const cb = deptBox.querySelector(`input[value="${String(dep.id)}"]`);
+      if (cb) cb.checked = (next.departmentIds || []).map(String).includes(String(dep.id));
+    }
+    selected.clear();
+    for (const id of next.departmentIds || []) selected.add(String(id));
+    (statusRadios[next.status] || statusRadios.all).checked = true;
+    staffToggle.checked = next.staffEnabled === true;
+    if (next.staffId != null) staffSelect.value = String(next.staffId);
+    detailsInput.value = next.detailsText || "";
+    solutionInput.value = next.solutionText || "";
+    sortSelect.value = REPORTS.SORTS[next.sort] ? next.sort : REPORTS.SORT_DEFAULT;
+    refreshTextEnabled();
+    validate();
+  }
+
+  function setBusy(flag) {
+    busy = flag === true;
+    exportBtn.textContent = busy ? "Генерация..." : "Выгрузить CSV";
+    validate();
+  }
+
+  fromInput.addEventListener("change", validate);
+  toInput.addEventListener("change", validate);
+  cityOnlyCb.addEventListener("change", () => {
+    refreshTextEnabled();
+    scheduleChange();
+  });
+  sortSelect.addEventListener("change", scheduleChange);
+  searchBtn.addEventListener("click", () => {
+    if (validate()) onSubmit(getPayload());
+  });
+  exportBtn.addEventListener("click", () => {
+    if (validate()) onExport(getPayload());
+  });
+  resetBtn.addEventListener("click", () => onReset());
+
+  refreshTextEnabled();
+  validate();
+
+  return {
+    element: root,
+    getPayload,
+    snapshot,
+    setValues,
+    setBusy,
+    validate,
+    destroy: () => {
+      if (changeTimer) clearTimeout(changeTimer);
+      picker.destroy();
+    },
+  };
+}
+```
+
+---
+
+## Файл 10 — `js/reports/views/stats-view.js` (новый)
+
+**Commit:** `feat(reports): сводка по выборке с NULL-корзинами группировок`
+
+```js
+/**
+ * Сводка отчёта. Чистый рендер: числа и подписи приходят с сервера,
+ * DOM собирается createElement + textContent.
+ *
+ * NULL-корзины («Без отдела», «Без адреса»…) сервер отдаёт готовыми
+ * подписями с id:null — здесь они ничем не отличаются от обычных
+ * строк. Молча потерять их значило бы показать диспетчеру меньшее
+ * число заявок, чем он видит в таблице.
+ */
+function el(tag, attrs = {}, text = null) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "style") node.style.cssText = v;
+  }
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(Number(sec))) return "—";
+  const total = Math.round(Number(sec));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return h > 0 ? `${h} ч ${m} мин` : `${m} мин`;
+}
+
+function card(title, value) {
+  const box = el("div", {
+    class: "rep-card",
+    style:
+      "background:var(--bg-secondary);border:2px solid var(--border-color);border-radius:10px;padding:10px 14px;min-width:130px;",
+  });
+  box.appendChild(el("div", {
+    style: "font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;",
+  }, title));
+  box.appendChild(el("div", {
+    style: "font-size:20px;font-weight:700;color:var(--text-primary);",
+  }, String(value)));
+  return box;
+}
+
+function groupBlock(title, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const box = el("div", { class: "rep-group", style: "min-width:200px;" });
+  box.appendChild(el("div", {
+    style: "font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;margin-bottom:4px;",
+  }, title));
+  for (const row of rows) {
+    const line = el("div", {
+      style: "display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--text-primary);",
+    });
+    line.appendChild(el("span", {
+      style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+    }, String(row.name ?? "—")));
+    line.appendChild(el("span", { style: "font-weight:600;" }, String(row.count ?? 0)));
+    box.appendChild(line);
+  }
+  return box;
+}
+
+export function renderStats(host, stats) {
+  host.innerHTML = "";
+  if (!stats) {
+    host.appendChild(el("div", {
+      class: "rep-stats-empty",
+      style: "font-size:13px;color:var(--text-secondary);margin:8px 0;",
+    }, "Нет данных за выбранный период."));
+    return;
+  }
+  const cards = el("div", {
+    style: "display:flex;gap:10px;flex-wrap:wrap;margin:10px 0;",
+  });
+  cards.appendChild(card("Всего", stats.total ?? 0));
+  cards.appendChild(card("Открыто", stats.open ?? 0));
+  cards.appendChild(card("Закрыто", stats.closed ?? 0));
+  cards.appendChild(card("Среднее время закрытия", fmtDuration(stats.avg_close_time_seconds)));
+  const repair = stats.avg_repair_time || {};
+  cards.appendChild(card(
+    "Срок ремонта (сервер/диспетчер)",
+    `${repair.default ?? 0} / ${repair.custom ?? 0}`,
+  ));
+  host.appendChild(cards);
+
+  const grid = el("div", {
+    class: "rep-stats-grid",
+    style: "display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;",
+  });
+  const blocks = [
+    ["По отделам", stats.by_department],
+    ["По городам", stats.by_city],
+    ["По группам", stats.by_group],
+    ["По типам запроса", stats.by_request],
+  ];
+  for (const [title, rows] of blocks) {
+    const b = groupBlock(title, rows);
+    if (b) grid.appendChild(b);
+  }
+  const levels = Array.isArray(stats.by_alert_level)
+    ? stats.by_alert_level.map((r) => ({ name: `Уровень ${r.level}`, count: r.count }))
+    : [];
+  const lb = groupBlock("По уровням тревоги", levels);
+  if (lb) grid.appendChild(lb);
+  if (grid.childElementCount > 0) host.appendChild(grid);
+}
+```
+
+---
+
+## Файл 11 — `js/reports/views/table-view.js` (новый)
+
+**Commit:** `feat(reports): таблица отчёта на общих table/* без клиентской сортировки`
+
+```js
+import { REPORTS } from "../../config.js";
+import { setScope, setReportColumns } from "../../table/settings.js";
+import { rebuildTableHeaders } from "../../table/header-render.js";
+import { renderTableBody } from "../../table/body-render.js";
+
+/**
+ * Таблица отчёта переиспользует header-render/body-render: липкие
+ * колонки, ширины per-user и подсветка тревоги достаются бесплатно.
+ *
+ * Своё здесь только одно — гарантия источника колонок: setScope +
+ * setReportColumns перед КАЖДЫМ рендером, по образцу _renderTableFull
+ * журналов. applyUserSettings сбрасывает scope на "open" и обнуляет
+ * reportSource при смене пользователя, поэтому точка гарантии одна.
+ *
+ * Колонки sortable:false целиком ⇒ header-render не вешает клики,
+ * sorting.js не вызывается: сортировка отчёта серверная, направление
+ * фиксировано белым списком REPORTS.SORTS.
+ */
+export function createTableView(table, router) {
+  let rowClickAbort = null;
+
+  function ensureColumns() {
+    setScope("report");
+    setReportColumns(REPORTS.COLUMNS);
+  }
+
+  function rebuildHeaders() {
+    ensureColumns();
+    const old = table.querySelector("thead");
+    if (old) old.remove();
+    // onSortCallback не вызывается никогда (sortable:false), но
+    // сигнатура обязательна — передаём noop осознанно.
+    rebuildTableHeaders(table, () => {}, () => {});
+  }
+
+  function renderRows(items) {
+    ensureColumns();
+    renderTableBody(table, Array.isArray(items) ? items : []);
+  }
+
+  function bindRowClick() {
+    if (rowClickAbort) rowClickAbort.abort();
+    rowClickAbort = new AbortController();
+    const tbody = table.querySelector("tbody");
+    if (!tbody) return;
+    tbody.addEventListener(
+      "click",
+      (e) => {
+        if (e.target.classList.contains("resizer")) return;
+        const row = e.target.closest("tr");
+        if (!row) return;
+        const idCell = row.querySelector('td[data-col-id="id"]');
+        const id = idCell ? idCell.textContent.trim() : "";
+        // Только серверные номера: роутер валидирует param строго.
+        if (!/^\d+$/.test(id)) return;
+        router.navigate("#/ticket/" + encodeURIComponent(id));
+      },
+      { signal: rowClickAbort.signal },
+    );
+  }
+
+  function renderPagination(container, pagination, onPage) {
+    container.innerHTML = "";
+    if (!pagination || !pagination.total_items) return;
+    const page = pagination.current_page;
+    const pages = Math.max(1, pagination.total_pages);
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "theme-toggle-btn";
+    prev.style.cssText = "border-radius:6px;width:auto;padding:0 10px;font-size:13px;";
+    prev.textContent = "‹";
+    prev.disabled = page <= 1;
+    prev.addEventListener("click", () => onPage(page - 1));
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "theme-toggle-btn";
+    next.style.cssText = "border-radius:6px;width:auto;padding:0 10px;font-size:13px;";
+    next.textContent = "›";
+    next.disabled = page >= pages;
+    next.addEventListener("click", () => onPage(page + 1));
+    const info = document.createElement("span");
+    info.textContent = `Стр. ${page} из ${pages} (всего ${pagination.total_items})`;
+    container.appendChild(prev);
+    container.appendChild(info);
+    container.appendChild(next);
+  }
+
+  function destroy() {
+    if (rowClickAbort) rowClickAbort.abort();
+    rowClickAbort = null;
+  }
+
+  return { ensureColumns, rebuildHeaders, renderRows, bindRowClick, renderPagination, destroy };
+}
+```
+
+---
+
