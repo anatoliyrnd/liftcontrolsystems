@@ -1,18 +1,11 @@
 import { REPORTS } from "../../config.js";
 
 /**
- * Шаблон экрана отчётов. Строка, как у остальных страниц (router
- * вставляет её innerHTML): статический шаблон — разрешённое исключение
- * правила «DOM через createElement».
- *
- * Все id с префиксом rep*: unmount журналов не защищён guard и трогает
- * #searchInput / #cityFilterBackdrop / #refreshBtn по глобальному
- * getElementById — совпадение имени сломало бы чужой teardown.
- *
- * Таблица — своя (#reportsTable), не #dataTable: CSS зебры/липких
- * колонок журналов привязан к #dataTable, а тур и sync-кнопка ищут
- * журнальную разметку. data-scope/data-mode="report" дают settings.js
- * и body-render свою ширину липкого id и свой набор колонок.
+ * Шаблон экрана отчётов, волна 1.1.
+ * Сводка и расширенный поиск — раздельные хосты: вьюхи ленивые,
+ * пикер адреса живёт только внутри repTabAdvanced.
+ * Все id с префиксом rep* — unmount журналов трогает глобальные
+ * #searchInput / #cityFilterBackdrop / #refreshBtn.
  */
 export function reportsPageTemplate() {
     const tabBtn = (tab, label) =>
@@ -26,8 +19,9 @@ export function reportsPageTemplate() {
         ${tabBtn("advanced", REPORTS.TABS.advanced)}
       </div>
     </div>
-    <div id="repOfflineStub" class="rep-stub" style="display:none;">
-      Отчеты доступны только при наличии интернета.
+    <div id="repOfflineStub" class="rep-stub" style="display:none;"></div>
+    <div id="repTabSummary" class="rep-panel">
+      <div id="repSummaryHost"></div>
     </div>
     <div id="repTabById" class="rep-panel" style="display:none;">
       <div style="display:flex;gap:8px;align-items:center;max-width:420px;">
@@ -38,7 +32,7 @@ export function reportsPageTemplate() {
         Поиск по ID игнорирует остальные фильтры: откроется карточка заявки.
       </div>
     </div>
-    <div id="repTabMain" class="rep-panel">
+    <div id="repTabAdvanced" class="rep-panel" style="display:none;">
       <div id="repFiltersHost"></div>
       <div id="repStatsHost"></div>
       <div class="table-wrapper">
