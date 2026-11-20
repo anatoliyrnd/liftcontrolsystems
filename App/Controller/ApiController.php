@@ -8,7 +8,7 @@ use App\Http\{Request, Response, ErrorCode};
 use App\Tenant;
 use App\Exceptions\ApiException;
 use App\Support\CallPolicy;
-use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository};
+use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository, ReportsRepository};
 use App\Service\{
     AuthService,
     CallService,
@@ -17,7 +17,9 @@ use App\Service\{
     AddressService,
     NotificationsService,
     AddressCacheService,
-    OrgLoginService
+    OrgLoginService,
+    ReportsService
+
 };
 
 final class ApiController
@@ -38,6 +40,7 @@ final class ApiController
     private DB $db;
     private NotificationsService $notificationsService;
     private AddressCacheService $addressCacheService;
+    private ReportsService $reportsService;
     private OrgLoginService $orgLogin;
     private ?Tenant $tenant;
 
@@ -50,6 +53,7 @@ final class ApiController
         NotificationsService $notificationsService,
         AddressCacheService $addressCacheService,
         OrgLoginService $orgLogin,
+        ReportsService $reportsService,
         ?Tenant $tenant
     ) {
         $this->authService = $authService;
@@ -60,6 +64,7 @@ final class ApiController
         $this->notificationsService = $notificationsService;
         $this->addressCacheService = $addressCacheService;
         $this->orgLogin = $orgLogin;
+        $this->reportsService = $reportsService;
         $this->tenant = $tenant;
     }
 
@@ -82,6 +87,7 @@ final class ApiController
         // Тот же $userRepo, что у AuthService: второй экземпляр не нужен,
         // соединение и так одно на тенант.
         $orgLogin = new OrgLoginService($db, $userRepo, $tenant);
+        $reportsService = new ReportsService(new ReportsRepository($db), $tenant);
 
         $callService = new CallService(
             $callRepo,
@@ -103,6 +109,7 @@ final class ApiController
             $notificationsService,
             $addressCacheService,
             $orgLogin,
+            $reportsService,
             $tenant
         );
     }
@@ -135,6 +142,11 @@ final class ApiController
 
             // B2.6: результат пачки — под data, как у ticket (§0.3).
             'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
+            // Отчёты (§15 v6.2): ответ под data, права проверяет сервис.
+            'reports_filters_data' => Response::ok(['data' => $this->reportsService->getFiltersData($user)]),
+            'reports_stats'        => Response::ok(['data' => $this->reportsService->getStats($user, $request->body)]),
+            'reports_list'         => Response::ok(['data' => $this->reportsService->getList($user, $request->body)]),
+            'reports_export'       => Response::ok($this->reportsService->exportResponse($user, $request->body)),
 
             default => throw new ApiException(ErrorCode::UnknownAction, 'Неизвестное действие: ' . $request->action)
         };
