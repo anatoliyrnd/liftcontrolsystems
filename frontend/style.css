@@ -3258,6 +3258,105 @@ tr[data-demo="true"] td:first-child {
     .rep-kpi { min-width: 118px; padding: 10px 12px; }
     .rep-kpi-value { font-size: 20px; }
 }
+/* ==========================================================================
+ПОДСКАЗКИ СВОДКИ (hover только на больших экранах)
+========================================================================== */
+.rep-kpi-has-tip { position: relative; cursor: help; padding-right: 30px; }
+.rep-kpi-has-tip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.rep-kpi-info {
+    position: absolute;
+    top: 8px;
+    right: 9px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    font-style: normal;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.rep-kpi-has-tip:hover .rep-kpi-info {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.rep-kpi-warning { border-color: #f59e0b; }
+.rep-kpi-warning .rep-kpi-value { color: #d97706; }
+[data-theme="dark"] .rep-kpi-warning .rep-kpi-value { color: #fbbf24; }
+.rep-tip {
+    position: fixed;
+    z-index: 9200;
+    display: none;
+    max-width: min(520px, calc(100vw - 24px));
+    max-height: 340px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--text-primary);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+}
+.rep-tip::-webkit-scrollbar { width: 8px; }
+.rep-tip::-webkit-scrollbar-track { background: transparent; }
+.rep-tip::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 8px;
+}
+.rep-tip::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+.rep-tip-title { font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+.rep-tip-note { font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
+.rep-tip-empty { font-size: 12px; color: var(--text-secondary); }
+.rep-tip-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 2px 0;
+}
+.rep-tip-num { font-weight: 700; }
+.rep-tip-table { display: flex; flex-direction: column; gap: 2px; }
+.rep-tip-tr {
+    display: grid;
+    grid-template-columns: 52px minmax(110px, 1fr) 104px 104px 40px;
+    gap: 8px;
+    align-items: center;
+    padding: 2px 0;
+}
+.rep-tip-th {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+}
+.rep-tip-addr {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.rep-tip-id { font-weight: 700; color: var(--accent); }
+/* Гейт дублирует matchMedia из hover-tip.js: CSS не читает config.js.
+   На тач и узких экранах подсказок нет — значок «i» тоже скрыт,
+   чтобы не обещать недоступное. */
+@media (max-width: 1023px), (hover: none), (pointer: coarse) {
+    .rep-tip { display: none !important; }
+    .rep-kpi-info { display: none; }
+    .rep-kpi-has-tip { cursor: default; padding-right: 18px; }
+}
 .rep-invalid { border-color: #ef4444 !important; }
 .rep-stub {
     padding: 14px 16px;
