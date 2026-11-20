@@ -17,8 +17,56 @@ use App\Support\ReportsQueryBuilder;
  */
 final class ReportsRepository
 {
+    /**
+     * Порог «медленного» закрытия застревания, минуты.
+     * Бизнес-число живёт здесь и уезжает клиенту в ответе: дублировать
+     * его в js/config.js значит получить два источника, которые
+     * разъедутся при первой же правке.
+     */
+    private const int SLOW_CLOSE_MINUTES = 50;
+
+    /** Сколько строк уезжает в подсказку. Остальное — расширенный поиск. */
+    private const int TIP_ROWS = 50;
+
+    /**
+     * Группы «застревание». Явные ID приоритетнее поиска по имени:
+     * у тенантов свои type_id, хардкод одного номера сломал бы отчёт
+     * на соседней организации. Пустой список → работаем по имени.
+     */
+    private const array ENTRAPMENT_GROUP_IDS = [];
+    private const string ENTRAPMENT_NAME_LIKE = '%астреван%';
+
     public function __construct(private DB $db)
     {
+    }
+
+    /** @return array<int,array{type_id:int|string,type_name:string}> */
+    private function entrapmentGroups(): array
+    {
+        $cond = [];
+        $p = [];
+        $ids = self::ENTRAPMENT_GROUP_IDS;
+        if ($ids !== []) {
+            $ph = [];
+            foreach (array_values($ids) as $i => $id) {
+                $ph[] = ":eg$i";
+                $p["eg$i"] = (int) $id;
+            }
+            $cond[] = 'type_id IN (' . implode(', ', $ph) . ')';
+        }
+        if (self::ENTRAPMENT_NAME_LIKE !== '') {
+            $cond[] = 'type_name LIKE :eg_like';
+            $p['eg_like'] = self::ENTRAPMENT_NAME_LIKE;
+        }
+        if ($cond === []) {
+            return [];
+        }
+        return $this->db->fetchAll(
+            'SELECT type_id, type_name FROM lift_types
+             WHERE type = 3 AND (' . implode(' OR ', $cond) . ')
+             ORDER BY type_name',
+            $p
+        );
     }
 
     public function getFiltersData(): array
@@ -142,13 +190,31 @@ final class ReportsRepository
         [$snapWhere, $snapP] = $qb->buildSnapshotWhere();
         $openWhere = "$snapWhere AND c.call_status = 0";
 
+        // Просрочка считается один раз во вложенном SELECT: в нативном
+        // prepare нельзя повторить :now шесть раз (HY093). Наружу
+        // приходят готовые корзины — клиент их не пересчитывает.
+        //
+        // Диапазоны НЕпересекающиеся и в сумме дают overdue_now.
+        // Накопительные («< 5 часов» вместе с «< часа») посчитали бы
+        // одну заявку дважды, и сумма не сошлась бы с плиткой.
+        // NULL od (срок не задан) во все SUM не попадает.
         $openP = $snapP;
         $openP['now'] = $now;
         $open = $this->db->fetchOne(
             "SELECT COUNT(*) AS open_now,
-                    COALESCE(SUM(c.expected_repair_time > 0 AND c.expected_repair_time < :now), 0) AS overdue_now
-             FROM lift_calls c
-             WHERE $openWhere",
+                    COALESCE(SUM(od > 0), 0) AS overdue_now,
+                    COALESCE(SUM(od > 0 AND od < 3600), 0) AS b_hour,
+                    COALESCE(SUM(od >= 3600 AND od < 18000), 0) AS b_5h,
+                    COALESCE(SUM(od >= 18000 AND od < 86400), 0) AS b_day,
+                    COALESCE(SUM(od >= 86400 AND od < 604800), 0) AS b_week,
+                    COALESCE(SUM(od >= 604800), 0) AS b_old
+             FROM (
+                 SELECT CASE WHEN c.expected_repair_time > 0
+                             THEN :now - c.expected_repair_time
+                             ELSE NULL END AS od
+                 FROM lift_calls c
+                 WHERE $openWhere
+             ) t",
             $openP
         ) ?? [];
 
@@ -172,9 +238,76 @@ final class ReportsRepository
             $createdP
         );
 
+        // Медленные застревания — ПЕРИОДНАЯ метрика (закрытые за период),
+        // в отличие от просрочки, которая является срезом «на сейчас».
+        // Группы резолвятся один раз; если ни одной не нашлось, отдаём
+        // честный ноль с пустым group_names, а не считаем всё подряд.
+        $groups = $this->entrapmentGroups();
+        $slow = [
+            'threshold_minutes' => self::SLOW_CLOSE_MINUTES,
+            'count' => 0,
+            'group_names' => array_map(
+                static fn (array $g): string => (string) $g['type_name'],
+                $groups
+            ),
+            'items' => [],
+            'truncated' => false,
+        ];
+        if ($groups !== []) {
+            $gph = [];
+            $gp = [];
+            foreach ($groups as $i => $g) {
+                $gph[] = ":sg$i";
+                $gp["sg$i"] = (int) $g['type_id'];
+            }
+            $slowWhere = "$snapWhere AND c.call_status = 1"
+                . ' AND c.call_date2 >= :s_from AND c.call_date2 <= :s_to'
+                . ' AND c.call_group IN (' . implode(', ', $gph) . ')'
+                . ' AND (c.call_date2 - c.call_date) > :s_sec';
+            $slowP = $snapP + $gp + [
+                    's_from' => $from,
+                    's_to' => $to,
+                    's_sec' => self::SLOW_CLOSE_MINUTES * 60,
+                ];
+
+            $slow['count'] = (int) $this->db->fetchColumn(
+                "SELECT COUNT(*) FROM lift_calls c WHERE $slowWhere",
+                $slowP
+            );
+
+            // +1 строка — признак обрезки. Молча резать нельзя: пользователь
+            // должен знать, что в подсказке не всё.
+            $rows = $this->db->fetchAll(
+                "SELECT c.call_id, c.call_adres, c.call_date, c.call_date2
+                 FROM lift_calls c WHERE $slowWhere
+                 ORDER BY (c.call_date2 - c.call_date) DESC, c.call_id DESC
+                 LIMIT " . (self::TIP_ROWS + 1),
+                $slowP
+            );
+            $slow['truncated'] = count($rows) > self::TIP_ROWS;
+            $slow['items'] = array_map(
+                static fn (array $r): array => [
+                    'id' => (int) $r['call_id'],
+                    'address' => (string) $r['call_adres'],
+                    'date' => (int) $r['call_date'],
+                    'close_date' => (int) $r['call_date2'],
+                    'minutes' => (int) round(((int) $r['call_date2'] - (int) $r['call_date']) / 60),
+                ],
+                array_slice($rows, 0, self::TIP_ROWS)
+            );
+        }
+
         return [
             'open_now' => (int) ($open['open_now'] ?? 0),
             'overdue_now' => (int) ($open['overdue_now'] ?? 0),
+            'overdue_buckets' => [
+                'lt_hour' => (int) ($open['b_hour'] ?? 0),
+                'lt_5hours' => (int) ($open['b_5h'] ?? 0),
+                'lt_day' => (int) ($open['b_day'] ?? 0),
+                'lt_week' => (int) ($open['b_week'] ?? 0),
+                'gte_week' => (int) ($open['b_old'] ?? 0),
+            ],
+            'slow_entrapment' => $slow,
             'closed_period' => (int) ($closed['cnt'] ?? 0),
             'created_period' => $created,
             'avg_close_time_seconds' => ($closed['avg_close'] ?? null) !== null
