@@ -327,12 +327,19 @@ export function createFiltersView(opts) {
         cityOnlyCb.checked = next.cityOnly === true;
         if (next.address) picker.setValue(next.address);
         else picker.reset();
+        // null или пустой список = «все отделы»: ноль галочек —
+        // невалидное состояние UI (защита последнего отдела), а payload
+        // [] на сервере молча означает «условия по отделу нет».
+        const depIds =
+            Array.isArray(next.departmentIds) && next.departmentIds.length > 0
+                ? next.departmentIds.map(String)
+                : departments.map((d) => String(d.id));
         for (const dep of departments) {
             const cb = deptBox.querySelector(`input[value="${String(dep.id)}"]`);
-            if (cb) cb.checked = (next.departmentIds || []).map(String).includes(String(dep.id));
+            if (cb) cb.checked = depIds.includes(String(dep.id));
         }
         selected.clear();
-        for (const id of next.departmentIds || []) selected.add(String(id));
+        for (const id of depIds) selected.add(id);
         (statusRadios[next.status] || statusRadios.all).checked = true;
         staffToggle.checked = next.staffEnabled === true;
         if (next.staffId != null) staffSelect.value = String(next.staffId);
