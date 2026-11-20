@@ -122,6 +122,87 @@ final class ReportsRepository
         ];
     }
 
+    /**
+     * Сводка. Два независимых набора условий:
+     *   срез   — открытые/просроченные на сейчас, без периода;
+     *   период — закрытые/созданные за понедельник→сегодня и т.п.
+     *
+     * Просрочка = определение body-render, чтобы цифра и красная ячейка
+     * в журнале не разошлись: открыта И срок > 0 И срок < now.
+     * now приходит параметром из PHP time(): @@session.time_zone = SYSTEM
+     * (§1.2) в сравнение не вмешивается.
+     *
+     * Три отдельных запроса вместо одного с CASE: в нативном prepare
+     * нельзя повторить :p_from трижды (HY093), а плодить p_from1/2/3
+     * нечитаемо. Сводка не hot path — шесть запросов дешевле путаницы.
+     */
+    public function getSummary(array $f, array $user, int $from, int $to, int $now): array
+    {
+        $qb = new ReportsQueryBuilder($f, $user);
+        [$snapWhere, $snapP] = $qb->buildSnapshotWhere();
+        $openWhere = "$snapWhere AND c.call_status = 0";
+
+        $openP = $snapP;
+        $openP['now'] = $now;
+        $open = $this->db->fetchOne(
+            "SELECT COUNT(*) AS open_now,
+                    COALESCE(SUM(c.expected_repair_time > 0 AND c.expected_repair_time < :now), 0) AS overdue_now
+             FROM lift_calls c
+             WHERE $openWhere",
+            $openP
+        ) ?? [];
+
+        $closedP = $snapP;
+        $closedP['c_from'] = $from;
+        $closedP['c_to'] = $to;
+        $closed = $this->db->fetchOne(
+            "SELECT COUNT(*) AS cnt, AVG(c.call_date2 - c.call_date) AS avg_close
+             FROM lift_calls c
+             WHERE $snapWhere AND c.call_status = 1
+               AND c.call_date2 >= :c_from AND c.call_date2 <= :c_to",
+            $closedP
+        ) ?? [];
+
+        $createdP = $snapP;
+        $createdP['n_from'] = $from;
+        $createdP['n_to'] = $to;
+        $created = (int) $this->db->fetchColumn(
+            "SELECT COUNT(*) FROM lift_calls c
+             WHERE $snapWhere AND c.call_date >= :n_from AND c.call_date <= :n_to",
+            $createdP
+        );
+
+        return [
+            'open_now' => (int) ($open['open_now'] ?? 0),
+            'overdue_now' => (int) ($open['overdue_now'] ?? 0),
+            'closed_period' => (int) ($closed['cnt'] ?? 0),
+            'created_period' => $created,
+            'avg_close_time_seconds' => ($closed['avg_close'] ?? null) !== null
+                ? (int) round((float) $closed['avg_close'])
+                : null,
+            // Разбивки — по ОТКРЫТЫМ на сейчас, не по периоду. Имена
+            // open_by_* намеренно не совпадают с by_* из getStats:
+            // там период, здесь срез, путать нельзя.
+            'open_by_department' => $this->grouped(
+                'LEFT JOIN lift_types d ON d.type_id = c.call_department AND d.type = 1',
+                'd.type_id', 'd.type_name', $openWhere, $snapP, 'Без отдела'
+            ),
+            'open_by_city' => $this->grouped(
+                'LEFT JOIN lift_city ci ON ci.id = c.address_city',
+                'ci.id', 'ci.city_name', $openWhere, $snapP, 'Без адреса'
+            ),
+            'open_by_alert_level' => array_map(
+                static fn (array $r): array => ['level' => (int) $r['level'], 'count' => (int) $r['cnt']],
+                $this->db->fetchAll(
+                    "SELECT c.alert_level AS level, COUNT(*) AS cnt
+                     FROM lift_calls c WHERE $openWhere
+                     GROUP BY c.alert_level ORDER BY c.alert_level ASC",
+                    $snapP
+                )
+            ),
+        ];
+    }
+
     public function countTotal(array $f, array $user): int
     {
         $qb = new ReportsQueryBuilder($f, $user);
