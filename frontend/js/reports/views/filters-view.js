@@ -52,6 +52,12 @@ export function createFiltersView(opts) {
     const v = initial || {};
     const root = el("div", { class: "rep-filters" });
     let busy = false;
+    let cooldownUntil = 0;
+    // hasOwnProperty, а не truthy-lookup: SORTS["constructor"] и
+    // ["__proto__"] truthy и уводили select.value в пустоту.
+    const isKnownSort = (s) =>
+        Object.prototype.hasOwnProperty.call(REPORTS.SORTS, s);
+    const safeStatus = (s) => (["all", "open", "close"].includes(s) ? s : "all");
 
     // --- период -------------------------------------------------------
     const fromInput = el("input", { type: "date", class: "search-input rep-date", id: "repDateFrom" });
@@ -102,8 +108,13 @@ export function createFiltersView(opts) {
         class: "rep-dept",
         style: "display:flex;flex-wrap:wrap;gap:4px 14px;max-height:88px;overflow-y:auto;",
     });
+    // Ссылки на чекбоксы — Map, а не querySelector по значению:
+    // id справочника попадает в строку селектора, и кавычка/скобка
+    // в значении ломала setValues (SyntaxError) или матчила чужой узел.
+    const deptCheckboxes = new Map();
     for (const dep of departments) {
         const cb = el("input", { type: "checkbox", value: String(dep.id) });
+        deptCheckboxes.set(String(dep.id), cb);
         cb.checked = selected.has(String(dep.id));
         cb.addEventListener("change", () => {
             const checked = cb.checked === true;
@@ -144,7 +155,7 @@ export function createFiltersView(opts) {
     for (const [value, text] of Object.entries(REPORTS.SORTS)) {
         sortSelect.appendChild(el("option", { value }, text));
     }
-    sortSelect.value = REPORTS.SORTS[v.sort] ? v.sort : REPORTS.SORT_DEFAULT;
+    sortSelect.value = isKnownSort(v.sort) ? v.sort : REPORTS.SORT_DEFAULT;
 
     const staffToggle = el("input", { type: "checkbox", id: "repStaffToggle" });
     staffToggle.checked = v.staffEnabled === true;
@@ -274,10 +285,16 @@ export function createFiltersView(opts) {
                 ? `Период МСК: ${formatTsMsk(from)} — ${formatTsMsk(to)}`
                 : "";
         searchBtn.disabled = !!msg || busy;
-        exportBtn.disabled = !!msg || busy;
+        // Кулдаун переживает setBusy(false): поиск не должен разблокировать
+        // CSV раньше серверного окна 30 с.
+        exportBtn.disabled = !!msg || busy || Date.now() < cooldownUntil;
         return !msg;
     }
 
+    function setCooldown(sec) {
+        cooldownUntil = Date.now() + Math.max(1, Number(sec) || 1) * 1000;
+        validate();
+    }
     function getPayload() {
         const sel = picker.getValue();
         const useLower = !cityOnlyCb.checked && !!sel;
@@ -335,17 +352,19 @@ export function createFiltersView(opts) {
                 ? next.departmentIds.map(String)
                 : departments.map((d) => String(d.id));
         for (const dep of departments) {
-            const cb = deptBox.querySelector(`input[value="${String(dep.id)}"]`);
+            const cb = deptCheckboxes.get(String(dep.id));
             if (cb) cb.checked = depIds.includes(String(dep.id));
         }
         selected.clear();
         for (const id of depIds) selected.add(id);
-        (statusRadios[next.status] || statusRadios.all).checked = true;
+        // Белый список: next.status из localStorage, "__proto__" иначе
+        // писал бы checked в Object.prototype.
+        statusRadios[safeStatus(next.status)].checked = true;
         staffToggle.checked = next.staffEnabled === true;
         if (next.staffId != null) staffSelect.value = String(next.staffId);
         detailsInput.value = next.detailsText || "";
         solutionInput.value = next.solutionText || "";
-        sortSelect.value = REPORTS.SORTS[next.sort] ? next.sort : REPORTS.SORT_DEFAULT;
+        sortSelect.value = isKnownSort(next.sort) ? next.sort : REPORTS.SORT_DEFAULT;
         refreshTextEnabled();
         validate();
     }
@@ -380,6 +399,7 @@ export function createFiltersView(opts) {
         snapshot,
         setValues,
         setBusy,
+        setCooldown,
         validate,
         destroy: () => {
             if (changeTimer) clearTimeout(changeTimer);

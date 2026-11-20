@@ -54,17 +54,18 @@ export class ReportsController {
         this.state = loadReportState();
 
         if (!this._grabElements()) return;
-        this._bindTabs();
-        this._bindById();
         this._subscribeNetwork();
 
         // Серверные права приоритетны (правило 7): локальная проверка —
-        // лишь UX. Инженер с position=foreman получает фильтр по
-        // ответственному (§15.6), меню ему не показываем.
+        // лишь UX. Гейт ДО привязки форм: на экране-заглушке не должно
+        // оставаться рабочей формы «Поиск по ID».
         if (!this._canView()) {
+            this._els.stub.dataset.denied = "1";
             this._showStub("Отчёты недоступны для вашей роли.");
             return;
         }
+        this._bindTabs();
+        this._bindById();
         if (!navigator.onLine) {
             this._setOffline(true);
             return;
@@ -342,10 +343,13 @@ export class ReportsController {
 
     _startCooldown(sec) {
         if (this._cooldownTimer) clearTimeout(this._cooldownTimer);
-        this.filtersView?.setBusy(true);
+        // Кулдаун живёт во вьюхе (cooldownUntil), а не в busy: иначе
+        // setBusy(false) после любого поиска разблокировал бы CSV раньше
+        // серверного окна. Таймер здесь только перепроверяет disabled.
+        this.filtersView?.setCooldown(sec);
         this._cooldownTimer = setTimeout(() => {
             this._cooldownTimer = null;
-            if (this._isActive) this.filtersView?.setBusy(false);
+            if (this._isActive) this.filtersView?.validate();
         }, Math.max(1, sec) * 1000);
     }
 
@@ -355,6 +359,9 @@ export class ReportsController {
     _setOffline(flag) {
         if (!this._els) return;
         if (flag) {
+            // Отказ роли не перетираем офлайн-заглушкой: причина отказа
+            // важнее состояния канала.
+            if (this._els.stub.dataset.denied === "1") return;
             this._showStub("Отчёты доступны только при наличии интернета.");
         } else if (this._els.stub.dataset.denied !== "1") {
             this._els.stub.style.display = "none";
