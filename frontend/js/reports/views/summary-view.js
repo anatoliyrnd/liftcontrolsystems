@@ -402,6 +402,11 @@ export function createSummaryView(opts) {
         skeleton.style.display = "none";
         updating.style.display = "none";
         content.classList.remove("is-updating");
+        // Плитки сейчас будут удалены: снимаем их слушатели и прячем
+        // подсказку. Без reset() обработчики копятся на attachAbort до
+        // unmount, а окно висит над пустым местом с aria-describedby
+        // на detached-узле.
+        hoverTip.reset();
         content.innerHTML = "";
         if (!data) {
             periodLine.textContent = "";
@@ -443,6 +448,9 @@ export function createSummaryView(opts) {
         skeleton.style.display = "";
         updating.style.display = "none";
         content.classList.remove("is-updating");
+        // Скелетон тоже удаляет плитки: подсказку гасим сразу, не дожидаясь
+        // render(). Иначе на время запроса она висит над shimmer-блоками.
+        hoverTip.reset();
         content.innerHTML = "";
     }
     function setUpdating(flag) {
