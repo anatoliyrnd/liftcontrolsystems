@@ -196,3 +196,61 @@ export const OFFLINE = {
   /** Время блокировки кнопки синхронизации после 5 неудачных попыток (в мс) */
   SYNC_COOLDOWN_MS: 3 * 60 * 1000,
 };
+// ============================================================================
+// REPORTS — модуль отчётов (§15 v6.2). Только онлайн, без outbox.
+// ============================================================================
+export const REPORTS = {
+  /** Максимальная дельта периода, дней (90 календарных включительно) */
+  MAX_RANGE_DAYS: 90,
+  /** Минимальная длина полнотекстового поиска */
+  MIN_TEXT_LEN: 6,
+  /** Пагинация: сервер режет min(LIMIT_MAX, max(LIMIT_MIN, limit)) */
+  LIMIT_DEFAULT: 50,
+  LIMIT_MIN: 10,
+  LIMIT_MAX: 200,
+  /** Потолок строк экспорта; 2001-я строка на сервере = ошибка */
+  EXPORT_MAX_ROWS: 2000,
+  /** Кулдаун экспорта, с; читается из resp.retryAfterSec, это фолбэк */
+  EXPORT_COOLDOWN_SEC: 30,
+  /** Таймаут запроса экспорта, мс (аддитивный параметр api-service) */
+  EXPORT_TIMEOUT_MS: 30000,
+  /** Период по умолчанию при первом входе, дней назад */
+  DEFAULT_PERIOD_DAYS: 7,
+  /** Белый список сортировок; направление фиксировано сервером */
+  SORTS: {
+    date: "По дате",
+    address: "По адресу",
+    department: "По отделу",
+  },
+  SORT_DEFAULT: "date",
+  TABS: {
+    summary: "Сводка",
+    byId: "Поиск по ID",
+    advanced: "Расширенный поиск",
+  },
+  TAB_DEFAULT: "summary",
+  /**
+   * Колонки отчёта — источник на клиенте (волна 1, сервер columns не
+   * отдаёт). Форма — та, что ждёт normalizeReportSource в settings.js:
+   * type "timestamp" станет dataType "date". sortable:false у всех:
+   * header-render вешает клик только внутри if (col.sortable), значит
+   * заголовки некликабельны и клиентский sorting.js не вызывается.
+   */
+  COLUMNS: [
+    { id: "id", name: "№", type: "number", sortable: false, default_visible: true, minWidth: 80 },
+    { id: "address", name: "Адрес", type: "string", sortable: false, default_visible: true, minWidth: 260 },
+    { id: "details", name: "Описание проблемы", type: "string", sortable: false, default_visible: true, minWidth: 220 },
+    { id: "department", name: "Отдел", type: "string", sortable: false, default_visible: true, minWidth: 160 },
+    { id: "staff_name", name: "Ответственный", type: "string", sortable: false, default_visible: true, minWidth: 160 },
+    { id: "notify_status", name: "Статус уведомления", type: "string", sortable: false, default_visible: true, minWidth: 220 },
+    { id: "date", name: "Дата создания", type: "timestamp", sortable: false, default_visible: true, minWidth: 140 },
+    { id: "repair_time", name: "Срок ремонта", type: "timestamp", sortable: false, default_visible: true, minWidth: 150 },
+    { id: "close_date", name: "Дата закрытия", type: "timestamp", sortable: false, default_visible: true, minWidth: 140 },
+    { id: "close_name", name: "Кто закрыл", type: "string", sortable: false, default_visible: true, minWidth: 150 },
+    { id: "solution", name: "Решение/Устранение", type: "string", sortable: false, default_visible: true, minWidth: 180 },
+    { id: "staff_name2", name: "Ответственный 2", type: "string", sortable: false, default_visible: false, minWidth: 160 },
+    { id: "notify_status2", name: "Статус уведомления 2", type: "string", sortable: false, default_visible: false, minWidth: 220 },
+    { id: "staff_name3", name: "Ответственный 3", type: "string", sortable: false, default_visible: false, minWidth: 160 },
+    { id: "notify_status3", name: "Статус уведомления 3", type: "string", sortable: false, default_visible: false, minWidth: 220 },
+  ],
+};
