@@ -1,0 +1,35 @@
+import { REPORTS } from "../config.js";
+
+/**
+ * Изоляция api.post для отчётов. Контроллер классифицирует ответы
+ * сам: offline === true — отказ канала, code:"aborted" без offline —
+ * отмена при unmount, http_* — ошибка сервера, не офлайн.
+ *
+ * Тег "reports" обязателен: unmount гасит только свои запросы и не
+ * задевает журнальные. filters_data идёт silent (null): справочники
+ * не должны мигать статус-баром поверх работы пользователя.
+ */
+export function createReportsRepository(api) {
+    const tag = "reports";
+    return {
+        fetchFiltersData: () =>
+            api.post({ action: "reports_filters_data" }, null, tag),
+        fetchStats: (filters) =>
+            api.post({ action: "reports_stats", ...filters }, "Формирование сводки...", tag),
+        fetchList: (filters, page, limit) =>
+            api.post(
+                { action: "reports_list", ...filters, page, limit },
+                "Загрузка отчёта...",
+                tag,
+            ),
+        // 30 с: 2000 строк CSV не укладываются в дефолтные 15 с.
+        // Бюджет цепочки api-service масштабируется от этого значения.
+        exportCsv: (filters) =>
+            api.post(
+                { action: "reports_export", format: "csv", ...filters },
+                "Генерация CSV...",
+                tag,
+                { timeoutMs: REPORTS.EXPORT_TIMEOUT_MS },
+            ),
+    };
+}
