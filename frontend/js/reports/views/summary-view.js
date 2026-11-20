@@ -422,11 +422,34 @@ export function createSummaryView(opts) {
         const closedLabel = p.preset === "today" ? "Закрыто сегодня" : `Закрыто · ${presetLabel.toLowerCase()}`;
         const createdLabel = p.preset === "today" ? "Создано сегодня" : `Создано · ${presetLabel.toLowerCase()}`;
 
+        const slow = data.slow_entrapment || {};
+        const slowMin = slow.threshold_minutes ?? 50;
+        const slowLabel =
+            p.preset === "today"
+                ? `Застревания > ${slowMin} мин сегодня`
+                : `Застревания > ${slowMin} мин · ${presetLabel.toLowerCase()}`;
+
         const kpis = el("div", { class: "rep-kpis" });
         kpis.appendChild(kpi("Открыто сейчас", data.open_now ?? 0));
-        kpis.appendChild(kpi("Просрочено", data.overdue_now ?? 0, (data.overdue_now ?? 0) > 0 ? "rep-kpi-danger" : ""));
+        kpis.appendChild(
+            kpi(
+                "Просрочено",
+                data.overdue_now ?? 0,
+                (data.overdue_now ?? 0) > 0 ? "rep-kpi-danger" : "",
+                overdueTip(data),
+            ),
+        );
         kpis.appendChild(kpi(closedLabel, data.closed_period ?? 0, "rep-kpi-success"));
         kpis.appendChild(kpi(createdLabel, data.created_period ?? 0));
+        // Периодная метрика: закрытые за период, а не срез «на сейчас».
+        kpis.appendChild(
+            kpi(
+                slowLabel,
+                slow.count ?? 0,
+                (slow.count ?? 0) > 0 ? "rep-kpi-warning" : "",
+                slowTip(data),
+            ),
+        );
         kpis.appendChild(kpi("Среднее закрытие", fmtDuration(data.avg_close_time_seconds)));
         content.appendChild(kpis);
 
