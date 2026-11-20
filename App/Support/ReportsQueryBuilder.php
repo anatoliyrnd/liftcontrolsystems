@@ -109,10 +109,7 @@ final class ReportsQueryBuilder
         // новые отделы подтягиваются сами, а «все галочки» ≠ «без фильтра».
         // Разница видна на осиротевших ссылках: с фильтром они исключены,
         // без него — попадают. Осознанно (§15.1).
-        $deps = array_values(array_unique(array_filter(
-            array_map('intval', (array) ($this->f['department_ids'] ?? [])),
-            static fn (int $i): bool => $i > 0
-        )));
+        $deps = $this->normalizeIds($this->f['department_ids'] ?? []);
 
         if ($deps !== []) {
             $ph = [];
@@ -123,30 +120,42 @@ final class ReportsQueryBuilder
             $w[] = 'c.call_department IN (' . implode(', ', $ph) . ')';
         }
 
-        // Адрес: самый специфичный побеждает; city_only гасит нижние.
-        $cityOnly = (bool) ($this->f['city_only'] ?? false);
-        $objectId = (int) ($this->f['object_id'] ?? 0);
-        $homeId   = (int) ($this->f['home_id'] ?? 0);
-        $streetId = (int) ($this->f['street_id'] ?? 0);
-        $cityId   = (int) ($this->f['city_id'] ?? 0);
-
-        if ($cityOnly) {
-            if ($cityId > 0) {
+        // Мультивыбор городов (сводка). Приоритетнее одиночной цепочки:
+        // сводка не выбирает улицу/дом. Пусто → условия нет = «Все»,
+        // ровно как в журнале заявок.
+        $cityIds = $this->normalizeIds($this->f['city_ids'] ?? []);
+        if ($cityIds !== []) {
+            $ph = [];
+            foreach ($cityIds as $i => $id) {
+                $ph[] = ":city$i";
+                $p["city$i"] = $id;
+            }
+            $w[] = 'c.address_city IN (' . implode(', ', $ph) . ')';
+        } else {
+            // Адрес: самый специфичный побеждает; city_only гасит нижние.
+            $cityOnly = (bool) ($this->f['city_only'] ?? false);
+            $objectId = (int) ($this->f['object_id'] ?? 0);
+            $homeId   = (int) ($this->f['home_id'] ?? 0);
+            $streetId = (int) ($this->f['street_id'] ?? 0);
+            $cityId   = (int) ($this->f['city_id'] ?? 0);
+            if ($cityOnly) {
+                if ($cityId > 0) {
+                    $w[] = 'c.address_city = :city_id';
+                    $p['city_id'] = $cityId;
+                }
+            } elseif ($objectId > 0) {
+                $w[] = 'c.address_lift = :object_id';
+                $p['object_id'] = $objectId;
+            } elseif ($homeId > 0) {
+                $w[] = 'c.address_home = :home_id';
+                $p['home_id'] = $homeId;
+            } elseif ($streetId > 0) {
+                $w[] = 'c.address_street = :street_id';
+                $p['street_id'] = $streetId;
+            } elseif ($cityId > 0) {
                 $w[] = 'c.address_city = :city_id';
                 $p['city_id'] = $cityId;
             }
-        } elseif ($objectId > 0) {
-            $w[] = 'c.address_lift = :object_id';
-            $p['object_id'] = $objectId;
-        } elseif ($homeId > 0) {
-            $w[] = 'c.address_home = :home_id';
-            $p['home_id'] = $homeId;
-        } elseif ($streetId > 0) {
-            $w[] = 'c.address_street = :street_id';
-            $p['street_id'] = $streetId;
-        } elseif ($cityId > 0) {
-            $w[] = 'c.address_city = :city_id';
-            $p['city_id'] = $cityId;
         }
 
         $staffId = (int) ($this->f['staff_id'] ?? 0);
@@ -158,12 +167,11 @@ final class ReportsQueryBuilder
         // Область чтения. Инженеру staff_id не игнорируем молча:
         // условие пересекается с его областью через AND, а не
         // расширяет её — иначе фильтр стал бы обходом прав.
-        if (!CallScope::readAll($this->user)) {
-            $uid = (int) ($this->user['id'] ?? 0);
-            $w[] = '(c.call_staff = :scope1 OR c.call_staff2 = :scope2 OR c.call_staff3 = :scope3)';
-            $p['scope1'] = $p['scope2'] = $p['scope3'] = $uid;
+        [$scopeSql, $scopeParams] = $this->scopeCondition();
+        if ($scopeSql !== null) {
+            $w[] = $scopeSql;
+            $p += $scopeParams;
         }
-
         // Полнотекст: только при доме/объекте и длине >= 6, иначе молча
         // игнорируется. Без адреса LIKE '%…%' — полный скан по периоду,
         // индекса с ведущим wildcard не бывает.
@@ -183,6 +191,68 @@ final class ReportsQueryBuilder
         }
 
         return [implode(' AND ', $w), $p];
+    }
+    /**
+     * WHERE среза «на сейчас» — для сводки.
+     *
+     * Только область чтения и города. Период, статус, отделы и полнотекст
+     * НЕ применяются: «сколько открыто» не зависит от выбранного периода.
+     * С общим WHERE диспетчер увидел бы открытые, созданные сегодня,
+     * вместо всех открытых — это другая цифра и другой смысл.
+     *
+     * @return array{0:string,1:array<string,mixed>}
+     */
+    public function buildSnapshotWhere(): array
+    {
+        $w = [];
+        $p = [];
+
+        [$scopeSql, $scopeParams] = $this->scopeCondition();
+        if ($scopeSql !== null) {
+            $w[] = $scopeSql;
+            $p += $scopeParams;
+        }
+
+        $cityIds = $this->normalizeIds($this->f['city_ids'] ?? []);
+        if ($cityIds !== []) {
+            $ph = [];
+            foreach ($cityIds as $i => $id) {
+                $ph[] = ":city$i";
+                $p["city$i"] = $id;
+            }
+            $w[] = 'c.address_city IN (' . implode(', ', $ph) . ')';
+        }
+
+        // Пустой WHERE недопустим в SQL: readAll + все города = без условий.
+        return [$w === [] ? '1' : implode(' AND ', $w), $p];
+    }
+
+    /**
+     * Область чтения. Один источник для обоих WHERE — инвариант
+     * «видимость в списке = видимость карточки» не должен зависеть
+     * от того, какой экран спросил.
+     *
+     * @return array{0:?string,1:array<string,mixed>}
+     */
+    private function scopeCondition(): array
+    {
+        if (CallScope::readAll($this->user)) {
+            return [null, []];
+        }
+        $uid = (int) ($this->user['id'] ?? 0);
+        return [
+            '(c.call_staff = :scope1 OR c.call_staff2 = :scope2 OR c.call_staff3 = :scope3)',
+            ['scope1' => $uid, 'scope2' => $uid, 'scope3' => $uid],
+        ];
+    }
+
+    /** int[] из чего угодно: мусор → 0 → отброшен, инъекции нет. */
+    private function normalizeIds(mixed $raw): array
+    {
+        return array_values(array_unique(array_filter(
+            array_map('intval', (array) $raw),
+            static fn (int $i): bool => $i > 0
+        )));
     }
 
     /**
