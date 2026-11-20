@@ -1,6 +1,6 @@
 import { REPORTS } from "../../config.js";
 import { formatTsMsk } from "../../utils/date-utils.js";
-
+import { createHoverTip } from "./hover-tip.js";
 /**
  * Вкладка «Сводка»: пресет периода + города + KPI + SVG-графики.
  * Без таблицы и без полнотекста — всё это в расширенном поиске.
@@ -64,6 +64,10 @@ export function createSummaryView(opts) {
             : cities.map((c) => Number(c.id)),
     );
     let lastData = null;
+    const hoverTip = createHoverTip({
+        minWidth: REPORTS.TOOLTIP_MIN_WIDTH,
+        hideDelay: REPORTS.TOOLTIP_HIDE_DELAY_MS,
+    });
 
     // --- контролы -----------------------------------------------------
     const controls = el("div", { class: "rep-summary-controls" });
@@ -303,10 +307,92 @@ export function createSummaryView(opts) {
         return box;
     }
 
-    function kpi(label, value, mod = "") {
+    /** Содержимое подсказки «Просрочено»: корзины длительности. */
+    function overdueTip(data) {
+        return () => {
+            const wrap = el("div", { class: "rep-tip-body" });
+            wrap.appendChild(
+                el("div", { class: "rep-tip-title" }, `Просрочено сейчас: ${data.overdue_now ?? 0}`),
+            );
+            const buckets = data.overdue_buckets || {};
+            for (const { key, label } of REPORTS.OVERDUE_BUCKETS) {
+                const row = el("div", { class: "rep-tip-row" });
+                row.appendChild(el("span", { class: "rep-tip-name" }, label));
+                row.appendChild(el("span", { class: "rep-tip-num" }, String(buckets[key] ?? 0)));
+                wrap.appendChild(row);
+            }
+            wrap.appendChild(
+                el("div", { class: "rep-tip-note" }, "Открытые заявки со сроком ремонта в прошлом."),
+            );
+            return wrap;
+        };
+    }
+
+    /** Содержимое подсказки по медленным застреваниям: компактный список. */
+    function slowTip(data) {
+        return () => {
+            const s = data.slow_entrapment || {};
+            const wrap = el("div", { class: "rep-tip-body" });
+            wrap.appendChild(
+                el(
+                    "div",
+                    { class: "rep-tip-title" },
+                    `Застревания, закрытые дольше ${s.threshold_minutes ?? 50} мин: ${s.count ?? 0}`,
+                ),
+            );
+            const names = Array.isArray(s.group_names) ? s.group_names.join(", ") : "";
+            if (names) {
+                wrap.appendChild(el("div", { class: "rep-tip-note" }, `Группы: ${names}`));
+            }
+            const items = Array.isArray(s.items) ? s.items : [];
+            if (items.length === 0) {
+                wrap.appendChild(
+                    el("div", { class: "rep-tip-empty" }, "За выбранный период таких заявок нет."),
+                );
+                return wrap;
+            }
+            const table = el("div", { class: "rep-tip-table" });
+            const head = el("div", { class: "rep-tip-tr rep-tip-th" });
+            for (const t of ["№", "Адрес", "Создана", "Закрыта", "Мин"]) {
+                head.appendChild(el("span", {}, t));
+            }
+            table.appendChild(head);
+            for (const it of items) {
+                const row = el("div", { class: "rep-tip-tr" });
+                row.appendChild(el("span", { class: "rep-tip-id" }, String(it.id ?? "—")));
+                const addr = el("span", { class: "rep-tip-addr" }, String(it.address ?? "—"));
+                addr.title = String(it.address ?? "—");
+                row.appendChild(addr);
+                row.appendChild(el("span", {}, formatTsMsk(it.date)));
+                row.appendChild(el("span", {}, formatTsMsk(it.close_date)));
+                row.appendChild(el("span", { class: "rep-tip-num" }, String(it.minutes ?? 0)));
+                table.appendChild(row);
+            }
+            wrap.appendChild(table);
+            if (s.truncated) {
+                wrap.appendChild(
+                    el(
+                        "div",
+                        { class: "rep-tip-note" },
+                        `Показаны первые ${items.length} из ${s.count ?? items.length}. Полный список — в расширенном поиске.`,
+                    ),
+                );
+            }
+            return wrap;
+        };
+    }
+
+    function kpi(label, value, mod = "", tipBuild = null) {
         const box = el("div", { class: `rep-kpi${mod ? " " + mod : ""}` });
         box.appendChild(el("div", { class: "rep-kpi-value" }, String(value)));
         box.appendChild(el("div", { class: "rep-kpi-label" }, label));
+        if (tipBuild) {
+            box.classList.add("rep-kpi-has-tip");
+            // Клавиатурный доступ: подсказка открывается и по focus.
+            box.setAttribute("tabindex", "0");
+            box.appendChild(el("span", { class: "rep-kpi-info", "aria-hidden": "true" }, "i"));
+            hoverTip.attach(box, tipBuild);
+        }
         return box;
     }
 
@@ -379,6 +465,7 @@ export function createSummaryView(opts) {
     }
     function destroy() {
         abort.abort();
+        hoverTip.destroy();
         backdrop.remove();
     }
 
