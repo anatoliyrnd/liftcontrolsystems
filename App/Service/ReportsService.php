@@ -87,6 +87,59 @@ final class ReportsService
             : 'date';
     }
 
+    /**
+     * Сводка. Пресеты считает сервер: «текущая неделя» — понедельник→
+     * сегодня, «текущий месяц» — 1-е→сегодня. Не скользящие 7/30 дней.
+     *
+     * Границы возвращаются клиенту, чтобы UI показал их явно: без этого
+     * диспетчер не знает, что «неделя» началась в понедельник, а не
+     * семь дней назад.
+     *
+     * validateDates не нужен: пресет всегда валиден и ≤ 31 дня.
+     */
+    public function getSummary(array $user, array $body): array
+    {
+        $this->gate($user);
+        $preset = (string) ($body['period'] ?? 'today');
+        if (!in_array($preset, ['today', '2days', 'week', 'month'], true)) {
+            $preset = 'today';
+        }
+        [$from, $to] = $this->periodBounds($preset);
+
+        $f = [
+            'city_ids' => is_array($body['city_ids'] ?? null) ? $body['city_ids'] : [],
+        ];
+        $data = $this->repo->getSummary($f, $user, $from, $to, time());
+        $data['period'] = [
+            'preset' => $preset,
+            'date_from' => $from,
+            'date_to' => $to,
+        ];
+        return $data;
+    }
+
+    /**
+     * Границы в бизнес-зоне: bootstrap фиксирует Europe/Moscow.
+     *
+     * Понедельник считаем через date('N') (1=Пн…7=Вс), а не
+     * strtotime('monday this week'): арифметика от полуночи детерминирована
+     * и не зависит от разбора относительных строк PHP.
+     *
+     * @return array{0:int,1:int}
+     */
+    private function periodBounds(string $preset): array
+    {
+        $todayStart = (int) strtotime('today 00:00:00');
+        $to = (int) strtotime('today 23:59:59');
+        $from = match ($preset) {
+            '2days' => $todayStart - 86400,
+            'week'  => $todayStart - ((int) date('N') - 1) * 86400,
+            'month' => (int) mktime(0, 0, 0, (int) date('n'), 1, (int) date('Y')),
+            default => $todayStart,
+        };
+        return [$from, $to];
+    }
+
     public function getFiltersData(array $user): array
     {
         $this->gate($user);
