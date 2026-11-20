@@ -1,0 +1,683 @@
+Снимок подтверждает: волна 1.1 работает — период «понедельник→сегодня», срез и периодные метрики разделены, донат сходится с `open_now` (1+1=2), просрочка catching строку `18.11.2026@02:36`. **Плитки «Застревания > 50 мин» и значков «i» нет** — последний патч (подсказки + `slow_entrapment`) ещё не выкачен. Проверка: `grep -c "slow_entrapment" App/Repository/ReportsRepository.php` и `grep -c "hoverTip" js/reports/views/summary-view.js`.
+
+Ниже — полный документ. Заменяет §15 v6.2 и v6.1 целиком.
+
+---
+
+# 📊 REPORTS.md — логика и API модуля отчётов
+
+**Версия:** 6.3 · **Дата:** 20.11.2026 · **Статус:** реализовано, верифицировано на demo.liftcs.ru
+**Область:** `api.php` (5 экшенов) + экран `#/reports`. Легаси и СПульт вне области.
+**Заменяет:** §15 v6.1, §15 v6.2, приложенный «API Protocol v6.1: Модуль отчетов».
+
+---
+
+## 0. Обзор
+
+| Свойство         | Значение                                                                       |
+| ---------------- | ------------------------------------------------------------------------------ |
+| Транспорт        | `POST /api.php`, экшен в поле `action`, `Authorization: Bearer`                |
+| Ответ            | `Response::ok(['data' => …])` → `{status:"ok", data:…}`                        |
+| HTTP-код         | всегда 200, ошибки в теле                                                      |
+| Режим            | **только онлайн**. `SyncManager` и `outbox` не используются                    |
+| Кэш справочников | разрешён (`address_flat`), это не outbox                                       |
+| Права            | проверяются **на сервере** с первого дня — отход от долга §20 для этого модуля |
+| Теги запросов    | `reports` (расширенный поиск) и `reports_summary` (сводка) — раздельные        |
+
+**Пять экшенов:**
+
+| Экшен                  | Назначение                                                                              | Вкладка           |
+| ---------------------- | --------------------------------------------------------------------------------------- | ----------------- |
+| `reports_filters_data` | справочники: отделы, сотрудники, города                                                 | Расширенный поиск |
+| `reports_summary`      | дашборд: срез «сейчас» + периодные счётчики + корзины просрочки + медленные застревания | Сводка            |
+| `reports_stats`        | агрегаты **по периоду** с полными фильтрами                                             | Расширенный поиск |
+| `reports_list`         | таблица, серверная пагинация и сортировка                                               | Расширенный поиск |
+| `reports_export`       | CSV той же выборки, что `reports_list`                                                  | Расширенный поиск |
+
+---
+
+## 1. Карта файлов
+
+### 1.1. Бэкенд — создано
+
+| Файл                                   | Назначение                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `App/Support/ReportsQueryBuilder.php`  | Единый конструктор `WHERE`. `buildWhere()` — периодная выборка; `buildSnapshotWhere()` — срез «на сейчас» (только область чтения + города). `scopeCondition()` — общий источник области для обоих. `normalizeIds()` — приведение к `int[]`. `sortClause()` — белый список сортировок с хвостом `call_id DESC`. Константы `ADDRESS_JOINS` / `ADDRESS_KEY_EXPR` — ключ сортировки из чистых имён                |
+| `App/Repository/ReportsRepository.php` | Все `SELECT` модуля. `getFiltersData()`, `getSummary()`, `getStats()`, `getList()`, `countTotal()`, `getExportRows()`. Приватные: `selectRows()` (общий SQL списка и экспорта), `mapItem()` (строка БД → контракт), `grouped()` (группировки с NULL-корзинами), `entrapmentGroups()` (резолв групп «застревание»). Константы `SLOW_CLOSE_MINUTES`, `TIP_ROWS`, `ENTRAPMENT_GROUP_IDS`, `ENTRAPMENT_NAME_LIKE` |
+| `App/Service/ReportsService.php`       | Оркестрация: `gate()` (роль), `filters()` (нормализация входа), `validateDates()`, `periodBounds()` (пресеты МСК), `sort()` (белый список). Публичные: `getFiltersData`, `getSummary`, `getStats`, `getList`, `exportResponse`. Лимиты экспорта и rate-limit вызывает отсюда                                                                                                                                  |
+| `App/Service/ReportsExporter.php`      | Сборка CSV в `php://temp`. BOM, `;`, пустой escape, защита от формул, суффиксы каналов §1.3 без эмодзи. `staffCell()` — три слота ответственных                                                                                                                                                                                                                                                               |
+| `App/Support/ExportRateLimiter.php`    | 1 экспорт / 30 с на пару tenant+user. Файл вне web-root (`domains/_reports`), `flock`, фолбэк в `sys_get_temp_dir`. Возвращает `null` (разрешено) или секунды до конца окна                                                                                                                                                                                                                                   |
+
+### 1.2. Бэкенд — изменено
+
+| Файл                               | Что добавлено                                                                                                                                            |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `App/Controller/ApiController.php` | `use` двух классов, свойство `$reportsService`, параметр конструктора, присваивание, создание в `create()`, аргумент в `new self()`, **5 веток `match`** |
+
+### 1.3. Фронтенд — создано
+
+| Файл                               | Назначение                                                                                                                                                                  |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `js/route/pages/reports.js`        | Статический шаблон страницы: три вкладки, раздельные хосты `repSummaryHost` / `repTabById` / `repTabAdvanced`, таблица `#reportsTable`, заглушки. Все id с префиксом `rep*` |
+| `js/reports/reports-repository.js` | Сетевой слой: `fetchFiltersData`, `fetchSummary`, `fetchStats`, `fetchList`, `exportCsv`. Теги и таймаут экспорта                                                           |
+| `js/reports/reports-state.js`      | `defaultReportState()`, `loadReportState()`, `saveReportState()`. Дефолты + слияние с per-user кэшем. Сводка и расширенный поиск — независимые срезы состояния              |
+| `js/reports/views/summary-view.js` | Дашборд: селект пресета, фильтр городов (журнальная семантика), строка периода МСК, KPI-плитки, SVG-донат и бары, скелетон, индикатор обновления                            |
+| `js/reports/views/hover-tip.js`    | Всплывающая подсказка. Один узел на вьюху, удержание курсора, гейт `matchMedia`, `reset()` против утечки слушателей, `destroy()`                                            |
+| `js/reports/views/filters-view.js` | Панель расширенного поиска: период, адресный пикер, полнотекст, отделы (защита последнего), статус, сортировка, ответственный, кнопки. Валидация и блокировки               |
+| `js/reports/views/stats-view.js`   | Периодные агрегаты для расширенного поиска: карточки + списки группировок                                                                                                   |
+| `js/reports/views/table-view.js`   | Обвязка таблицы: гарантия scope и колонок, пересборка шапки, рендер тела, клик по строке → карточка, пагинация                                                              |
+| `js/reports-controller.js`         | Оркестратор: `mount`/`unmount`, `_mountId` + `isStale()`, ленивые вьюхи по вкладкам, автообновление сводки с дебаунсом, экспорт с кулдауном, офлайн-классификация           |
+
+### 1.4. Фронтенд — изменено
+
+| Файл                              | Что добавлено                                                                                                                                      |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `js/config.js`                    | Блок `REPORTS`: пороги, лимиты, таймаут экспорта, `SORTS`, `COLUMNS`, `TABS`, `SUMMARY_PERIODS`, `OVERDUE_BUCKETS`, `TOOLTIP_MIN_WIDTH`, дебаунсы  |
+| `js/utils/date-utils.js`          | `mskTodayYmd`, `mskDayStartTs`, `mskDayEndTs`, `formatTsMsk`. Аддитивно, `formatTs` не тронут                                                      |
+| `js/api-service.js`               | Необязательный `opts.timeoutMs` в `post()` → `requestTimeoutMs` в `_sendPostRequest`; бюджет цепочки масштабируется; проброс в retry после refresh |
+| `js/components/address-picker.js` | Опция `autoOpen` (дефолт `true`). `false` — город проставлен, поле видно, без `focus()` и `triggerSearch("")`                                      |
+| `js/table/settings.js`            | `getReportFilters()` / `setReportFilters()` — per-user ключ `lift:{uid}:filters:report:state`                                                      |
+| `main.js`                         | Импорт шаблона и контроллера, инстанс, `reportsCtrl` в `leaveAll()`, вызов `refreshColumns()` в `refreshActiveJournalSettings()`, роут `#/reports` |
+| `css/style.css`                   | Блок `#reportsTable` (зебра, уровни, липкие №/Адрес, ресайзер), панель фильтров, дашборд, скелетон, SVG-графики, подсказки, медиа-гейты            |
+
+### 1.5. Переиспользуется без правок
+
+| Файл                                                                                    | Роль в отчётах                                                                                         |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `js/table/header-render.js`                                                             | Шапка. Клик вешается только при `col.sortable` → у отчёта заголовки некликабельны                      |
+| `js/table/body-render.js`                                                               | Тело. Подсветка тревоги/просрочки/неназначенности, суффиксы каналов, `data-ts`                         |
+| `js/table/resizer.js`                                                                   | Ширины per-user/per-scope через `data-scope` таблицы                                                   |
+| `js/table/settings.js`                                                                  | Инфраструктура scope `report`: `setReportColumns`, `getFreezeLeftOffset`, `HIDDEN_IN_MODE.report = []` |
+| `js/offline-db.js`                                                                      | `getCities()` для фильтра городов сводки                                                               |
+| `js/user-store.js`, `js/auth-store.js`                                                  | `can('view_reports')`, `user_position`                                                                 |
+| `js/components/notify.js`, `js/history-logger.js`                                       | Тосты и «История»                                                                                      |
+| `App/Support/CallScope.php`                                                             | `readAll()` / `isAssigned()` — область чтения                                                          |
+| `App/Database/DB.php`, `bootstrap.php`, `App/Http/*`, `App/Exceptions/ApiException.php` | Инфраструктура                                                                                         |
+
+**Не используется:** `js/table/sorting.js` (сортировка серверная), `js/table/filtering.js`, `context-menu.js`, `quick-action-modal.js`, `SyncManager`, `outbox`.
+
+### 1.6. Соседняя ветка (не отчёты)
+
+`App/Support/Address.php` (`parseCity`), `sp.php` (ветка города), `App/Support/OptionGuard.php` (разделитель) — исправление дубля справочника. Выкатывается отдельно.
+
+---
+
+## 2. Факты схемы, определяющие реализацию
+
+| Факт                                                                               | Следствие                                                                                                                        |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Внешних ключей нет** (`KEY_COLUMN_USAGE` пуст)                                   | Все JOIN — `LEFT`. Осиротевшие ссылки штатны, INNER терял бы заявки                                                              |
+| **`lift_users.vis` не существует**                                                 | Фильтр staff: `user_block <> 1 AND (user_hiden IS NULL OR user_hiden = 0)`. `user_hiden` nullable — без `IS NULL` список пустеет |
+| **`lift_types.vis` не существует**                                                 | Отделы: `WHERE type = 1`. Понятия «видимый отдел» в БД нет                                                                       |
+| `lift_city.vis` существует, `DEFAULT 0`                                            | Города: `WHERE vis = 1`                                                                                                          |
+| `address_city/_street/_home/_lift` — `NOT NULL DEFAULT 0`                          | Старые плоские заявки дают `id IS NULL` после LEFT JOIN → корзина «Без адреса»                                                   |
+| `call_adres varchar(100)`, `utf8mb3`                                               | Адрес обрезан при записи; отчёт показывает как есть                                                                              |
+| `call_details` / `call_solution` — `utf8mb4`                                       | Эмодзи возможны; JOIN'ы по int, смешения collation нет                                                                           |
+| `expected_repair_time` — сохраняется корректно                                     | Просрочка — рабочая метрика (подтверждено данными)                                                                               |
+| `repair_time_is_default` — `DEFAULT 0`, не выставляется                            | Разделение `avg_repair_time.default/custom` недостоверно                                                                         |
+| `call_last_name` пишется при закрытии; `call_last_name_close` в `App/` не читается | Основное поле + фолбэк на легаси-колонку                                                                                         |
+| `PDO::ATTR_EMULATE_PREPARES = false`                                               | Повтор именованного плейсхолдера = `HY093`. Все имена уникальны                                                                  |
+| `set_error_handler` → любое предупреждение = исключение                            | Доступ к массивам только через `??`, приведения явные                                                                            |
+| `date_default_timezone_set('Europe/Moscow')`                                       | Пресеты и `date()` в CSV — в бизнес-зоне                                                                                         |
+| `@@session.time_zone = SYSTEM`                                                     | Отчёты сравнивают int-колонки, долг §1.2 их не задевает                                                                          |
+
+---
+
+## 3. Права и область чтения
+
+| Роль                          | Видимость                                                     | Фильтр по ответственному в UI |
+| ----------------------------- | ------------------------------------------------------------- | ----------------------------- |
+| `administrator`, `dispatcher` | все заявки                                                    | ✅                            |
+| `engineer`                    | только свои: OR по `call_staff`, `call_staff2`, `call_staff3` | ❌                            |
+| `guest`, `reserved`           | **`forbidden`, `reason: no_rights`** на все 5 экшенов         | ❌                            |
+
+Источник истины — `CallScope::readAll()` (`administrator ∥ dispatcher ∥ user_read_all_calls = 1`).
+
+**Обхода по `user_position` нет.** Прораб нормализуется в `dispatcher` (§19.5); частный случай в отчётах сломал бы инвариант «видимость в списке = видимость карточки». Широкий доступ выдаётся флагом `user_read_all_calls`.
+
+`staff_id` у инженера **не игнорируется молча** — условие пересекается с его областью через AND.
+
+Меню строится сервером по `can_view_reports`. Инженер с `position=foreman` пункта не увидит, но доступ по прямой ссылке получит — известное расхождение.
+
+---
+
+## 4. Общие фильтры (`reports_stats` / `reports_list` / `reports_export`)
+
+| Поле                                           | Тип                              | Обяз. | Семантика                                                                                        |
+| ---------------------------------------------- | -------------------------------- | ----- | ------------------------------------------------------------------------------------------------ |
+| `date_from`, `date_to`                         | int                              | ✅    | Unix-секунды, границы суток **МСК** (`00:00:00` / `23:59:59`), строит клиент                     |
+| `date_type`                                    | `"created"` \| `"closed"`        | ✅    | `closed` → `call_date2` **и** `call_status = 1`                                                  |
+| `city_id`, `street_id`, `home_id`, `object_id` | int\|null                        | ❌    | приоритет: object → home → street → city                                                         |
+| `city_ids`                                     | int[]                            | ❌    | мультивыбор; **приоритетнее** одиночной цепочки; пусто → условия нет                             |
+| `city_only`                                    | bool                             | ❌    | гасит улицу/дом/объект **и вместе с ними полнотекст**                                            |
+| `department_ids`                               | string[]\|int[]                  | ❌    | приводится к int, дедуп, `≤0` отбрасывается. **Пусто → условие не добавляется вовсе**            |
+| `status`                                       | `"all"` \| `"open"` \| `"close"` | ❌    | дефолт `"all"`                                                                                   |
+| `staff_id`                                     | int\|null                        | ❌    | OR по трём слотам, AND с областью чтения                                                         |
+| `details_text`, `solution_text`                | string                           | ❌    | `LIKE '%…%'`, только при `home_id>0` или `object_id>0` и `mb_strlen(trim) ≥ 6`; оба заданы → AND |
+
+**Удалено из v6.1:** `is_emergency` — фильтра нет, поля в `items` нет, метрики в сводке нет, JOIN на `type_report` не делается.
+
+**Экранирование LIKE:** символы `%`, `_`, `!` экранируются через `!`, условие `LIKE :p ESCAPE '!'`.
+
+**«Все галочки» ≠ «фильтр не передан»:** в первом случае заявки с осиротевшим отделом исключаются, во втором — попадают. Осознанно.
+
+### Валидация дат (порядок фиксирован)
+
+| Условие                                 | Ответ                                          |
+| --------------------------------------- | ---------------------------------------------- |
+| `date_from <= 0`                        | `{status:"ok", data:null}`                     |
+| `date_from > date_to`                   | `{status:"ok", data:null}`                     |
+| `date_to > strtotime('today 23:59:59')` | `{status:"ok", data:null}`                     |
+| `date_to - date_from > 90*86400`        | `invalid_input`, `reason: date_range_too_long` |
+
+90 дней = **90 календарных включительно** (`D … D+89`, дельта `90*86400 − 1`).
+
+---
+
+## 5. `reports_filters_data`
+
+**Request:** `{ "action": "reports_filters_data" }`
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "departments": [
+      { "id": "22", "name": "1.Электромеханики" },
+      { "id": "23", "name": "2.Аварийная служба" }
+    ],
+    "staff": [{ "id": 9, "name": "Диспетчер Демо", "position": "dispatcher" }],
+    "cities": [{ "id": 1, "name": "Ростов-на-Дону" }]
+  }
+}
+```
+
+| Список        | Источник                                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------------------------- |
+| `departments` | `lift_types WHERE type = 1 ORDER BY type_name`                                                            |
+| `staff`       | `lift_users WHERE user_block <> 1 AND (user_hiden IS NULL OR user_hiden = 0) ORDER BY user_name, user_id` |
+| `cities`      | `lift_city WHERE vis = 1 ORDER BY city_name`                                                              |
+
+`staff` — надмножество `staff_list` (§2.5): включает админов и диспетчеров ради исторических назначений. Фильтр по гостю всегда даст пусто — это данные, не ошибка.
+
+Адресный справочник (улицы/дома/лифты) клиент берёт из кэша `address_flat`; `cities` здесь — дублирующий путь.
+
+---
+
+## 6. `reports_summary` — дашборд
+
+**Request:**
+
+```json
+{ "action": "reports_summary", "period": "week", "city_ids": [] }
+```
+
+| Поле       | Значения                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| `period`   | `"today"` \| `"2days"` \| `"week"` \| `"month"`, дефолт `"today"`, неизвестное → `"today"` |
+| `city_ids` | int[]; пусто → все города (журнальная семантика)                                           |
+
+**Границы считает сервер** в МСК. Клиентских меток не принимает — пресет не может разъехаться.
+
+| Пресет  | От                                      | До               |
+| ------- | --------------------------------------- | ---------------- |
+| `today` | сегодня 00:00:00                        | сегодня 23:59:59 |
+| `2days` | вчера 00:00:00                          | сегодня 23:59:59 |
+| `week`  | **понедельник** текущей недели 00:00:00 | сегодня 23:59:59 |
+| `month` | **1-е число** текущего месяца 00:00:00  | сегодня 23:59:59 |
+
+Понедельник — через `date('N')` (1=Пн…7=Вс), не `strtotime('monday this week')`: арифметика детерминирована.
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "open_now": 2,
+    "overdue_now": 1,
+    "overdue_buckets": {
+      "lt_hour": 0,
+      "lt_5hours": 0,
+      "lt_day": 0,
+      "lt_week": 1,
+      "gte_week": 0
+    },
+    "slow_entrapment": {
+      "threshold_minutes": 50,
+      "count": 0,
+      "group_names": ["1.Застревание"],
+      "items": [],
+      "truncated": false
+    },
+    "closed_period": 4,
+    "created_period": 6,
+    "avg_close_time_seconds": 6180,
+    "open_by_department": [
+      { "id": "22", "name": "1.Электромеханики", "count": 2 }
+    ],
+    "open_by_city": [{ "id": 1, "name": "Ростов-на-Дону", "count": 2 }],
+    "open_by_alert_level": [
+      { "level": 1, "count": 1 },
+      { "level": 2, "count": 1 }
+    ],
+    "period": {
+      "preset": "week",
+      "date_from": 1794776400,
+      "date_to": 1795208399
+    }
+  }
+}
+```
+
+### 6.1. Два набора условий — ключевая семантика
+
+| Метрика                                                                        | Набор                                                                       | Почему                                                                                                 |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `open_now`, `overdue_now`, `overdue_buckets`, `open_by_*`                      | **срез «на сейчас»**: только область чтения + города, период не применяется | «Сколько открыто» не зависит от периода. С общим WHERE диспетчер увидел бы открытые, созданные сегодня |
+| `closed_period`, `created_period`, `avg_close_time_seconds`, `slow_entrapment` | **период**                                                                  | «Закрыто сегодня», «создано за неделю»                                                                 |
+
+Имена `open_by_*` намеренно не совпадают с `by_*` из `reports_stats`: там период, здесь срез.
+
+### 6.2. Просрочка
+
+Определение — **то же, что в `body-render`**, чтобы цифра и красная ячейка журнала не разошлись:
+
+```
+call_status = 0 AND expected_repair_time > 0 AND expected_repair_time < :now
+```
+
+`:now` = PHP `time()` параметром. Заявка без срока (`= 0`) просроченной не считается.
+
+**Корзины — непересекающиеся диапазоны**, сумма = `overdue_now`:
+
+| Ключ        | Диапазон просрочки    | Подпись в UI        |
+| ----------- | --------------------- | ------------------- |
+| `lt_hour`   | `0 < od < 3600`       | меньше часа         |
+| `lt_5hours` | `3600 ≤ od < 18000`   | от 1 до 5 часов     |
+| `lt_day`    | `18000 ≤ od < 86400`  | от 5 часов до суток |
+| `lt_week`   | `86400 ≤ od < 604800` | от суток до недели  |
+| `gte_week`  | `od ≥ 604800`         | больше недели       |
+
+Накопительные подписи («меньше 5 часов» вместе с «меньше часа») посчитали бы заявку дважды. Просрочка вычисляется один раз во вложенном `SELECT` (`:now` нельзя повторить шесть раз), наружу приходят готовые корзины.
+
+### 6.3. Медленные застревания
+
+**Периодная** метрика: закрытые за период, где время закрытия превышает порог.
+
+| Параметр     | Значение                                              | Источник                                                                         |
+| ------------ | ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Порог        | 50 минут                                              | `ReportsRepository::SLOW_CLOSE_MINUTES`, уезжает клиенту как `threshold_minutes` |
+| Группы       | `lift_types.type = 3` + `type_name LIKE '%астреван%'` | ID групп разные у тенантов; явные ID задаются константой `ENTRAPMENT_GROUP_IDS`  |
+| Лимит списка | 50 строк                                              | `TIP_ROWS`; выборка `LIMIT 51` → `truncated`                                     |
+| Сортировка   | по длительности убыв., хвост `call_id DESC`           | самые долгие сверху                                                              |
+
+`group_names` возвращается всегда — видно, что именно посчитано. Если ни одной группы не нашлось → `count: 0`, `items: []`, а не «считаем всё подряд».
+
+Элемент `items`: `{id, address, date, close_date, minutes}`.
+
+### 6.4. Прочее
+
+- `avg_close_time_seconds` — `AVG(call_date2 - call_date)` по закрытым периода; **`null`**, если закрытых нет (отличать от мгновенного закрытия).
+- Группировки — LEFT JOIN без `vis`, NULL-корзина с `id: null`: «Без отдела», «Без адреса».
+- Валидация дат не применяется: пресет всегда валиден и ≤ 31 дня.
+
+---
+
+## 7. `reports_stats`
+
+**Request:** общие фильтры §4.
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "total": 100,
+    "open": 20,
+    "closed": 80,
+    "avg_close_time_seconds": 3600,
+    "by_department": [{ "id": "22", "name": "1.Электромеханики", "count": 50 }],
+    "by_city": [{ "id": 1, "name": "Ростов-на-Дону", "count": 70 }],
+    "by_group": [{ "id": "4", "name": "1.Застревание", "count": 15 }],
+    "by_request": [{ "id": "1", "name": "1.Срочная", "count": 40 }],
+    "by_alert_level": [
+      { "level": 1, "count": 60 },
+      { "level": 2, "count": 30 },
+      { "level": 3, "count": 10 }
+    ],
+    "avg_repair_time": {
+      "default": 0,
+      "custom": 100,
+      "avg_default_seconds": null,
+      "avg_custom_seconds": 259200
+    }
+  }
+}
+```
+
+| Поле                                           | Правило                                                                               |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `avg_close_time_seconds`                       | по закрытым выборки, `null` если нет                                                  |
+| `avg_repair_time.default` / `.custom`          | количество с `repair_time_is_default = 1` / `= 0` **по всей выборке**                 |
+| `.avg_default_seconds` / `.avg_custom_seconds` | `AVG(expected_repair_time - call_date)` **только по закрытым** группы; пусто → `null` |
+
+`avg_repair_time` — средний **назначенный срок**, не фактическое время работ. Фактическое — `avg_close_time_seconds`.
+
+Группировки: `ORDER BY count DESC, name ASC`; `by_alert_level` — `ORDER BY level ASC`. NULL-корзины: «Без отдела», «Без адреса», «Без группы», «Без типа запроса».
+
+---
+
+## 8. `reports_list`
+
+**Request:** общие фильтры §4 + `sort`, `page`, `limit`.
+
+| Поле    | Правило                                                                                   |
+| ------- | ----------------------------------------------------------------------------------------- |
+| `sort`  | `"date"` \| `"address"` \| `"department"`, дефолт `"date"`                                |
+| `page`  | `max(1, page)`, дефолт 1. Выход за диапазон → пустой `items`, `current_page` как запрошен |
+| `limit` | `min(200, max(10, limit))`, дефолт 50                                                     |
+
+### Сортировка (только серверная)
+
+| `sort`       | ORDER BY                                                       |
+| ------------ | -------------------------------------------------------------- |
+| `date`       | `call_date DESC`, при `date_type="closed"` — `call_date2 DESC` |
+| `address`    | ключ из чистых имён, пустой ключ — в конец                     |
+| `department` | `call_department ASC`                                          |
+
+Хвост всегда `c.call_id DESC`.
+
+**Ключ адреса** — паритет `Address::sortKey`, JOIN'ы подключаются только при `sort="address"`:
+
+```sql
+LEFT JOIN lift_city   ci ON ci.id = c.address_city
+LEFT JOIN lift_street st ON st.id = c.address_street
+LEFT JOIN lift_home   h  ON h.id  = c.address_home
+LEFT JOIN lift_object o  ON o.id  = c.address_lift
+
+LOWER(CONCAT_WS(' ', NULLIF(ci.city_name,''), NULLIF(st.street_name,''),
+                     NULLIF(h.home_name,''),  NULLIF(o.object_name,''))) AS address_sort_key
+
+ORDER BY (address_sort_key = '') ASC, address_sort_key ASC, c.call_id DESC
+```
+
+JOIN справочников — **без `vis`**: скрытые позже улица/дом/лифт обязаны остаться в истории. Осознанно расходится с `loadAddress`.
+
+### Поля `items`
+
+| Поле                                       | Тип                   | Источник                                                                                    |
+| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------- |
+| `id`, `call_id`                            | int                   | `call_id`                                                                                   |
+| `call_number`                              | string                | `(string) call_id`                                                                          |
+| `type`                                     | `"open"`\|`"close"`   | `call_status`                                                                               |
+| `fullAddress`                              | string                | `call_adres` как есть                                                                       |
+| `details`                                  | string                | `call_details`                                                                              |
+| `date`                                     | int                   | `call_date`                                                                                 |
+| `repair_time`                              | int\|null             | `expected_repair_time`, `0` → `null`                                                        |
+| `close_date`                               | int\|null             | `call_date2`, `0` → `null`                                                                  |
+| `close_name`                               | string                | закрытые: `COALESCE(NULLIF(call_last_name,''), call_last_name_close, '—')`; открытые: `'—'` |
+| `solution`                                 | string                | закрытые: `call_solution`, пусто → `'—'`; открытые: `'—'`                                   |
+| `department` / `department_id`             | string\|null / string | `d.type_name`, `c.call_department`                                                          |
+| `alert_level`                              | int                   | `alert_level`                                                                               |
+| `staff_id`, `staff_id2`, `staff_id3`       | int\|null             | слоты, `0` → `null`                                                                         |
+| `staff_name`, `staff_name2`, `staff_name3` | string\|null          | LEFT JOIN `lift_users`                                                                      |
+| `notify_status`, `_status2`, `_status3`    | int\|null             | `call_staff_status*`                                                                        |
+| `notify_date`, `_date2`, `_date3`          | int\|null             | `call_staff_date*`                                                                          |
+
+**Не отдаются:** `is_emergency`, `group`/`request` (только в сводке), `other`/`note_num`, `address_sort_key`, `can_*`.
+
+Слоты 2–3 обязательны: без них `userStore.isAssignedTo` даёт ложь и механик во втором слоте теряет кнопки — тот же баг, что в журналах (§17).
+
+`pagination`: `{total_items, current_page, total_pages, limit}`; `total_items` — отдельный `COUNT(*)` с тем же WHERE.
+
+### 8.1. Колонки — источник на клиенте
+
+`columns` с сервера **не отдаётся** (волна 1). Набор — `REPORTS.COLUMNS` в `js/config.js`, кормится в `setReportColumns()` в форме `{id, name, type, sortable, default_visible, minWidth}`.
+
+| id                               | name                       | type      | видима | minWidth  |
+| -------------------------------- | -------------------------- | --------- | ------ | --------- |
+| `id`                             | №                          | number    | ✅     | 80        |
+| `address`                        | Адрес                      | string    | ✅     | 260       |
+| `details`                        | Описание проблемы          | string    | ✅     | 220       |
+| `department`                     | Отдел                      | string    | ✅     | 160       |
+| `staff_name`                     | Ответственный              | string    | ✅     | 160       |
+| `notify_status`                  | Статус уведомления         | string    | ✅     | 220       |
+| `date`                           | Дата создания              | timestamp | ✅     | 140       |
+| `repair_time`                    | Срок ремонта               | timestamp | ✅     | 150       |
+| `close_date`                     | Дата закрытия              | timestamp | ✅     | 140       |
+| `close_name`                     | Кто закрыл                 | string    | ✅     | 150       |
+| `solution`                       | Решение/Устранение         | string    | ✅     | 180       |
+| `staff_name2` / `notify_status2` | Ответственный 2 / Статус 2 | string    | ❌     | 160 / 220 |
+| `staff_name3` / `notify_status3` | Ответственный 3 / Статус 3 | string    | ❌     | 160 / 220 |
+
+**`sortable: false` у всех** ⇒ `header-render` не вешает клики, `sorting.js` не вызывается. Направление сервером не задаётся — сортировка выбирается селектом из трёх значений.
+
+Даты в таблице рендерит `formatTs` (локальная зона) — как журналы. МСК применяется к границам периода, строке периода и CSV.
+
+---
+
+## 9. `reports_export`
+
+**Request:** общие фильтры §4 + `format: "csv"`, без `page`/`limit`.
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "file_base64": "…",
+    "filename": "report_2026-11-20.csv",
+    "mime_type": "text/csv",
+    "rows_count": 150
+  }
+}
+```
+
+Пустая выборка → `{"status":"ok","data":null,"message":"По вашему запросу ничего не найдено"}`.
+
+| Ограничение     | Реализация                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Потолок строк   | выборка `LIMIT 2001`; ровно 2000 валидно, 2001-я → `invalid_input` / `export_too_many_rows`. `LIMIT 2000` не отличил бы «ровно» от «больше» |
+| Rate limit      | 1 / 30 с на tenant+user, файл вне web-root, `flock`. Отказ → `rate_limited`, **`retry_after` плоско**                                       |
+| Таймаут клиента | 30 с (`REPORTS.EXPORT_TIMEOUT_MS`), бюджет цепочки масштабируется                                                                           |
+| Формат          | единственный `csv`; иное → `invalid_input` / `unsupported_format`                                                                           |
+
+### CSV
+
+UTF-8 с BOM, разделитель `;`, кавычки `"`, escape-параметр `fputcsv` пустой. Переносы внутри ячеек `\n`. Даты — `date('d.m.Y H:i', ts)` в МСК. Имя файла — дата генерации.
+
+**Защита от формул:** значение, начинающееся с `=`, `+`, `-`, `@`, получает префикс `'`.
+
+| №   | Заголовок      | Содержимое                                                                                      |
+| --- | -------------- | ----------------------------------------------------------------------------------------------- |
+| 1   | ID             | `call_id`                                                                                       |
+| 2   | Адрес          | `call_adres` `\n` дата создания `·` `call_first_name`                                           |
+| 3   | Описание       | `call_details`                                                                                  |
+| 4   | Закрытие       | дата закрытия `\n` кто закрыл; открыта → `—`                                                    |
+| 5–7 | Отв. 1 / 2 / 3 | имя `\n` `Статус: <суффикс> · <дата>`; слот пуст → `—`; статус 0/null → `Не уведомлен` без даты |
+
+**Суффиксы — §1.3 без эмодзи:** `по телефону`, `онлайн`, `в телеграм`, `в макс`, `в вк`, `по смс`, `по email`. Тот же набор, что рисует `body-render` ⇒ UI и CSV не расходятся. `getStatusWord()` из карточки **не используется** — он даёт «web онлайн», третью формулировку.
+
+**Форматирование не заявляется:** «wrap text», «автофильтр» — CSV метаданных не хранит, перенесено в волну 3 (XLSX).
+
+---
+
+## 10. Ошибки
+
+| Ситуация                 | code            | reason                                 |
+| ------------------------ | --------------- | -------------------------------------- |
+| Период > 90 дней         | `invalid_input` | `date_range_too_long`                  |
+| Экспорт > 2000 строк     | `invalid_input` | `export_too_many_rows`                 |
+| Формат не csv            | `invalid_input` | `unsupported_format`                   |
+| Роль guest/reserved      | `forbidden`     | `no_rights`                            |
+| Повторный экспорт в окне | `rate_limited`  | `rate_limited` + плоский `retry_after` |
+| Невалидные даты          | —               | `{status:"ok", data:null}`             |
+
+`Response::error(..., $extra)` кладёт `retry_after` на верхний уровень; `api-service` читает его в `data.retryAfterSec`.
+
+---
+
+## 11. Логика фронтенда
+
+### 11.1. Вкладки и жизненный цикл
+
+| Вкладка           | Содержимое                                       | Вьюхи                                      |
+| ----------------- | ------------------------------------------------ | ------------------------------------------ |
+| Сводка            | пресет + города + KPI + графики                  | `summary-view`                             |
+| Поиск по ID       | инпут → `#/ticket/:id`                           | —                                          |
+| Расширенный поиск | фильтры + периодные агрегаты + таблица + экспорт | `filters-view`, `stats-view`, `table-view` |
+
+Вьюхи **ленивые**: создаются при входе на вкладку, уничтожаются при уходе. Пикер адреса живёт только внутри расширенного поиска — подложка не переживает вкладку.
+
+`mount`/`unmount` по образцу журналов: `_mountId` растёт, после каждого `await` — `isStale()`. `leaveAll()` в `main.js` вызывает `unmount` **до** замены DOM.
+
+### 11.2. Автообновление сводки
+
+| Событие         | Поведение                                                       |
+| --------------- | --------------------------------------------------------------- |
+| Смена пресета   | немедленно, **скелетон**                                        |
+| Клик по городу  | дебаунс 250 мс, данные остаются, мягкий индикатор «Обновление…» |
+| Кнопка ⟳        | без скелетона                                                   |
+| Вход на вкладку | скелетон                                                        |
+| `online`        | обновление активной вкладки                                     |
+
+Скелет на каждый клик по городу мерцал бы — §16.5 «уже отображённое не очищаем».
+
+### 11.3. Фильтр городов
+
+Журнальная семантика: кнопка + дропдаун + «Выбрать все» + счётчик, **ноль = «Все»**, последнюю галочку снять можно. Частичный выбор — оранжевая кнопка «N из M».
+
+Отделы в расширенном поиске — **другое** правило: минимум один, снятие последнего блокируется с `notify.warning`.
+
+### 11.4. Подсказки
+
+| Свойство      | Реализация                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------------- |
+| Гейт          | `(min-width: 1024px) and (hover: hover) and (pointer: fine)`; на тач и узких экранах значка «i» нет |
+| Удержание     | `mouseleave` плитки ставит таймер 140 мс; вход в подсказку его снимает — длинный список читается    |
+| Клавиатура    | `tabindex="0"`, открытие по `focus`, закрытие по `Escape`                                           |
+| Скролл внутри | не закрывает подсказку (capture-обработчик проверяет `tip.contains(e.target)`)                      |
+| Утечки        | `reset()` перед каждым рендером снимает слушатели удалённых плиток                                  |
+| Позиция       | fixed, разворот вверх при нехватке места, зажим по viewport                                         |
+
+### 11.5. Настройки
+
+Scope `report`, только локально (`SERVER_SETTINGS_ENABLED = false`):
+
+| Что                                                                    | Где                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------ |
+| Колонки (порядок, скрытые, ширины)                                     | `settings.js`, ключи `lift:{uid}:table:report:*` |
+| Фильтры, период, сортировка, вкладка, страница, пресет и города сводки | `lift:{uid}:filters:report:state`                |
+
+Гарантия scope: `setScope("report")` + `setReportColumns(REPORTS.COLUMNS)` **перед каждым рендером** — `applyUserSettings` сбрасывает scope на `open` и обнуляет `reportSource` при смене пользователя.
+
+### 11.6. Офлайн и ошибки
+
+| Ответ                          | Поведение                                          |
+| ------------------------------ | -------------------------------------------------- |
+| `offline === true`             | заглушка, контролы гашены, **данные не очищаются** |
+| `code:"aborted"` без `offline` | молча (отмена при unmount)                         |
+| `http_*`                       | тост ошибки, **не** офлайн-заглушка                |
+| `_authLost`                    | выход без своего тоста — уводит `main.js`          |
+| `navigator.onLine === false`   | превентивная заглушка                              |
+
+### 11.7. Прочее
+
+- Таблица `id="reportsTable"`, `data-scope="report"`, `data-mode="report"`. `#dataTable` не переиспользуется: тур и sync-кнопка ищут журнальную разметку.
+- Все id с префиксом `rep*`: `unmount` журналов не защищён guard и трогает `#searchInput`, `#cityFilterBackdrop`, `#refreshBtn`.
+- Контекстное меню не инициализируется, подсветка совпадений не делается — только `textContent`.
+- Клик по строке → `#/ticket/:id`; сервер сам вернёт `null` без прав.
+- Графики — SVG на CSS-переменных: смена темы не требует перерисовки, ноль зависимостей, precache не растёт.
+
+---
+
+## 12. Ограничения реализации (SQL / PHP)
+
+1. **Уникальные плейсхолдеры.** `EMULATE_PREPARES = false` ⇒ повтор имени = `HY093`. Фильтр по ответственному и область чтения занимают по три слота (`:staff1..3`, `:scope1..3`), отделы и города — `:dep0..n`, `:city0..n`.
+2. **`LIMIT` / `OFFSET` — числами** после `(int)`: строковая привязка в нативном режиме ломается.
+3. **Все JOIN — LEFT, без `vis`.**
+4. **Доступ к массивам через `??`**, приведения явные: `set_error_handler` превращает warning в исключение, `strict_types` ловит строку в int-параметре.
+5. **Отчёты не используют `NOW()` / `FROM_UNIXTIME`** — только int-колонки, долг `time_zone` их не задевает.
+6. **Единый `ReportsQueryBuilder`** для трёх периодных экшенов: агрегаты, список и экспорт обязаны работать на идентичной выборке.
+
+---
+
+## 13. Известные ограничения (не баги отчётов)
+
+| Ограничение                                                       | Следствие                                                                                      |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `repair_time_is_default = 0` у всех строк                         | `avg_repair_time.default = 0`, всё в `custom`. Метрика недостоверна до исправления §7.1        |
+| `call_adres varchar(100)`, utf8mb3                                | Длинный адрес обрезан при записи                                                               |
+| Старые плоские `call_adres` (`address_* = 0`)                     | В адресный фильтр не попадают, видны в «Без адреса» и в конце сортировки по адресу             |
+| Нет индексов на `address_home`, `address_street`, `call_staff2/3` | Фильтр по дому и область инженера — полный скан. На демо не мерить, смотреть на проде          |
+| Улицу выбрать в UI нечем                                          | `street_id` в контракте есть, пикер его не отдаёт; в `address_flat` нет имени улицы. Волна 1.5 |
+| `group` / `request` нет в `items`                                 | Только в сводке                                                                                |
+| Вкладка «Отчёт» в профиле                                         | Показывает колонки после первого посещения экрана отчётов (`profile-controller` не патчился)   |
+| Мобильные карточки для `#reportsTable`                            | Волна 1.5                                                                                      |
+| Группы «застревание» по имени                                     | Тенант с нестандартным названием группы задаёт `ENTRAPMENT_GROUP_IDS` вручную                  |
+
+---
+
+## 14. Проверки и приёмка
+
+### Статика
+
+```
+/usr/bin/php8.4 -l App/Support/ReportsQueryBuilder.php
+/usr/bin/php8.4 -l App/Repository/ReportsRepository.php
+/usr/bin/php8.4 -l App/Service/ReportsService.php
+/usr/bin/php8.4 -l App/Service/ReportsExporter.php
+/usr/bin/php8.4 -l App/Support/ExportRateLimiter.php
+/usr/bin/php8.4 -l App/Controller/ApiController.php
+grep -c "reports_" App/Controller/ApiController.php      # 5
+grep -c 'reportsService' App/Controller/ApiController.php # 9
+node --check js/reports-controller.js
+npm run build   # из frontend/
+```
+
+### Дымовой тест DI
+
+```
+/usr/bin/php8.4 -r 'define("APP_ENTRY_POINT",true); $_SERVER["HTTP_HOST"]="demo.liftcs.ru"; require "bootstrap.php"; echo get_class(App\Controller\ApiController::create()), PHP_EOL;'
+```
+
+### Приёмка
+
+| #   | Сценарий                           | Ожидание                                                                             |
+| --- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| 1   | Открыть «Отчеты»                   | вкладка «Сводка», скелетон → KPI + графики, без раскрытого списка адресов            |
+| 2   | Пресет «Текущая неделя»            | строка периода с **понедельника**, «Закрыто · текущая неделя» считает с понедельника |
+| 3   | «Открыто сейчас»                   | совпадает с журналом открытых; сумма `open_by_alert_level` = `open_now`              |
+| 4   | «Просрочено»                       | ≥ 1 при наличии красной строки в журнале; сумма корзин = плитке                      |
+| 5   | Наведение на «Просрочено»          | окно с пятью диапазонами, курсор входит внутрь — окно остаётся                       |
+| 6   | Наведение на «Застревания»         | список № / Адрес / Создана / Закрыта / Мин, все минуты > порога                      |
+| 7   | Ширина < 1024 или тач              | значков «i» нет, подсказки не появляются                                             |
+| 8   | Снять город                        | данные остаются, «Обновление…», один запрос через ~250 мс                            |
+| 9   | Снять все города                   | «Города: Все», запрос без фильтра                                                    |
+| 10  | Расширенный поиск: последний отдел | `notify.warning`, галочка осталась                                                   |
+| 11  | Период 91 день                     | красная обводка, кнопки заблокированы                                                |
+| 12  | Полнотекст без дома                | поля серые с подсказкой                                                              |
+| 13  | Экспорт дважды подряд              | второй → warning с секундами из `retry_after`; поиск не разблокирует кнопку раньше   |
+| 14  | Инженер                            | только свои (три слота), фильтр по ответственному скрыт                              |
+| 15  | Guest по `#/reports`               | заглушка «недоступны для вашей роли», `online` её не снимает                         |
+| 16  | DevTools offline → online          | заглушка, данные целы; после online сводка обновилась                                |
+| 17  | Смена пользователя без F5          | колонки пересобраны, чужой `reportSource` не наследуется                             |
+| 18  | Смена темы                         | графики перекрашиваются без перерисовки                                              |
+| 19  | Уход со вкладки                    | `document.getElementById("repHoverTip") === null`, подложек в DOM нет                |
+
+---
+
+## 15. Выкатка
+
+| Шаг | Действие                                                              |
+| --- | --------------------------------------------------------------------- |
+| 1   | Создать `domains/_reports`, права `0750`, владелец — пользователь PHP |
+| 2   | Выкатить бэк и фронт **одним заходом**                                |
+| 3   | Перезапуск PHP                                                        |
+| 4   | Выгрузка `ui/` зеркалом, `icons/` не трогать                          |
+| 5   | Тестировщикам — тост «Обновить сейчас»                                |
+
+Bump версии `addresses` **не нужен** — справочник отчётами не меняется. Отдельно требуется при чистке `lift_city`.
+
+---
+
+**Дельта к `API_PROTOCOL.md`:** §0.2 (таймаут экспорта 30 с), §1.2 (исключение для границ отчётов), §2.4 (`#/reports` зарегистрирован), §13.3 (источник колонок отчёта — клиент), §16.3 (`date_range_too_long`, `export_too_many_rows`), §20 (права online-пути отчётов реализованы; `repair_time_is_default` не выставляется).
