@@ -3111,6 +3111,28 @@ tr[data-demo="true"] td:first-child {
     border-right: 1px solid var(--border-color);
 }
 .rep-tab-active { border-color: var(--accent) !important; color: var(--accent) !important; }
+/* .menu-item стилизован только внутри .responsive-menu-list;
+   вне меню кнопки отчёта получили бы браузерный дефолт. */
+.rep-filters button.menu-item {
+    display: inline-block;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.rep-filters button.menu-item:hover:not(:disabled) {
+    background-color: var(--border-color);
+    color: var(--accent);
+}
+.rep-filters button.menu-item:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 .rep-invalid { border-color: #ef4444 !important; }
 .rep-stub {
     padding: 14px 16px;
