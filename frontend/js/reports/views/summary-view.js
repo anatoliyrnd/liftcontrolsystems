@@ -253,4 +253,147 @@ export function createSummaryView(opts) {
             const seg = svgEl("circle", {
                 cx: 60, cy: 60, r: R,
                 class: `rep-donut-seg rep-level-${row.level}`,
-                "stroke-dasharray": `${len}
+                "stroke-dasharray": `${len} ${C - len}`,
+                "stroke-dashoffset": -acc,
+                transform: "rotate(-90 60 60)",
+            });
+            const t = svgEl("title");
+            t.textContent = `${row.name}: ${count}`;
+            seg.appendChild(t);
+            svg.appendChild(seg);
+            acc += len;
+        }
+        const num = svgEl("text", { x: 60, y: 58, class: "rep-donut-num", "text-anchor": "middle" });
+        num.textContent = String(total);
+        const cap = svgEl("text", { x: 60, y: 74, class: "rep-donut-cap", "text-anchor": "middle" });
+        cap.textContent = "открыто";
+        svg.appendChild(num);
+        svg.appendChild(cap);
+        body.appendChild(svg);
+        const legend = el("div", { class: "rep-legend" });
+        for (const row of rows) {
+            const item = el("div", { class: "rep-legend-item" });
+            item.appendChild(el("span", { class: `rep-legend-swatch rep-level-${row.level}` }));
+            item.appendChild(el("span", { class: "rep-legend-name" }, row.name));
+            item.appendChild(el("span", { class: "rep-legend-count" }, String(row.count ?? 0)));
+            legend.appendChild(item);
+        }
+        body.appendChild(legend);
+        box.appendChild(body);
+        return box;
+    }
+
+    function bars(title, rows) {
+        if (!Array.isArray(rows) || rows.length === 0) return emptyChart(title);
+        const max = Math.max(1, ...rows.map((r) => Number(r.count) || 0));
+        const box = chartBox(title);
+        for (const row of rows) {
+            const line = el("div", { class: "rep-bar-row" });
+            const label = el("span", { class: "rep-bar-label" }, String(row.name ?? "—"));
+            label.title = String(row.name ?? "—");
+            const track = el("div", { class: "rep-bar-track" });
+            const fill = el("div", { class: "rep-bar-fill" });
+            fill.style.width = `${Math.max(2, ((Number(row.count) || 0) / max) * 100)}%`;
+            track.appendChild(fill);
+            line.appendChild(label);
+            line.appendChild(track);
+            line.appendChild(el("span", { class: "rep-bar-count" }, String(row.count ?? 0)));
+            box.appendChild(line);
+        }
+        return box;
+    }
+
+    function kpi(label, value, mod = "") {
+        const box = el("div", { class: `rep-kpi${mod ? " " + mod : ""}` });
+        box.appendChild(el("div", { class: "rep-kpi-value" }, String(value)));
+        box.appendChild(el("div", { class: "rep-kpi-label" }, label));
+        return box;
+    }
+
+    // --- рендер -------------------------------------------------------
+    function render(data) {
+        lastData = data;
+        skeleton.style.display = "none";
+        updating.style.display = "none";
+        content.classList.remove("is-updating");
+        content.innerHTML = "";
+        if (!data) {
+            periodLine.textContent = "";
+            content.appendChild(el("div", { class: "rep-chart-empty" }, "Нет данных за выбранный период."));
+            return;
+        }
+        const p = data.period || {};
+        const presetLabel = REPORTS.SUMMARY_PERIODS[p.preset] || "Период";
+        // Границы показываем явно: «неделя» = понедельник→сегодня, а не 7 дней.
+        periodLine.textContent = p.date_from
+            ? `${presetLabel}: ${formatTsMsk(p.date_from)} — ${formatTsMsk(p.date_to)} (МСК)`
+            : "";
+        const closedLabel = p.preset === "today" ? "Закрыто сегодня" : `Закрыто · ${presetLabel.toLowerCase()}`;
+        const createdLabel = p.preset === "today" ? "Создано сегодня" : `Создано · ${presetLabel.toLowerCase()}`;
+
+        const kpis = el("div", { class: "rep-kpis" });
+        kpis.appendChild(kpi("Открыто сейчас", data.open_now ?? 0));
+        kpis.appendChild(kpi("Просрочено", data.overdue_now ?? 0, (data.overdue_now ?? 0) > 0 ? "rep-kpi-danger" : ""));
+        kpis.appendChild(kpi(closedLabel, data.closed_period ?? 0, "rep-kpi-success"));
+        kpis.appendChild(kpi(createdLabel, data.created_period ?? 0));
+        kpis.appendChild(kpi("Среднее закрытие", fmtDuration(data.avg_close_time_seconds)));
+        content.appendChild(kpis);
+
+        const charts = el("div", { class: "rep-charts" });
+        const levels = Array.isArray(data.open_by_alert_level)
+            ? data.open_by_alert_level.map((r) => ({
+                level: r.level,
+                name: `Уровень ${r.level}`,
+                count: r.count,
+            }))
+            : [];
+        charts.appendChild(donut("Открытые по уровням тревоги", levels));
+        charts.appendChild(bars("Открытые по отделам", data.open_by_department));
+        charts.appendChild(bars("Открытые по городам", data.open_by_city));
+        content.appendChild(charts);
+    }
+
+    function showSkeleton() {
+        skeleton.style.display = "";
+        updating.style.display = "none";
+        content.classList.remove("is-updating");
+        content.innerHTML = "";
+    }
+    function setUpdating(flag) {
+        if (flag && lastData) {
+            updating.style.display = "";
+            content.classList.add("is-updating");
+        } else {
+            updating.style.display = "none";
+            content.classList.remove("is-updating");
+        }
+    }
+    function setControlsEnabled(flag) {
+        periodSelect.disabled = !flag;
+        refreshBtn.disabled = !flag;
+        cityBtn.disabled = !flag || cities.length === 0;
+        if (!flag) closeDropdown();
+    }
+    function snapshot() {
+        return { summaryPeriod: period, summaryCities: [...selected] };
+    }
+    function destroy() {
+        abort.abort();
+        backdrop.remove();
+    }
+
+    syncCityUi();
+    showSkeleton();
+
+    return {
+        element: root,
+        render,
+        showSkeleton,
+        setUpdating,
+        setControlsEnabled,
+        snapshot,
+        getPeriod: () => period,
+        getCityIds: () => [...selected],
+        destroy,
+    };
+}
