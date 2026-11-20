@@ -144,6 +144,7 @@ final class ApiController
             'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
             // Отчёты (§15 v6.2): ответ под data, права проверяет сервис.
             'reports_filters_data' => Response::ok(['data' => $this->reportsService->getFiltersData($user)]),
+            'reports_summary'      => Response::ok(['data' => $this->reportsService->getSummary($user, $request->body)]),
             'reports_stats'        => Response::ok(['data' => $this->reportsService->getStats($user, $request->body)]),
             'reports_list'         => Response::ok(['data' => $this->reportsService->getList($user, $request->body)]),
             'reports_export'       => Response::ok($this->reportsService->exportResponse($user, $request->body)),
