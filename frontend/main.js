@@ -38,6 +38,8 @@ import { QueueController } from "./js/queue-controller.js";
 import { startTour, stopTour } from "./js/tour/index.js";
 import { contextMenu } from "./js/components/context-menu.js";
 import { quickActionModal } from "./js/components/quick-action-modal.js";
+import { reportsPageTemplate } from "./js/route/pages/reports.js";
+import { ReportsController } from "./js/reports-controller.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -52,7 +54,7 @@ const loginCtrl = new LoginController(api, router);
 const settingsCtrl = new SettingsController(api, router);
 const profileCtrl = new ProfileController(api, router);
 const queueCtrl = new QueueController(api, router);
-
+const reportsCtrl = new ReportsController(api, router);
 let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
@@ -179,6 +181,7 @@ function leaveAll() {
     ["detailsCtrl", detailsCtrl],
     ["createCtrl", createCtrl],
     ["queueCtrl", queueCtrl],
+    ["reportsCtrl", reportsCtrl],
     ["settingsCtrl", settingsCtrl],
     ["profileCtrl", profileCtrl],
     ["loginCtrl", loginCtrl],
@@ -220,6 +223,14 @@ async function refreshActiveJournalSettings() {
     await ctrl?.refreshColumns?.();
   } catch (e) {
     console.warn("[App] Не удалось перечитать настройки журнала:", e);
+  }
+  // Отчёты живут вне activeTicketsController: applyUserSettings
+  // сбрасывает scope на "open" и обнуляет reportSource, поэтому
+  // экран обязан переподтвердить колонки и на своём маршруте.
+  try {
+    reportsCtrl?.refreshColumns?.();
+  } catch (e) {
+    console.warn("[App] Не удалось перечитать настройки отчётов:", e);
   }
 }
 
@@ -813,9 +824,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     () => profileCtrl.mount(),
   );
   router.addRoute(
-    "#/queue",
-    () => queuePageTemplate(),
-    () => queueCtrl.mount(),
+      "#/queue",
+      () => queuePageTemplate(),
+      () => queueCtrl.mount(),
+  );
+  router.addRoute(
+      "#/reports",
+      () => reportsPageTemplate(),
+      () => reportsCtrl.mount(),
   );
 
   const historyWrapper = document.getElementById("historyWrapper");
