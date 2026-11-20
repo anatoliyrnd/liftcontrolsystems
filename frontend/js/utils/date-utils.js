@@ -89,3 +89,41 @@ export function parseAnyDate(value) {
 
     return null;
 }
+// ============================================================================
+// МСК-хелперы отчётов (§15 v6.2). Аддитивно: formatTs и журналы не трогаем.
+//
+// Зачем отдельно: период отчётов строится в бизнес-зоне МСК, а formatTs
+// рендерит в локальной зоне пользователя. Вне МСК UI и CSV разошлись бы,
+// а «сегодня» у пользователя в UTC-3 ушло бы за end_of_today и сервер
+// вернул бы data:null. Europe/Moscow = UTC+3 без DST с 2014, поэтому
+// арифметика смещением, без Intl и таблиц зон.
+// ============================================================================
+const MSK_OFFSET_SEC = 3 * 3600;
+const pad2 = (n) => String(n).padStart(2, "0");
+/** Дата в МСК как объект Date, читаемый UTC-геттерами. */
+function mskDate(tsSec) {
+    return new Date((Number(tsSec) + MSK_OFFSET_SEC) * 1000);
+}
+/** 'dd.mm.yyyy@hh:mm' в МСК — тот же визуальный формат, что formatTs. */
+export function formatTsMsk(ts) {
+    const n = Number(ts);
+    if (!ts || ts === "—" || !Number.isFinite(n) || n <= 0) return "—";
+    const d = mskDate(n);
+    return `${pad2(d.getUTCDate())}.${pad2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}@${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+}
+/** Сегодня в МСК строкой 'YYYY-MM-DD' — для input[type=date] и максимума. */
+export function mskTodayYmd() {
+    const d = mskDate(Math.floor(Date.now() / 1000));
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+/** 00:00:00 МСК выбранного дня → Unix-секунды. null при битом формате. */
+export function mskDayStartTs(ymd) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ""));
+    if (!m) return null;
+    return Math.floor(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 1000) - MSK_OFFSET_SEC;
+}
+/** 23:59:59 МСК выбранного дня → Unix-секунды. Сервер не прибавляет сам. */
+export function mskDayEndTs(ymd) {
+    const start = mskDayStartTs(ymd);
+    return start === null ? null : start + 86399;
+}
