@@ -206,14 +206,27 @@ export class ApiService {
     tag = null,
     skipAuthHandling = false,
     internal = null,
+    requestTimeoutMs = null,
   ) {
     // internal = { deadline, isRefresh } — только для внутренних вызовов
     // (refresh и retry), наружный контракт метода не меняется.
     //
     // Дедлайн сквозной: refresh и retry наследуют бюджет родителя,
     // иначе цепочка складывает таймауты в ~50 секунд спиннера.
-    const deadline = internal?.deadline ?? Date.now() + CHAIN_BUDGET_MS;
-    const remaining = deadline - Date.now();
+   // const deadline = internal?.deadline ?? Date.now() + CHAIN_BUDGET_MS;
+    //const remaining = deadline - Date.now();
+      // Аддитивный таймаут: экспорт отчёта дольше дефолтных 15 с. Без
+      // параметра поведение байт в байт прежнее.
+      const reqTimeout =
+          Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0
+              ? requestTimeoutMs
+              : REQUEST_TIMEOUT_MS;
+      // Бюджет цепочки масштабируем от таймаута запроса: с экспортом 30 с
+      // и бюджетом 30 с на refresh+retry не осталось бы ничего.
+      const deadline =
+          internal?.deadline ??
+          Date.now() + Math.max(CHAIN_BUDGET_MS, reqTimeout * 2);
+      const remaining = deadline - Date.now();
     if (remaining <= 0) {
       return {
         status: "error",
@@ -241,7 +254,7 @@ export class ApiService {
         const timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, Math.min(REQUEST_TIMEOUT_MS, remaining));
+        }, Math.min(reqTimeout, remaining));
     if (tag) {
       if (!this._activeByTag.has(tag)) this._activeByTag.set(tag, new Set());
       this._activeByTag.get(tag).add(controller);
@@ -334,12 +347,13 @@ export class ApiService {
             // своим запросом, retry отчитается своим. Одна логическая
             // операция не должна давать два события успеха.
             return this._sendPostRequest(
-              url,
-              payloadData,
-              actionComment,
-              tag,
-              true,
-              { deadline },
+                url,
+                payloadData,
+                actionComment,
+                tag,
+                true,
+                { deadline },
+                requestTimeoutMs,
             );
           }
           if (refresh.kind === "auth") {
@@ -450,8 +464,17 @@ export class ApiService {
     );
   }
 
-  async post(body = {}, actionComment = "", tag = null) {
-    return this._sendPostRequest(this.baseUrl, body, actionComment, tag);
+  /** opts.timeoutMs — per-request таймаут (экспорт отчётов). */
+  async post(body = {}, actionComment = "", tag = null, opts = null) {
+    return this._sendPostRequest(
+        this.baseUrl,
+        body,
+        actionComment,
+        tag,
+        false,
+        null,
+        opts?.timeoutMs ?? null,
+    );
   }
 
   // ------------------------------------------------------------------
