@@ -548,3 +548,18 @@ export function setOpenFilters({ cities, hideLong }) {
         writeRaw(key(state.userId, "filters", "open", "hideLong"), String(hideLong));
     }
 }
+/**
+ * Фильтры отчётов — per-user, scope report (§15 v6.2, правило 4:
+ * читать только после авторизации, писать через settings.js).
+ * Одним ключом: период, адрес, отделы, статус, сортировка, вкладка.
+ * null = ключ не сохранён (первый вход) — контроллер применит дефолты.
+ */
+export function getReportFilters() {
+    if (state.userId == null) return null;
+    return readJSON(key(state.userId, "filters", "report", "state"), null);
+}
+export function setReportFilters(value) {
+    if (state.userId == null) return;
+    if (value == null || typeof value !== "object" || Array.isArray(value)) return;
+    writeJSON(key(state.userId, "filters", "report", "state"), value);
+}
