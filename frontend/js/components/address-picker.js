@@ -9,6 +9,7 @@ export function createAddressPicker(opts = {}) {
     initialValue = null,
     mode = "elevator", // 'elevator' | 'house' | 'any'
     readOnly = false,
+    autoOpen = true,
   } = opts;
 
   const wrap = document.createElement("div");
@@ -164,11 +165,17 @@ export function createAddressPicker(opts = {}) {
     } else {
       const defaultCity = await offlineDB.getConfig("default_city_id");
       if (
-        defaultCity &&
-        currentCities.some((c) => String(c.id) === String(defaultCity))
+          defaultCity &&
+          currentCities.some((c) => String(c.id) === String(defaultCity))
       ) {
         citySelect.value = String(defaultCity);
-        if (!readOnly) handleCityChange();
+        if (readOnly) return;
+        // autoOpen:false — экран отчётов: город проставлен и поле поиска
+        // видно, но без focus() и triggerSearch(""): иначе страница
+        // открывалась бы с раскрытым списком и подложкой поверх фильтров,
+        // а onChange(null) затирал бы восстановленные фильтры.
+        searchWrap.style.display = "block";
+        if (autoOpen) handleCityChange();
       }
     }
   }
