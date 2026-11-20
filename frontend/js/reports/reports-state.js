@@ -34,6 +34,11 @@ export function defaultReportState() {
         sort: REPORTS.SORT_DEFAULT,
         tab: REPORTS.TAB_DEFAULT,
         page: 1,
+        // Сводка живёт отдельно от расширенного поиска: свои контролы,
+        // свой запрос. summaryCities: null = ключ не сохранён → все города;
+        // [] = «Все» (журнальная семантика, ноль не ошибка).
+        summaryPeriod: REPORTS.SUMMARY_PERIOD_DEFAULT,
+        summaryCities: null,
     };
 }
 
