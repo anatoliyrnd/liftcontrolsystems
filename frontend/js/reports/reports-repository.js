@@ -14,6 +14,16 @@ export function createReportsRepository(api) {
     return {
         fetchFiltersData: () =>
             api.post({ action: "reports_filters_data" }, null, tag),
+        // Сводка: silent (null) — автообновление на каждый клик по городу
+        // не должно мигать статус-баром; индикатор загрузки — скелетон.
+        // Тег отдельный: уход с вкладки «Сводка» не гасит запросы
+        // расширенного поиска и наоборот.
+        fetchSummary: (period, cityIds) =>
+            api.post(
+                { action: "reports_summary", period, city_ids: cityIds },
+                null,
+                "reports_summary",
+            ),
         fetchStats: (filters) =>
             api.post({ action: "reports_stats", ...filters }, "Формирование сводки...", tag),
         fetchList: (filters, page, limit) =>
