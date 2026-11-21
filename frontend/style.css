@@ -3579,3 +3579,53 @@ body.rr-standalone .container {
     font-size: 14px;
     margin-bottom: 10px;
 }
+/* ==========================================================================
+-ЯЧЕЙКИ ОТЧЁТА
+Базовое правило th,td задаёт white-space:nowrap !important и обрезку
+многоточием. Отчёту нужен перенос: семь колонок по 3–4 строки вместо
+пятнадцати обрезанных. Специфичность #reportsTable td перебивает td.
+========================================================================== */
+#reportsTable th,
+#reportsTable td {
+  white-space: pre-line !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  word-break: break-word;
+  vertical-align: top;
+  height: auto !important;
+  line-height: 1.4;
+}
+#reportsTable td { padding: 8px 10px !important; }
+#reportsTable th { padding: 8px 10px !important; }
+/* Первая строка复合-ячейки — заголовок сущности: номер, дата, имя. */
+#reportsTable td[data-col-id="ticket"],
+#reportsTable td[data-col-id="opening"],
+#reportsTable td[data-col-id="resp1"],
+#reportsTable td[data-col-id="resp2"],
+#reportsTable td[data-col-id="resp3"],
+#reportsTable td[data-col-id="closure"] { font-variant-numeric: tabular-nums; }
+/* Липкая №/Адрес: body-render смещает только address, которого в
+   новом наборе нет — фиксируем первую колонку сами. */
+#reportsTable th[data-id="ticket"] {
+  position: sticky !important;
+  left: 0;
+  z-index: 35 !important;
+  background-color: var(--table-th-bg) !important;
+}
+#reportsTable td[data-col-id="ticket"] {
+  position: sticky !important;
+  left: 0;
+  z-index: 25;
+  background-color: var(--row-bg, var(--bg-secondary)) !important;
+  font-weight: 600;
+}
+/* Просроченный срок и неназначенный ответственный красятся пост-проходом
+   table-view; фон sticky-ячейки не должен перекрывать цвет тревоги. */
+#reportsTable td.cell-alert-danger,
+#reportsTable td.cell-alert-warning,
+#reportsTable td.cell-alert-info { z-index: 26; }
+@media (max-width: 768px) {
+  #reportsTable th[data-id="ticket"],
+  #reportsTable td[data-col-id="ticket"] { position: static !important; }
+  #reportsTable td { font-size: 12.5px; }
+}
