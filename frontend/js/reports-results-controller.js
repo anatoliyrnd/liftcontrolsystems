@@ -41,6 +41,7 @@ export class ReportsResultsController {
     this._cooldownUntil = 0;
     this._exportBusy = false;
     this._payload = null;
+    this._isEmpty = false;
     this._page = 1;
     this._seq = 0;
     this._baseTitle = document.title;
@@ -265,7 +266,8 @@ export class ReportsResultsController {
       : "Сводка по выборке";
 
     this.tableView.renderRows(items);
-    this._els.empty.style.display = items.length === 0 ? "" : "none";
+    this._isEmpty = items.length === 0;
+    this._els.empty.style.display = this._isEmpty ? "" : "none";
     this.tableView.renderPagination(this._els.pagination, pg, (next) =>
       this._run(next),
     );
@@ -360,12 +362,20 @@ export class ReportsResultsController {
   _syncExport() {
     if (!this._els) return;
     const cooling = Date.now() < this._cooldownUntil;
-    this._els.exportBtn.disabled =
-      !this._payload || this._exportBusy || cooling;
+    // Пустая выборка: сервер вернёт data:null, но окно 30 с уже
+    // сгорит — лимит стоит до запроса намеренно (защита от перебора
+    // широких периодов). Гасим кнопку здесь, чтобы честный пустой
+    // поиск не блокировал следующую выгрузку.
+    const blocked =
+      !this._payload || this._exportBusy || cooling || this._isEmpty;
+    this._els.exportBtn.disabled = blocked;
     this._els.exportBtn.textContent = this._exportBusy
       ? "Генерация..."
       : "Выгрузить CSV";
-    this._els.printBtn.disabled = !this._payload;
+    this._els.exportBtn.title = this._isEmpty
+      ? "В выборке нет строк — выгружать нечего"
+      : "";
+    this._els.printBtn.disabled = !this._payload || this._isEmpty;
   }
 
   _showStub(text) {
