@@ -58,6 +58,26 @@ const profileCtrl = new ProfileController(api, router);
 const queueCtrl = new QueueController(api, router);
 const reportsCtrl = new ReportsController(api, router);
 const reportsResultsCtrl = new ReportsResultsController(api, router);
+/**
+ * Вкладка таблицы отчётов (#/reports-results) — служебная, без оболочки.
+ * SyncManager, поллер, трекер неактивности, загрузка адресов и чтение
+ * outbox в ней не запускаются: закрытая вкладка держала бы соединение
+ * IndexedDB и блокировала upgrade схемы в основной вкладке, а трекер
+ * выкидывал бы её на логин через 30 минут простоя.
+ */
+const RESULTS_HASH = "#/reports-results";
+function isStandaloneResults() {
+  return (window.location.hash || "").startsWith(RESULTS_HASH);
+}
+function applyStandaloneChrome() {
+  const on = isStandaloneResults();
+  document.body.classList.toggle("rr-standalone", on);
+  const nav = document.querySelector(".navbar");
+  if (nav) nav.style.display = on ? "none" : "";
+  const hist = document.getElementById("historyWrapper");
+  if (hist) hist.style.display = on ? "none" : "";
+  return on;
+}
 let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
