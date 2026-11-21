@@ -277,126 +277,85 @@ export const REPORTS = {
    * header-render вешает клик только внутри if (col.sortable), значит
    * заголовки некликабельны и клиентский sorting.js не вызывается.
    */
+  /**
+   * Суффиксы каналов — §1.3, без эмодзи. Тот же набор, что рисует
+   * body-render в журналах и что уезжает в CSV: три поверхности
+   * одного словаря, расхождение слов означало бы «разные статусы».
+   */
+  NOTIFY_SUFFIXES: {
+    1: "по телефону",
+    2: "онлайн",
+    3: "в телеграм",
+    4: "в макс",
+    5: "в вк",
+    6: "по смс",
+    7: "по email",
+  },
+  /**
+   * Семь-колонок вместо пятнадцати плоских. Содержимое собирает
+   * reports-formatters.js, рендерит body-render как обычные строки:
+   * новые id не попадают в его спец-случаи (staff_name/notify_status),
+   * поэтому текст уходит в ячейку без повторного форматирования.
+   *
+   * Перенос строк включает CSS (#reportsTable td: pre-line).
+   * sortable:false у всех — сортировка серверная.
+   */
   COLUMNS: [
     {
-      id: "id",
-      name: "№",
-      type: "number",
-      sortable: false,
-      default_visible: true,
-      minWidth: 80,
-    },
-    {
-      id: "address",
-      name: "Адрес",
+      id: "ticket",
+      name: "№ / Адрес",
       type: "string",
       sortable: false,
       default_visible: true,
-      minWidth: 260,
+      minWidth: 300,
     },
     {
-      id: "details",
-      name: "Описание проблемы",
+      id: "opening",
+      name: "Открыта",
       type: "string",
       sortable: false,
       default_visible: true,
-      minWidth: 220,
+      minWidth: 340,
     },
     {
-      id: "department",
-      name: "Отдел",
+      id: "resp1",
+      name: "Ответственный 1",
       type: "string",
       sortable: false,
       default_visible: true,
-      minWidth: 160,
+      minWidth: 230,
     },
     {
-      id: "staff_name",
-      name: "Ответственный",
-      type: "string",
-      sortable: false,
-      default_visible: true,
-      minWidth: 160,
-    },
-    {
-      id: "notify_status",
-      name: "Статус уведомления",
-      type: "string",
-      sortable: false,
-      default_visible: true,
-      minWidth: 220,
-    },
-    {
-      id: "date",
-      name: "Дата создания",
-      type: "timestamp",
-      sortable: false,
-      default_visible: true,
-      minWidth: 140,
-    },
-    {
-      id: "repair_time",
-      name: "Срок ремонта",
-      type: "timestamp",
-      sortable: false,
-      default_visible: true,
-      minWidth: 150,
-    },
-    {
-      id: "close_date",
-      name: "Дата закрытия",
-      type: "timestamp",
-      sortable: false,
-      default_visible: true,
-      minWidth: 140,
-    },
-    {
-      id: "close_name",
-      name: "Кто закрыл",
-      type: "string",
-      sortable: false,
-      default_visible: true,
-      minWidth: 150,
-    },
-    {
-      id: "solution",
-      name: "Решение/Устранение",
-      type: "string",
-      sortable: false,
-      default_visible: true,
-      minWidth: 180,
-    },
-    {
-      id: "staff_name2",
+      id: "resp2",
       name: "Ответственный 2",
       type: "string",
       sortable: false,
-      default_visible: false,
-      minWidth: 160,
+      default_visible: true,
+      minWidth: 230,
     },
     {
-      id: "notify_status2",
-      name: "Статус уведомления 2",
-      type: "string",
-      sortable: false,
-      default_visible: false,
-      minWidth: 220,
-    },
-    {
-      id: "staff_name3",
+      id: "resp3",
       name: "Ответственный 3",
       type: "string",
       sortable: false,
-      default_visible: false,
-      minWidth: 160,
+      default_visible: true,
+      minWidth: 230,
     },
     {
-      id: "notify_status3",
-      name: "Статус уведомления 3",
+      id: "classification",
+      name: "Отдел / Группа / Тип",
       type: "string",
       sortable: false,
-      default_visible: false,
-      minWidth: 220,
+      default_visible: true,
+      minWidth: 240,
+    },
+    {
+      id: "closure",
+      name: "Закрытие",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 320,
     },
   ],
 };
