@@ -1,12 +1,9 @@
-import { REPORTS } from "../config.js";
-
 /**
  * Односторонний канал «фильтры → таблица» между вкладками браузера.
  *
  * Транспорт — localStorage + событие storage, а не BroadcastChannel:
  * событие приходит и в уже открытую вкладку, и переживает её
- * перезагрузку (свежая вкладка читает ключ сама). BroadcastChannel
- * не дал бы второго, а поддержка у него уже́.
+ * перезагрузку (свежая вкладка читает ключ сама).
  *
  * seq обязателен: storage-событие не возникает, если значение не
  * изменилось. Повторный «Найти» с теми же фильтрами иначе молча
@@ -14,14 +11,24 @@ import { REPORTS } from "../config.js";
  *
  * Ключ содержит user_id: запрос одного пользователя не должен
  * прилететь в таблицу, открытую под другим аккаунтом.
+ *
+ * Имя окна и hash живут здесь, а не в config.js: их читает только
+ * этот модуль (правило config.js «константа одного файла — в файле»).
  */
+export const RESULTS_WINDOW_NAME = "liftcs_reports_results";
+export const RESULTS_HASH = "#/reports-results";
+
 function requestKey(userId) {
   return `lift:reports:result:${userId ?? "anon"}:request`;
 }
 
 /** URL вкладки таблицы — от текущего пути, работает на любом тенанте. */
 export function resultsUrl() {
-  return location.pathname + location.search + REPORTS.RESULTS_HASH;
+  return location.pathname + location.search + RESULTS_HASH;
+}
+
+export function isResultsHash(hash) {
+  return String(hash || "").startsWith(RESULTS_HASH);
 }
 
 export function publishResultRequest(userId, payload) {
