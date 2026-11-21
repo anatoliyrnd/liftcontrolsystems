@@ -147,8 +147,11 @@ export class ReportsController {
       advanced: this._els.tabAdvanced,
       byId: this._els.tabById,
     };
-    if (tab !== "summary") this.summaryView?.closeOverlays();
-    if (tab !== "advanced") this.filtersView?.closeOverlays();
+    // ?.() обязателен: ?. на получателе не проверяет наличие метода.
+    // Без него несовпадение версий вьюхи и контроллера роняло клик
+    // по вкладке целиком, а не деградировало до «оверлей не закрыт».
+    if (tab !== "summary") this.summaryView?.closeOverlays?.();
+    if (tab !== "advanced") this.filtersView?.closeOverlays?.();
     for (const [key, node] of Object.entries(panels)) {
       node.style.display = key === tab ? "" : "none";
     }
