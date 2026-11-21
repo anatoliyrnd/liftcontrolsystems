@@ -94,7 +94,7 @@ final class UsersController extends BaseController
 
         $id = $this->users->create($fields, Password::hash($password));
 
-        $this->audit->log($this->actorId(), 'user.create', [
+         $this->audit->log('user.create', [
             'user_id'  => $id,
             'login'    => $fields['user_login'],
             'position' => $fields['user_position'],
@@ -102,7 +102,7 @@ final class UsersController extends BaseController
         ]);
 
         Flash::set('success', 'Пользователь создан');
-        $this->redirect('users');
+$this->redirect('?page=users');
     }
 
     public function edit(): void
@@ -160,7 +160,7 @@ final class UsersController extends BaseController
             $this->users->updatePasswordHash($id, Password::hash($password));
         }
 
-        $this->audit->log($this->actorId(), 'user.update', [
+        $this->audit->log('user.update', [
             'user_id'  => $id,
             'login'    => $fields['user_login'],
             'position' => $fields['user_position'],
@@ -215,7 +215,7 @@ final class UsersController extends BaseController
             $this->users->resetLoginState($id);
         }
 
-        $this->audit->log($this->actorId(), 'user.block', [
+        $this->audit->log('user.block', [
             'user_id' => $id,
             'blocked' => $blocked ? 1 : 0,
         ]);
