@@ -165,8 +165,8 @@ export function createAddressPicker(opts = {}) {
     } else {
       const defaultCity = await offlineDB.getConfig("default_city_id");
       if (
-          defaultCity &&
-          currentCities.some((c) => String(c.id) === String(defaultCity))
+        defaultCity &&
+        currentCities.some((c) => String(c.id) === String(defaultCity))
       ) {
         citySelect.value = String(defaultCity);
         if (readOnly) return;
@@ -519,6 +519,9 @@ export function createAddressPicker(opts = {}) {
     element: wrap,
     getValue: () => selectedData,
     isValid: () => selectedData !== null,
+    // Снаружи: контроллер гасит список при уходе с вкладки. Подложка
+    // лежит в body и переживает display:none родителя.
+    closeDropdown: hideDropdown,
     setValue: (val) => {
       if (!val) return;
       selectedData = val;
