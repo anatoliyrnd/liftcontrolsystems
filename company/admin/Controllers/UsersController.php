@@ -349,12 +349,31 @@ $this->redirect('?page=users');
      * @param array<string, mixed>      $old
      * @param array<string, string>     $errors
      */
-    private function renderForm(?array $user, array $old, array $errors): void
+       private function renderForm(?array $user, array $old, array $errors): void
     {
+        // BaseController::render() кладёт 'user' = авторизованный админ,
+        // и layout рисует по нему шапку. Редактируемую запись отдаём как
+        // 'record': иначе шапка покажет имя редактируемого вместо вошедшего.
+        //
+        // Из записи и из POST берём только поля формы: findById возвращает
+        // SELECT *, то есть user_password, api_token, user_token — в область
+        // видимости шаблона они попадать не должны. Заодно 'password' из POST
+        // не возвращается в форму: пароль никогда не переотрисовывается.
+        $keys = array_flip(array_merge([
+            'user_id',
+            'user_login',
+            'user_email',
+            'user_surname',
+            'user_firstname',
+            'user_patronymic',
+            'user_phone',
+            'user_position',
+        ], self::FLAGS));
+
         $this->render('users.form', [
             'title'     => $user === null ? 'Новый пользователь' : 'Редактирование пользователя',
-            'user'      => $user,
-            'old'       => $old,
+            'record'    => $user === null ? null : array_intersect_key($user, $keys),
+            'old'       => array_intersect_key($old, $keys),
             'errors'    => $errors,
             'positions' => Position::options(),
         ]);
