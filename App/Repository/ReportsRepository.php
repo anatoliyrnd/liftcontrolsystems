@@ -370,16 +370,20 @@ final class ReportsRepository
         $sql = "SELECT c.call_id, c.call_status, c.call_adres, c.call_details, c.call_solution,
                        c.call_last_name, c.call_last_name_close, c.call_first_name,
                        c.call_date, c.call_date2, c.expected_repair_time, c.alert_level,
-                       c.call_department,
+                       c.call_department, c.call_group, c.call_request,
                        c.call_staff, c.call_staff2, c.call_staff3,
                        c.call_staff_status, c.call_staff_status2, c.call_staff_status3,
                        c.call_staff_date, c.call_staff_date2, c.call_staff_date3,
                        d.type_name AS department,
+                       g.type_name AS group_name,
+                       r.type_name AS request_name,
                        u1.user_name AS staff_name,
                        u2.user_name AS staff_name2,
                        u3.user_name AS staff_name3$keySel
                 FROM lift_calls c
                 LEFT JOIN lift_types d  ON d.type_id = c.call_department
+                LEFT JOIN lift_types g  ON g.type_id = c.call_group AND g.type = 3
+                LEFT JOIN lift_types r  ON r.type_id = c.call_request AND r.type = 2
                 LEFT JOIN lift_users u1 ON u1.user_id = c.call_staff
                 LEFT JOIN lift_users u2 ON u2.user_id = c.call_staff2
                 LEFT JOIN lift_users u3 ON u3.user_id = c.call_staff3
@@ -439,6 +443,16 @@ final class ReportsRepository
             'solution' => $closed ? ((string) $r['call_solution'] !== '' ? (string) $r['call_solution'] : '—') : '—',
             'department' => $r['department'] !== null ? (string) $r['department'] : null,
             'department_id' => (string) $r['call_department'],
+            // Кто открыл — для ячейки «Открыта». Колонка уже выбиралась
+            // ради CSV, но в items не отдавалась.
+            'created_by' => (string) ($r['call_first_name'] ?? ''),
+            // Группа и тип запроса — для ячейки «Отдел / Группа / Тип».
+            // type-гuard в JOIN обязателен: id из другого справочника
+            // иначе подставил бы чужое название.
+            'group' => ($r['group_name'] ?? null) !== null ? (string) $r['group_name'] : null,
+            'group_id' => (string) ($r['call_group'] ?? ''),
+            'request' => ($r['request_name'] ?? null) !== null ? (string) $r['request_name'] : null,
+            'request_id' => (string) ($r['call_request'] ?? ''),
             'alert_level' => (int) $r['alert_level'],
             'staff_id' => (int) $r['call_staff'] > 0 ? (int) $r['call_staff'] : null,
             'staff_name' => $r['staff_name'] !== null ? (string) $r['staff_name'] : null,
