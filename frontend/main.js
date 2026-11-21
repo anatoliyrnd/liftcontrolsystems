@@ -42,8 +42,6 @@ import { reportsPageTemplate } from "./js/route/pages/reports.js";
 import { ReportsController } from "./js/reports-controller.js";
 import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
 import { ReportsResultsController } from "./js/reports-results-controller.js";
-import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
-import { ReportsResultsController } from "./js/reports-results-controller.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
