@@ -40,6 +40,8 @@ import { contextMenu } from "./js/components/context-menu.js";
 import { quickActionModal } from "./js/components/quick-action-modal.js";
 import { reportsPageTemplate } from "./js/route/pages/reports.js";
 import { ReportsController } from "./js/reports-controller.js";
+import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
+import { ReportsResultsController } from "./js/reports-results-controller.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -55,6 +57,7 @@ const settingsCtrl = new SettingsController(api, router);
 const profileCtrl = new ProfileController(api, router);
 const queueCtrl = new QueueController(api, router);
 const reportsCtrl = new ReportsController(api, router);
+const reportsResultsCtrl = new ReportsResultsController(api, router);
 let menuManager = null;
 let notifPoller = null;
 let inactivityTracker = null;
@@ -182,6 +185,7 @@ function leaveAll() {
     ["createCtrl", createCtrl],
     ["queueCtrl", queueCtrl],
     ["reportsCtrl", reportsCtrl],
+    ["reportsResultsCtrl", reportsResultsCtrl],
     ["settingsCtrl", settingsCtrl],
     ["profileCtrl", profileCtrl],
     ["loginCtrl", loginCtrl],
@@ -229,6 +233,7 @@ async function refreshActiveJournalSettings() {
   // экран обязан переподтвердить колонки и на своём маршруте.
   try {
     reportsCtrl?.refreshColumns?.();
+    reportsResultsCtrl?.refreshColumns?.();
   } catch (e) {
     console.warn("[App] Не удалось перечитать настройки отчётов:", e);
   }
@@ -284,7 +289,7 @@ window.addEventListener("beforeunload", (e) => {
   if (navigator.onLine || !authStore.hasAccess()) return;
   if (!window.__hasPendingOutbox) return;
   e.preventDefault();
-   // Фолбэк для Safari (свойство устарело, но Safari без него не показывает окно)
+  // Фолбэк для Safari (свойство устарело, но Safari без него не показывает окно)
   e.returnValue = "";
   return "";
 });
@@ -824,14 +829,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     () => profileCtrl.mount(),
   );
   router.addRoute(
-      "#/queue",
-      () => queuePageTemplate(),
-      () => queueCtrl.mount(),
+    "#/queue",
+    () => queuePageTemplate(),
+    () => queueCtrl.mount(),
   );
   router.addRoute(
-      "#/reports",
-      () => reportsPageTemplate(),
-      () => reportsCtrl.mount(),
+    "#/reports",
+    () => reportsPageTemplate(),
+    () => reportsCtrl.mount(),
+  );
+  // Отдельная вкладка браузера: своё окно, свой инстанс SPA.
+  router.addRoute(
+    "#/reports-results",
+    () => reportsResultsPageTemplate(),
+    () => reportsResultsCtrl.mount(),
   );
 
   const historyWrapper = document.getElementById("historyWrapper");
