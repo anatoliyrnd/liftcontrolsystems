@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Service;
 
+use App\Exceptions\ApiException;
+use App\Http\ErrorCode;
 /**
  * Сборка CSV отчёта. Потоково в php://temp: 2000 строк не держим в
  * памяти единой строкой до base64.
@@ -30,7 +32,13 @@ final class ReportsExporter
     {
         $h = fopen('php://temp', 'r+');
         if ($h === false) {
-            return '';
+            // Пустая строка уехала бы в base64 как валидный файл:
+            // rows_count = N, содержимое нулевое. Пользователь не отличит
+            // сбой формирования от «данных нет» и решит, что выборка пуста.
+            throw new ApiException(
+                ErrorCode::InternalError,
+                'Не удалось сформировать файл выгрузки'
+            );
         }
         fwrite($h, "\xEF\xBB\xBF");
         fputcsv($h, ['ID', 'Адрес', 'Описание', 'Закрытие', 'Отв. 1', 'Отв. 2', 'Отв. 3'], ';', '"', '');
@@ -61,18 +69,31 @@ final class ReportsExporter
         rewind($h);
         $out = stream_get_contents($h);
         fclose($h);
-        return $out === false ? '' : $out;
+        if ($out === false || ($rows !== [] && $out === '')) {
+            throw new ApiException(
+                ErrorCode::InternalError,
+                'Не удалось сформировать файл выгрузки'
+            );
+        }
+        return $out;
     }
 
     private function staffCell(array $r, int $slot): string
     {
-        $name = (string) ($r["staff_name$slot"] ?? '');
-        $id = (int) ($r["call_staff$slot"] ?? 0);
+        // Первый слот в selectRows() без суффикса: c.call_staff,
+        // c.call_staff_status, c.call_staff_date, u1.user_name AS staff_name.
+        // Обращение по staff_name1/call_staff1 давало id = 0 и ранний
+        // return '—' — первый ответственный терялся во всех строках.
+        $s = $slot === 1 ? '' : (string) $slot;
+        $name = (string) ($r["staff_name$s"] ?? '');
+        $id = (int) ($r["call_staff$s"] ?? 0);
         if ($id <= 0 || $name === '') {
             return '—';
         }
-        $status = $r["call_staff_status$slot"] !== null ? (int) $r["call_staff_status$slot"] : 0;
-        $date = $r["call_staff_date$slot"] !== null ? (int) $r["call_staff_date$slot"] : 0;
+        // ?? обязателен: без него отсутствующий ключ даёт warning,
+        // а set_error_handler из bootstrap превращает его в исключение.
+        $status = (int) ($r["call_staff_status$s"] ?? 0);
+        $date = (int) ($r["call_staff_date$s"] ?? 0);
         if ($status <= 0) {
             return $name . "\nНе уведомлен";
         }
