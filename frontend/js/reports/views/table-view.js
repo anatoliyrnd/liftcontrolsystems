@@ -2,93 +2,138 @@ import { REPORTS } from "../../config.js";
 import { setScope, setReportColumns } from "../../table/settings.js";
 import { rebuildTableHeaders } from "../../table/header-render.js";
 import { renderTableBody } from "../../table/body-render.js";
+import { toTableRow, alertClass, isOverdue } from "../reports-formatters.js";
+import { nowTs } from "../../utils/date-utils.js";
 
 /**
- * Таблица отчёта переиспользует header-render/body-render: липкие
- * колонки, ширины per-user и подсветка тревоги достаются бесплатно.
+ * Таблица отчёта: семь-колонок, перенос строк вместо обрезки.
  *
- * Своё здесь только одно — гарантия источника колонок: setScope +
- * setReportColumns перед КАЖДЫМ рендером, по образцу _renderTableFull
- * журналов. applyUserSettings сбрасывает scope на "open" и обнуляет
- * reportSource при смене пользователя, поэтому точка гарантии одна.
+ * body-render переиспользуется без правок: новые id колонок не входят
+ * в его спец-случаи, поэтому собранный многострочный текст уходит в
+ * ячейку через textContent. Перенос даёт CSS pre-line.
  *
- * Колонки sortable:false целиком ⇒ header-render не вешает клики,
- * sorting.js не вызывается: сортировка отчёта серверная, направление
- * фиксировано белым списком REPORTS.SORTS.
+ * Подсветку и data-ticket-id ставим пост-проходом: body-render красит
+ * только колонку с id "id", которой в новом наборе нет, а клик по
+ * строке больше не может читать текст первой ячейки — там теперь
+ * «№ 1217\nадрес», и валидация /^\d+$/ его не пропустит.
  */
 export function createTableView(table, router) {
-    let rowClickAbort = null;
+  let rowClickAbort = null;
 
-    function ensureColumns() {
-        setScope("report");
-        setReportColumns(REPORTS.COLUMNS);
-    }
+  function ensureColumns() {
+    setScope("report");
+    setReportColumns(REPORTS.COLUMNS);
+  }
 
-    function rebuildHeaders() {
-        ensureColumns();
-        const old = table.querySelector("thead");
-        if (old) old.remove();
-        // onSortCallback не вызывается никогда (sortable:false), но
-        // сигнатура обязательна — передаём noop осознанно.
-        rebuildTableHeaders(table, () => {}, () => {});
-    }
+  function rebuildHeaders() {
+    ensureColumns();
+    const old = table.querySelector("thead");
+    if (old) old.remove();
+    rebuildTableHeaders(
+      table,
+      () => {},
+      () => {},
+    );
+  }
 
-    function renderRows(items) {
-        ensureColumns();
-        renderTableBody(table, Array.isArray(items) ? items : []);
-    }
+  function renderRows(items) {
+    ensureColumns();
+    const list = Array.isArray(items) ? items : [];
+    renderTableBody(table, list.map(toTableRow));
+    decorate(list);
+  }
 
-    function bindRowClick() {
-        if (rowClickAbort) rowClickAbort.abort();
-        rowClickAbort = new AbortController();
-        const tbody = table.querySelector("tbody");
-        if (!tbody) return;
-        tbody.addEventListener(
-            "click",
-            (e) => {
-                if (e.target.classList.contains("resizer")) return;
-                const row = e.target.closest("tr");
-                if (!row) return;
-                const idCell = row.querySelector('td[data-col-id="id"]');
-                const id = idCell ? idCell.textContent.trim() : "";
-                // Только серверные номера: роутер валидирует param строго.
-                if (!/^\d+$/.test(id)) return;
-                router.navigate("#/ticket/" + encodeURIComponent(id));
-            },
-            { signal: rowClickAbort.signal },
+  /** Подсветка тревоги + номер заявки для навигации. */
+  function decorate(items) {
+    const tbody = table.querySelector("tbody");
+    if (!tbody) return;
+    const now = nowTs();
+    const rows = tbody.querySelectorAll("tr");
+    items.forEach((item, i) => {
+      const tr = rows[i];
+      if (!tr) return;
+      const id = item.id ?? item.call_id ?? "";
+      tr.dataset.ticketId = String(id);
+
+      const first = tr.querySelector('td[data-col-id="ticket"]');
+      if (first) {
+        const cls = alertClass(item, now);
+        if (cls) first.classList.add(cls);
+        first.classList.add("sticky-freeze-border");
+      }
+      if (isOverdue(item, now)) {
+        tr.querySelector('td[data-col-id="opening"]')?.classList.add(
+          "cell-alert-danger",
         );
-    }
+      }
+      if (!Number(item.staff_id)) {
+        tr.querySelector('td[data-col-id="resp1"]')?.classList.add(
+          "cell-alert-warning",
+        );
+      }
+      // Полный текст по наведению: описание СПульта с дополнениями
+      // может быть длинным, а(title) даёт прочитать без раскрытия.
+      const opening = tr.querySelector('td[data-col-id="opening"]');
+      if (opening) opening.title = opening.textContent;
+      const closure = tr.querySelector('td[data-col-id="closure"]');
+      if (closure && closure.textContent !== "—")
+        closure.title = closure.textContent;
+    });
+  }
 
-    function renderPagination(container, pagination, onPage) {
-        container.innerHTML = "";
-        if (!pagination || !pagination.total_items) return;
-        const page = pagination.current_page;
-        const pages = Math.max(1, pagination.total_pages);
-        const prev = document.createElement("button");
-        prev.type = "button";
-        prev.className = "theme-toggle-btn";
-        prev.style.cssText = "border-radius:6px;width:auto;padding:0 10px;font-size:13px;";
-        prev.textContent = "‹";
-        prev.disabled = page <= 1;
-        prev.addEventListener("click", () => onPage(page - 1));
-        const next = document.createElement("button");
-        next.type = "button";
-        next.className = "theme-toggle-btn";
-        next.style.cssText = "border-radius:6px;width:auto;padding:0 10px;font-size:13px;";
-        next.textContent = "›";
-        next.disabled = page >= pages;
-        next.addEventListener("click", () => onPage(page + 1));
-        const info = document.createElement("span");
-        info.textContent = `Стр. ${page} из ${pages} (всего ${pagination.total_items})`;
-        container.appendChild(prev);
-        container.appendChild(info);
-        container.appendChild(next);
-    }
+  function bindRowClick() {
+    if (rowClickAbort) rowClickAbort.abort();
+    rowClickAbort = new AbortController();
+    const tbody = table.querySelector("tbody");
+    if (!tbody) return;
+    tbody.addEventListener(
+      "click",
+      (e) => {
+        if (e.target.classList.contains("resizer")) return;
+        const row = e.target.closest("tr");
+        if (!row) return;
+        const id = String(row.dataset.ticketId || "").trim();
+        if (!/^\d+$/.test(id)) return;
+        router.navigate("#/ticket/" + encodeURIComponent(id));
+      },
+      { signal: rowClickAbort.signal },
+    );
+  }
 
-    function destroy() {
-        if (rowClickAbort) rowClickAbort.abort();
-        rowClickAbort = null;
-    }
+  function renderPagination(container, pagination, onPage) {
+    container.innerHTML = "";
+    if (!pagination || !pagination.total_items) return;
+    const page = pagination.current_page;
+    const pages = Math.max(1, pagination.total_pages);
+    const mk = (label, disabled, next) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "theme-toggle-btn";
+      b.style.cssText =
+        "border-radius:6px;width:auto;padding:0 10px;font-size:13px;";
+      b.textContent = label;
+      b.disabled = disabled;
+      b.addEventListener("click", () => onPage(next));
+      return b;
+    };
+    const info = document.createElement("span");
+    info.textContent = `Стр. ${page} из ${pages} (всего ${pagination.total_items})`;
+    container.appendChild(mk("‹", page <= 1, page - 1));
+    container.appendChild(info);
+    container.appendChild(mk("›", page >= pages, page + 1));
+  }
 
-    return { ensureColumns, rebuildHeaders, renderRows, bindRowClick, renderPagination, destroy };
+  function destroy() {
+    if (rowClickAbort) rowClickAbort.abort();
+    rowClickAbort = null;
+  }
+
+  return {
+    ensureColumns,
+    rebuildHeaders,
+    renderRows,
+    bindRowClick,
+    renderPagination,
+    destroy,
+  };
 }
