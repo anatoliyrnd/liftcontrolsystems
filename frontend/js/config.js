@@ -86,17 +86,17 @@ export const UI = {
 export const BUSINESS = {
   /** Канал «Принял в работу» для механика — WEB */
   ACCEPT_CHANNEL: 2,
-    /**
-     * Быстрые шаблоны решения для модалки закрытия из контекстного меню.
-     * UI-шорткаты, не справочник. Подмена из серверного config — на будущее
-     * (прецедент: пресеты repair_time клиент игнорирует, §2.6 ⚠️).
-     */
-    QUICK_CLOSE_TEMPLATES: [
-        "Перезапуск станции управления",
-        "Освобождение пассажира из кабины",
-        "Замена предохранителя в цепи управления",
-        "Ложный вызов, неисправность не подтвердилась",
-    ],
+  /**
+   * Быстрые шаблоны решения для модалки закрытия из контекстного меню.
+   * UI-шорткаты, не справочник. Подмена из серверного config — на будущее
+   * (прецедент: пресеты repair_time клиент игнорирует, §2.6 ⚠️).
+   */
+  QUICK_CLOSE_TEMPLATES: [
+    "Перезапуск станции управления",
+    "Освобождение пассажира из кабины",
+    "Замена предохранителя в цепи управления",
+    "Ложный вызов, неисправность не подтвердилась",
+  ],
   /** Каналы уведомления для отображения статуса ответственного */
   NOTIFY_CHANNELS: {
     0: "— Не уведомлён —",
@@ -225,9 +225,16 @@ export const REPORTS = {
   SORT_DEFAULT: "date",
   TABS: {
     summary: "Сводка",
-    byId: "Поиск по ID",
     advanced: "Расширенный поиск",
+    byId: "Поиск по ID",
   },
+  /**
+   * Таблица результатов — отдельная вкладка браузера, не вкладка SPA.
+   * Имя окна фиксировано: window.open с тем же name переиспользует
+   * уже открытую вкладку, а не плодит новые.
+   */
+  RESULTS_WINDOW_NAME: "liftcs_reports_results",
+  RESULTS_HASH: "#/reports-results",
   TAB_DEFAULT: "summary",
   /**
    * Пресеты сводки. Границы считает СЕРВЕР в МСК: неделя = понедельник→
@@ -271,20 +278,125 @@ export const REPORTS = {
    * заголовки некликабельны и клиентский sorting.js не вызывается.
    */
   COLUMNS: [
-    { id: "id", name: "№", type: "number", sortable: false, default_visible: true, minWidth: 80 },
-    { id: "address", name: "Адрес", type: "string", sortable: false, default_visible: true, minWidth: 260 },
-    { id: "details", name: "Описание проблемы", type: "string", sortable: false, default_visible: true, minWidth: 220 },
-    { id: "department", name: "Отдел", type: "string", sortable: false, default_visible: true, minWidth: 160 },
-    { id: "staff_name", name: "Ответственный", type: "string", sortable: false, default_visible: true, minWidth: 160 },
-    { id: "notify_status", name: "Статус уведомления", type: "string", sortable: false, default_visible: true, minWidth: 220 },
-    { id: "date", name: "Дата создания", type: "timestamp", sortable: false, default_visible: true, minWidth: 140 },
-    { id: "repair_time", name: "Срок ремонта", type: "timestamp", sortable: false, default_visible: true, minWidth: 150 },
-    { id: "close_date", name: "Дата закрытия", type: "timestamp", sortable: false, default_visible: true, minWidth: 140 },
-    { id: "close_name", name: "Кто закрыл", type: "string", sortable: false, default_visible: true, minWidth: 150 },
-    { id: "solution", name: "Решение/Устранение", type: "string", sortable: false, default_visible: true, minWidth: 180 },
-    { id: "staff_name2", name: "Ответственный 2", type: "string", sortable: false, default_visible: false, minWidth: 160 },
-    { id: "notify_status2", name: "Статус уведомления 2", type: "string", sortable: false, default_visible: false, minWidth: 220 },
-    { id: "staff_name3", name: "Ответственный 3", type: "string", sortable: false, default_visible: false, minWidth: 160 },
-    { id: "notify_status3", name: "Статус уведомления 3", type: "string", sortable: false, default_visible: false, minWidth: 220 },
+    {
+      id: "id",
+      name: "№",
+      type: "number",
+      sortable: false,
+      default_visible: true,
+      minWidth: 80,
+    },
+    {
+      id: "address",
+      name: "Адрес",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 260,
+    },
+    {
+      id: "details",
+      name: "Описание проблемы",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 220,
+    },
+    {
+      id: "department",
+      name: "Отдел",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 160,
+    },
+    {
+      id: "staff_name",
+      name: "Ответственный",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 160,
+    },
+    {
+      id: "notify_status",
+      name: "Статус уведомления",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 220,
+    },
+    {
+      id: "date",
+      name: "Дата создания",
+      type: "timestamp",
+      sortable: false,
+      default_visible: true,
+      minWidth: 140,
+    },
+    {
+      id: "repair_time",
+      name: "Срок ремонта",
+      type: "timestamp",
+      sortable: false,
+      default_visible: true,
+      minWidth: 150,
+    },
+    {
+      id: "close_date",
+      name: "Дата закрытия",
+      type: "timestamp",
+      sortable: false,
+      default_visible: true,
+      minWidth: 140,
+    },
+    {
+      id: "close_name",
+      name: "Кто закрыл",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 150,
+    },
+    {
+      id: "solution",
+      name: "Решение/Устранение",
+      type: "string",
+      sortable: false,
+      default_visible: true,
+      minWidth: 180,
+    },
+    {
+      id: "staff_name2",
+      name: "Ответственный 2",
+      type: "string",
+      sortable: false,
+      default_visible: false,
+      minWidth: 160,
+    },
+    {
+      id: "notify_status2",
+      name: "Статус уведомления 2",
+      type: "string",
+      sortable: false,
+      default_visible: false,
+      minWidth: 220,
+    },
+    {
+      id: "staff_name3",
+      name: "Ответственный 3",
+      type: "string",
+      sortable: false,
+      default_visible: false,
+      minWidth: 160,
+    },
+    {
+      id: "notify_status3",
+      name: "Статус уведомления 3",
+      type: "string",
+      sortable: false,
+      default_visible: false,
+      minWidth: 220,
+    },
   ],
 };
