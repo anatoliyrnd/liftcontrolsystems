@@ -8,6 +8,7 @@ use Company\Admin\Support\Position;
 /**
  * @var string $title
  * @var list<array<string, mixed>> $users
+ * @var array<string, mixed>|null $user авторизованный админ (BaseController::render)
  */
 
 $e = static fn(mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
@@ -92,16 +93,20 @@ $ts = static function (mixed $value) use ($e): string {
                     <td class="text-end text-nowrap">
                         <a class="btn btn-sm btn-outline-secondary"
                            href="?page=users&amp;action=edit&amp;id=<?= $id ?>">Редактировать</a>
-                        <form method="post" action="?page=users&amp;action=block" class="d-inline">
-                            <input type="hidden" name="_csrf" value="<?= $e(Csrf::token()) ?>">
-                            <input type="hidden" name="id" value="<?= $id ?>">
-                            <input type="hidden" name="blocked" value="<?= $blocked ? 0 : 1 ?>">
-                            <button type="submit"
-                                    class="btn btn-sm <?= $blocked ? 'btn-outline-success' : 'btn-outline-danger' ?>"
-                                    onclick="return confirm('<?= $blocked ? 'Разблокировать' : 'Заблокировать' ?> пользователя?')">
-                                <?= $blocked ? 'Разблокировать' : 'Блокировать' ?>
-                            </button>
-                        </form>
+                        <?php if ($id !== (int) ($user['user_id'] ?? 0)): ?>
+                            <form method="post" action="?page=users&amp;action=block" class="d-inline">
+                                <input type="hidden" name="_csrf" value="<?= $e(Csrf::token()) ?>">
+                                <input type="hidden" name="id" value="<?= $id ?>">
+                                <input type="hidden" name="blocked" value="<?= $blocked ? 0 : 1 ?>">
+                                <button type="submit"
+                                        class="btn btn-sm <?= $blocked ? 'btn-outline-success' : 'btn-outline-danger' ?>"
+                                        onclick="return confirm('<?= $blocked ? 'Разблокировать' : 'Заблокировать' ?> пользователя?')">
+                                    <?= $blocked ? 'Разблокировать' : 'Блокировать' ?>
+                                </button>
+                            </form>
+                        <?php else: ?>
+                            <span class="text-muted small ms-2">это вы</span>
+                        <?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>
