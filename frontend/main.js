@@ -42,6 +42,8 @@ import { reportsPageTemplate } from "./js/route/pages/reports.js";
 import { ReportsController } from "./js/reports-controller.js";
 import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
 import { ReportsResultsController } from "./js/reports-results-controller.js";
+import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
+import { ReportsResultsController } from "./js/reports-results-controller.js";
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -229,6 +231,7 @@ function activeTicketsController() {
 
 /** Шапка — всегда; кнопка таблицы — только у активного экрана. */
 function refreshSyncUi() {
+  if (isStandaloneResults()) return;
   const ctrl = activeTicketsController() || openTicketsCtrl;
   Promise.resolve(ctrl._updateSyncButton()).catch((e) =>
     console.warn("[App] Не удалось обновить индикатор синхронизации:", e),
@@ -434,10 +437,12 @@ async function initAuthorizedApp() {
       // через sync:fetch_staff/dicts (версии не применены → outdated).
       console.warn("[App] config недоступен при старте:", e);
     }
-    await refreshAddresses({ silent: true });
-
+    // Адресный кэш и серверные настройки таблице не нужны. Config выше
+    // загружен ради userStore: без него роль осталась бы guest и гейт
+    // отчётов закрыл бы вкладку диспетчеру.
+    if (!isStandaloneResults()) await refreshAddresses({ silent: true });
     // Пользователь мог смениться, пока config был в пути.
-    if ((authStore.getUser()?.id ?? null) === uid) {
+    if (!isStandaloneResults() && (authStore.getUser()?.id ?? null) === uid) {
       authorizedForUserId = uid;
       await loadServerSettings(uid);
     }
@@ -449,6 +454,8 @@ async function initAuthorizedApp() {
 }
 
 function syncAuthUI() {
+  // Служебная вкладка: оболочку не трогаем и поллер/трекер не стартуем.
+  if (isStandaloneResults()) return;
   const historyWrapper = document.getElementById("historyWrapper");
   const userProfileWrapper = document.getElementById("userProfileWrapper");
   const navUserAvatar = document.getElementById("navUserAvatar");
@@ -587,11 +594,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!themeCtrl) themeCtrl = new ThemeController("themeToggle");
 
   setNotifyRouter(router);
+  const standalone = applyStandaloneChrome();
+  // Уход на карточку заявки внутри служебной вкладки возвращает оболочку.
+  window.addEventListener("hashchange", applyStandaloneChrome);
   // 3.1/3.4: syncTableSettingsFromStorage() больше не вызывается —
   // до авторизации читать настройки нечего, работают дефолты.
-  syncIndicator.init();
-  offlineBanner.init();
-
+  if (!standalone) {
+    syncIndicator.init();
+    offlineBanner.init();
+  }
   window.addEventListener("sync:fetch_staff", async (e) => {
     const version = e.detail?.version;
     try {
@@ -858,6 +869,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     () => reportsPageTemplate(),
     () => reportsCtrl.mount(),
   );
+  router.addRoute(
+    RESULTS_HASH,
+    () => reportsResultsPageTemplate(),
+    () => reportsResultsCtrl.mount(),
+  );
   // Отдельная вкладка браузера: своё окно, свой инстанс SPA.
   router.addRoute(
     "#/reports-results",
@@ -873,13 +889,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       historyWrapper.classList.toggle("is-collapsed");
   }
 
-  syncManager = new SyncManager(api, router, {
-    onDuplicateDetected: (record, existingTickets) =>
-      duplicateTicketModal.show(record, existingTickets),
-  });
-
-  window.syncManagerInstance = syncManager;
-
+  if (!standalone) {
+    syncManager = new SyncManager(api, router, {
+      onDuplicateDetected: (record, existingTickets) =>
+        duplicateTicketModal.show(record, existingTickets),
+    });
+    window.syncManagerInstance = syncManager;
+  }
   const runFailedCleanup = () => {
     if (window.syncManagerInstance?.isSyncing) {
       setTimeout(runFailedCleanup, 60_000);
@@ -900,9 +916,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
   };
 
-  runFailedCleanup();
-  updateOutboxFlag();
-
+  if (!standalone) {
+    runFailedCleanup();
+    updateOutboxFlag();
+  }
   const updateSW = registerSW({
     onNeedRefresh() {
       swUpdateReady = true;

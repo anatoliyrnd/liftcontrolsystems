@@ -3515,6 +3515,30 @@ button.menu-item.rep-primary:hover:not(:disabled) {
   .rep-filters .address-picker-wrap > div:first-child,
   .rep-filters .address-picker-wrap > div:last-child { flex: 1 1 auto; width: 100%; }
 }
+/* ==========================================================================
+СЛУЖЕБНАЯ ВКЛАДКА ТАБЛИЦЫ — без оболочки приложения
+Класс ставит main.js по маршруту #/reports-results. Инлайн-скрытие
+navbar/history дублирует CSS: элементы могут отсутствовать в DOM.
+========================================================================== */
+body.rr-standalone .navbar,
+body.rr-standalone .history-wrapper,
+body.rr-standalone #historyWrapper,
+body.rr-standalone .offline-banner,
+body.rr-standalone .network-led,
+body.rr-standalone .sync-indicator,
+body.rr-standalone .menu-hamburger-trigger {
+  display: none !important;
+}
+body.rr-standalone .container {
+  height: 100vh !important;
+  padding: 10px 14px !important;
+}
+@media (max-height: 800px) {
+  body.rr-standalone .container { height: 100vh !important; }
+}
+@media (max-height: 600px) {
+  body.rr-standalone .container { height: 100vh !important; }
+}
 /* ---- печать вкладки таблицы ---- */
 @media print {
   .navbar,
