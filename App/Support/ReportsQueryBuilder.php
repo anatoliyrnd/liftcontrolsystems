@@ -184,7 +184,11 @@ final class ReportsQueryBuilder
         // LIKE-символы экранируем через '!': «100%» иначе стал бы
         // шаблоном и вернул всё. Порядок замен важен — сначала '!',
         // иначе экранирующий символ удвоился бы повторно.
-        $textable = !$cityOnly && ($homeId > 0 || $objectId > 0);
+        // city_ids перекрывает одиночную цепочку: home_id/object_id
+        // в этом случае не фильтруют ничего. Разблокировать ими
+        // полнотекст значило бы разрешить поиск по условию, которого
+        // в WHERE нет — та же природа, что рассинхрон контракта и кода.
+        $textable = !$cityOnly && $cityIds === [] && ($homeId > 0 || $objectId > 0);
         if ($textable) {
             foreach (['details_text' => 'c.call_details', 'solution_text' => 'c.call_solution'] as $key => $column) {
                 $text = trim((string) ($this->f[$key] ?? ''));
