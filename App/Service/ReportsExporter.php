@@ -110,6 +110,18 @@ final class ReportsExporter
      */
     private static function cell(string $value): string
     {
-        return $value !== '' && str_contains('=+-@', $value[0]) ? "'" . $value : $value;
+        // Excel съедает ведущие пробел/таб/CR/LF и затем трактует '='
+        // как формулу: "\t=1+1" обходил проверку по первому байту.
+        // Проверяем первый НЕпробельный, префиксуем исходную строку —
+        // апостроф обязан быть первым символом ячейки.
+        $head = ltrim($value, " \t\r\n\v\f");
+        if ($head === '') {
+            return $value;
+        }
+        $ch = $head[0];
+        if ($ch === '=' || $ch === '+' || $ch === '-' || $ch === '@') {
+            return "'" . $value;
+        }
+        return $value;
     }
 }
