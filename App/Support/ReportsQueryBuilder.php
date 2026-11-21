@@ -123,6 +123,19 @@ final class ReportsQueryBuilder
         // Мультивыбор городов (сводка). Приоритетнее одиночной цепочки:
         // сводка не выбирает улицу/дом. Пусто → условия нет = «Все»,
         // ровно как в журнале заявок.
+         // Инициализация ДО ветвления: $cityOnly/$homeId/$objectId читаются
+        // ниже при расчёте $textable. Внутри else они оставались
+        // неопределёнными при мультивыборе городов, а set_error_handler
+        // превращает warning в ErrorException → internal_error на первом
+        // же city_ids в period-фильтрах.
+        $cityOnly = (bool) ($this->f['city_only'] ?? false);
+        $objectId = (int) ($this->f['object_id'] ?? 0);
+        $homeId   = (int) ($this->f['home_id'] ?? 0);
+        $streetId = (int) ($this->f['street_id'] ?? 0);
+        $cityId   = (int) ($this->f['city_id'] ?? 0);
+
+        // Мультивыбор городов приоритетнее одиночной цепочки.
+        // Пусто → условия нет = «Все», как в журнале.
         $cityIds = $this->normalizeIds($this->f['city_ids'] ?? []);
         if ($cityIds !== []) {
             $ph = [];
@@ -131,31 +144,23 @@ final class ReportsQueryBuilder
                 $p["city$i"] = $id;
             }
             $w[] = 'c.address_city IN (' . implode(', ', $ph) . ')';
-        } else {
-            // Адрес: самый специфичный побеждает; city_only гасит нижние.
-            $cityOnly = (bool) ($this->f['city_only'] ?? false);
-            $objectId = (int) ($this->f['object_id'] ?? 0);
-            $homeId   = (int) ($this->f['home_id'] ?? 0);
-            $streetId = (int) ($this->f['street_id'] ?? 0);
-            $cityId   = (int) ($this->f['city_id'] ?? 0);
-            if ($cityOnly) {
-                if ($cityId > 0) {
-                    $w[] = 'c.address_city = :city_id';
-                    $p['city_id'] = $cityId;
-                }
-            } elseif ($objectId > 0) {
-                $w[] = 'c.address_lift = :object_id';
-                $p['object_id'] = $objectId;
-            } elseif ($homeId > 0) {
-                $w[] = 'c.address_home = :home_id';
-                $p['home_id'] = $homeId;
-            } elseif ($streetId > 0) {
-                $w[] = 'c.address_street = :street_id';
-                $p['street_id'] = $streetId;
-            } elseif ($cityId > 0) {
+        } elseif ($cityOnly) {
+            if ($cityId > 0) {
                 $w[] = 'c.address_city = :city_id';
                 $p['city_id'] = $cityId;
             }
+        } elseif ($objectId > 0) {
+            $w[] = 'c.address_lift = :object_id';
+            $p['object_id'] = $objectId;
+        } elseif ($homeId > 0) {
+            $w[] = 'c.address_home = :home_id';
+            $p['home_id'] = $homeId;
+        } elseif ($streetId > 0) {
+            $w[] = 'c.address_street = :street_id';
+            $p['street_id'] = $streetId;
+        } elseif ($cityId > 0) {
+            $w[] = 'c.address_city = :city_id';
+            $p['city_id'] = $cityId;
         }
 
         $staffId = (int) ($this->f['staff_id'] ?? 0);
@@ -240,6 +245,14 @@ final class ReportsQueryBuilder
             return [null, []];
         }
         $uid = (int) ($this->user['id'] ?? 0);
+        // call_staff — NOT NULL DEFAULT 0. Без guard нулевой uid
+        // (битая сессия, легаси-запись) совпал бы с каждой неназначенной
+        // заявкой и выдал весь тенант. Тот же инвариант закрыт в
+        // CallScope::isAssigned и CallRepository::ownershipFilter —
+        // отчёты не должны быть единственным местом, где его нет.
+        if ($uid <= 0) {
+            return ['1 = 0', []];
+        }
         return [
             '(c.call_staff = :scope1 OR c.call_staff2 = :scope2 OR c.call_staff3 = :scope3)',
             ['scope1' => $uid, 'scope2' => $uid, 'scope3' => $uid],
