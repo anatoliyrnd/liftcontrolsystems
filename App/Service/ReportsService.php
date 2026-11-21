@@ -31,8 +31,12 @@ final class ReportsService
 
     private function gate(array $user): void
     {
+        // Allow-list, не denylist: неизвестная непустая роль (auditor,
+        // легаси-значение, битая сессия) проходила бы denylist и попадала
+        // в scope-фильтр. Эффект и так fail-safe, но гейт обязан быть
+        // явным — иначе каждая новая роль молча получает доступ к отчётам.
         $role = (string) ($user['role'] ?? '');
-        if ($role === 'guest' || $role === 'reserved') {
+        if (!in_array($role, ['administrator', 'dispatcher', 'engineer'], true)) {
             throw new ApiException(
                 ErrorCode::Forbidden,
                 'Отчёты недоступны для этой роли',
@@ -49,6 +53,11 @@ final class ReportsService
             'date_from' => (int) ($body['date_from'] ?? 0),
             'date_to' => (int) ($body['date_to'] ?? 0),
             'date_type' => ($body['date_type'] ?? '') === 'closed' ? 'closed' : 'created',
+            // §4 REPORTS.md: city_ids — общий фильтр трёх периодных
+            // экшенов. Без нормализации здесь ветка мультивыбора в
+            // buildWhere недостижима, контракт и код расходятся.
+            // Приведение к int[] делает normalizeIds в конструкторе.
+            'city_ids' => is_array($body['city_ids'] ?? null) ? $body['city_ids'] : [],
             'city_id' => (int) ($body['city_id'] ?? 0),
             'street_id' => (int) ($body['street_id'] ?? 0),
             'home_id' => (int) ($body['home_id'] ?? 0),
@@ -203,6 +212,19 @@ final class ReportsService
             );
         }
 
+        // Валидация дат — чистая арифметика, ни одного запроса. Заряжать
+        // за неё окно 30 с незачем: диспетчер с опечаткой в периоде
+        // получал блокировку вместо пустого результата.
+        $f = $this->filters($body);
+        if (!$this->validateDates($f)) {
+            return null;
+        }
+
+        // Лимит остаётся ДО запроса: пустая выборка и too_many_rows
+        // уже выполнили SELECT с JOIN и filesort. Снять с них лимит —
+        // значит открыть неограниченный перебор широких периодов.
+        // Кнопка CSV гаснет при нуле строк, поэтому честный пустой
+        // поиск окно не сжигает.
         $retry = (new ExportRateLimiter(30))->tryAcquire(
             $this->tenant?->id ?? 'unknown',
             (int) ($user['id'] ?? 0)
@@ -215,11 +237,6 @@ final class ReportsService
                 reason: 'rate_limited',
                 details: ['retry_after' => $retry]
             );
-        }
-
-        $f = $this->filters($body);
-        if (!$this->validateDates($f)) {
-            return null;
         }
 
         // 2001: ровно 2000 валидно, 2001-я строка — признак переполнения.
