@@ -34,7 +34,17 @@ final class UsersController extends BaseController
         'user_edit_user',
     ];
 
-    /** Лимиты из SHOW COLUMNS: превышение в STRICT даст отказ MySQL. */
+    /** Числовые идентификаторы мессенджеров: nullable bigint в схеме. */
+    private const ID_FIELDS = [
+        'user_telegram',
+        'user_max',
+        'user_vk',
+    ];
+
+    /**
+     * Лимиты из SHOW COLUMNS рабочей базы. sql_mode без STRICT, поэтому
+     * MySQL не откажет, а молча обрежет строку — эта проверка единственная.
+     */
     private const LIMITS = [
         'user_login' => 30,
         'user_email' => 200,
@@ -42,6 +52,7 @@ final class UsersController extends BaseController
         'user_firstname' => 100,
         'user_patronymic' => 100,
         'user_phone' => 39,
+        'user_address' => 200,
         'user_name' => 200,
     ];
 
@@ -94,7 +105,7 @@ final class UsersController extends BaseController
 
         $id = $this->users->create($fields, Password::hash($password));
 
-         $this->audit->log('user.create', [
+        $this->audit->log('user.create', [
             'user_id'  => $id,
             'login'    => $fields['user_login'],
             'position' => $fields['user_position'],
@@ -102,7 +113,7 @@ final class UsersController extends BaseController
         ]);
 
         Flash::set('success', 'Пользователь создан');
-$this->redirect('?page=users');
+        $this->redirect('?page=users');
     }
 
     public function edit(): void
@@ -169,7 +180,7 @@ $this->redirect('?page=users');
         ]);
 
         Flash::set('success', 'Изменения сохранены');
-        $this->redirect('users');
+        $this->redirect('?page=users');
     }
 
     public function block(): void
@@ -177,8 +188,7 @@ $this->redirect('?page=users');
         // Только POST: на GET не проверяется CSRF, действие было бы
         // вызываемо картинкой со стороннего сайта.
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            $this->redirect('users');
-            return;
+            $this->redirect('?page=users');
         }
 
         $id = (int) ($_POST['id'] ?? 0);
@@ -195,15 +205,13 @@ $this->redirect('?page=users');
         if ($blocked) {
             if ($id === $this->actorId()) {
                 Flash::set('danger', 'Нельзя заблокировать самого себя');
-                $this->redirect('users');
-                return;
+                $this->redirect('?page=users');
             }
 
             $position = Position::tryFrom((string) ($user['user_position'] ?? ''));
             if ($position !== null && $position->grantsPanelAccess() && $this->activeAdmins() <= 1) {
                 Flash::set('danger', 'Нельзя заблокировать последнего администратора');
-                $this->redirect('users');
-                return;
+                $this->redirect('?page=users');
             }
         }
 
@@ -221,7 +229,7 @@ $this->redirect('?page=users');
         ]);
 
         Flash::set('success', $blocked ? 'Пользователь заблокирован' : 'Пользователь разблокирован');
-        $this->redirect('users');
+        $this->redirect('?page=users');
     }
 
     /**
@@ -233,17 +241,23 @@ $this->redirect('?page=users');
     {
         $errors = [];
 
-        $read = static function (string $key): string {
-            return trim((string) ($_POST[$key] ?? ''));
+        $read = static fn(string $key): string => trim((string) ($_POST[$key] ?? ''));
+
+        // Первая буква заглавная, остальное как введено: принудительный
+        // lower испортил бы «оглы», «МакКлейн» и дефисные фамилии.
+        $ucFirst = static function (string $v): string {
+            return $v === ''
+                ? ''
+                : mb_strtoupper(mb_substr($v, 0, 1, 'UTF-8'), 'UTF-8') . mb_substr($v, 1);
         };
 
         $fields = [
             'user_login'      => $read('user_login'),
             'user_email'      => $read('user_email'),
-            'user_surname'    => $read('user_surname'),
-            'user_firstname'  => $read('user_firstname'),
-            'user_patronymic' => $read('user_patronymic'),
-            'user_phone'      => $read('user_phone'),
+            'user_surname'    => $ucFirst($read('user_surname')),
+            'user_firstname'  => $ucFirst($read('user_firstname')),
+            'user_patronymic' => $ucFirst($read('user_patronymic')),
+            'user_address'    => $read('user_address'),
         ];
 
         foreach (['user_login', 'user_email', 'user_surname', 'user_firstname'] as $required) {
@@ -258,8 +272,42 @@ $this->redirect('?page=users');
             $errors['user_email'] = 'Некорректный email';
         }
 
+        // Телефон: храним цифры, маска — представление. 8 → 7,
+        // десять цифр дополняются кодом страны.
+        $phone = preg_replace('/\D+/', '', $read('user_phone')) ?? '';
+        if ($phone !== '') {
+            if (strlen($phone) === 11 && $phone[0] === '8') {
+                $phone = '7' . substr($phone, 1);
+            } elseif (strlen($phone) === 10) {
+                $phone = '7' . $phone;
+            }
+            if (preg_match('/^7\d{10}$/', $phone) !== 1) {
+                $errors['user_phone'] = 'Мобильный: 11 цифр с кодом 7 или 10 цифр без кода';
+            }
+        }
+        $fields['user_phone'] = $phone;
+
+        // Числовые ID: пусто → NULL, не 0 и не ''. Без STRICT MySQL
+        // молча прижмёт значение вне диапазона bigint к границе.
+        foreach (self::ID_FIELDS as $key) {
+            $raw = $read($key);
+            if ($raw === '') {
+                $fields[$key] = null;
+                continue;
+            }
+            $value = filter_var($raw, FILTER_VALIDATE_INT, [
+                'options' => ['min_range' => 1, 'max_range' => PHP_INT_MAX],
+            ]);
+            if ($value === false) {
+                $errors[$key] = 'Только цифры, от 1 до ' . PHP_INT_MAX;
+                $fields[$key] = null;
+            } else {
+                $fields[$key] = $value;
+            }
+        }
+
         foreach (self::LIMITS as $key => $max) {
-            if (isset($fields[$key]) && mb_strlen($fields[$key]) > $max) {
+            if (isset($fields[$key]) && mb_strlen((string) $fields[$key]) > $max) {
                 $errors[$key] = 'Не длиннее ' . $max . ' символов';
             }
         }
@@ -349,7 +397,7 @@ $this->redirect('?page=users');
      * @param array<string, mixed>      $old
      * @param array<string, string>     $errors
      */
-       private function renderForm(?array $user, array $old, array $errors): void
+    private function renderForm(?array $user, array $old, array $errors): void
     {
         // BaseController::render() кладёт 'user' = авторизованный админ,
         // и layout рисует по нему шапку. Редактируемую запись отдаём как
@@ -367,6 +415,10 @@ $this->redirect('?page=users');
             'user_firstname',
             'user_patronymic',
             'user_phone',
+            'user_address',
+            'user_telegram',
+            'user_max',
+            'user_vk',
             'user_position',
         ], self::FLAGS));
 
