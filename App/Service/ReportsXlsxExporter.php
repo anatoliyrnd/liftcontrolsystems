@@ -234,7 +234,7 @@ class ReportsXlsxExporter
     {
         // Управляющие символы вне диапазона XML 1.0 ломают файл целиком.
         $s = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', '', $s) ?? '';
-        return htmlspecialchars($s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        return htmlspecialchars($s, ENT_QUOTES | ENT_XML1 | ENT_SUBSTITUTE, 'UTF-8');
     }
 
     private function headerRow(): string
