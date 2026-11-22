@@ -57,5 +57,14 @@ export function createReportsRepository(api) {
         tag,
         { timeoutMs: REPORTS.EXPORT_TIMEOUT_MS },
       ),
+    // XLSX: сервер собирает книгу, клиент только декодирует base64.
+    // Таймаут тот же — 2000 строк плюс заметки не быстрее CSV.
+    exportXlsx: (filters) =>
+      api.post(
+        { action: "reports_export", format: "xlsx", ...filters },
+        "Генерация XLSX...",
+        tag,
+        { timeoutMs: REPORTS.EXPORT_TIMEOUT_MS },
+      ),
   };
 }
