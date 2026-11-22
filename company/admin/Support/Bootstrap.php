@@ -7,7 +7,9 @@ namespace Company\Admin\Support;
 use App\Database\DB;
 use App\Support\Logger;
 use App\Tenant;
+use Company\Admin\Repositories\Contracts\TokenRepositoryInterface;
 use Company\Admin\Repositories\Contracts\UserRepositoryInterface;
+use Company\Admin\Repositories\Db\DbTokenRepository;
 use Company\Admin\Repositories\Db\DbUserRepository;
 use Company\Admin\Services\AuditService;
 use Company\Admin\Services\SessionAuth;
@@ -118,6 +120,11 @@ final class Bootstrap
         $c->bind(
             UserRepositoryInterface::class,
             static fn(Container $c) => $c->get(DbUserRepository::class)
+        );
+        $c->bind(DbTokenRepository::class, static fn() => new DbTokenRepository($db));
+        $c->bind(
+            TokenRepositoryInterface::class,
+            static fn(Container $c) => $c->get(DbTokenRepository::class)
         );
         $c->bind(AuditService::class, static fn() => new AuditService($db));
         $c->bind(
