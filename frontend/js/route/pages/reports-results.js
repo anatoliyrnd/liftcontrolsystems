@@ -17,6 +17,10 @@ export function reportsResultsPageTemplate() {
         <button type="button" id="rrRefreshBtn" class="menu-item">Обновить</button>
         <button type="button" id="rrExportBtn" class="menu-item rep-primary">Выгрузить CSV</button>
         <button type="button" id="rrPrintBtn" class="menu-item">Печать</button>
+        <select id="rrPrintSheet" class="menu-item" title="Формат листа">
+          <option value="a4">A4</option>
+          <option value="a3">A3</option>
+        </select>
       </div>
     </div>
     <div id="rrStub" class="rep-stub" style="display:none;"></div>
