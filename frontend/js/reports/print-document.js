@@ -84,7 +84,7 @@ function respCell(doc, item) {
     const line = respLine(doc, item, slot);
     if (line) td.appendChild(line);
   }
-  if (!td.childNodes.length) td.textContent = DASH;
+  // Решение 5: не назначен — не печатаем ничего, даже прочерк.
   return td;
 }
 
@@ -107,10 +107,7 @@ function closeCell(doc, item) {
   return td;
 }
 
-function printCss(sheet, marginMm, scale) {
-  const cols = REPORTS.PRINT_COLUMNS.map((c) => `  ${c.mm * scale}mm`).join(
-    ",\n",
-  );
+function printCss(sheet, marginMm) {
   return `
 @page { size: ${sheet.widthMm}mm ${sheet.heightMm}mm; margin: ${marginMm}mm; }
 * { box-sizing: border-box; }
@@ -156,7 +153,7 @@ export function renderPrintDocument(win, { rows, meta = {}, sheetId }) {
   doc.close();
 
   const style = el(doc, "style");
-  style.textContent = printCss(sheet, margin, scale);
+  style.textContent = printCss(sheet, margin);
   doc.head.appendChild(style);
 
   const toolbar = el(doc, "div", { class: "rep-print-toolbar" });
