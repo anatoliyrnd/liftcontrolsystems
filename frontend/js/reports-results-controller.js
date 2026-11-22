@@ -11,6 +11,7 @@ import {
 import { renderStats } from "./reports/views/stats-view.js";
 import { createTableView } from "./reports/views/table-view.js";
 import { formatTsMsk } from "./utils/date-utils.js";
+import { renderPrintDocument } from "./reports/print-document.js";
 
 /**
  * Вкладка браузера с таблицей результатов.
@@ -40,6 +41,7 @@ export class ReportsResultsController {
     this._cooldownTimer = null;
     this._cooldownUntil = 0;
     this._exportBusy = false;
+    this._printBusy = false;
     this._payload = null;
     this._isEmpty = false;
     this._page = 1;
@@ -153,8 +155,121 @@ export class ReportsResultsController {
       this._run(this._page);
     });
     this._els.exportBtn.addEventListener("click", () => this._onExport());
-    this._els.printBtn.addEventListener("click", () => window.print());
+    this._els.printBtn.addEventListener("click", () => this._onPrint());
     this._syncExport();
+  }
+
+  /**
+   * Печать — третье окно с чистым документом, не window.print()
+   * по экранной таблице: там липкие колонки, ширины ресайзера
+   * и только текущая страница.
+   *
+   * Окно открывается СИНХРОННО в клике, до первого await — иначе
+   * блокировщик попапов. noopener нельзя: нужен win.document.
+   * Данные — по _payload последнего принятого поиска, не по форме.
+   */
+  async _onPrint() {
+    if (this._printBusy) return;
+
+    const win = window.open(
+      "",
+      REPORTS.PRINT_WINDOW_NAME,
+      "width=1280,height=900,resizable=yes,scrollbars=yes",
+    );
+    if (!win) {
+      notify.warning(
+        "Браузер заблокировал окно печати. Разрешите всплывающие окна для этого сайта.",
+      );
+      return;
+    }
+
+    if (!this._payload) {
+      const req = readResultRequest(this._userId());
+      if (req?.payload) this._payload = req.payload;
+    }
+    if (!this._payload) {
+      this._printMessage(
+        win,
+        "Нет данных для печати. Сначала выполните поиск во вкладке фильтров.",
+      );
+      return;
+    }
+
+    const myMountId = this._mountId;
+    const sheetId =
+      document.getElementById("rrPrintSheet")?.value ??
+      REPORTS.PRINT_SHEET_DEFAULT;
+    const meta = {
+      tenant: this._baseTitle,
+      period: document.getElementById("rrPeriod")?.textContent?.trim() ?? "",
+      filters: document.getElementById("rrEcho")?.textContent?.trim() ?? "",
+      generated: `Сформировано: ${formatTsMsk(Math.floor(Date.now() / 1000))} (МСК)`,
+    };
+
+    this._printBusy = true;
+    this._printMessage(win, "Загрузка данных для печати…");
+
+    try {
+      const resp = await this.repo.fetchPrintRows(this._payload);
+      // Правило 2: после каждого await. Плюс окно мог закрыть сам пользователь.
+      if (this._mountId !== myMountId || !this._isActive) return;
+      if (win.closed) return;
+
+      // Правило 6: отказ канала — по флагу, не по коду.
+      if (resp?.offline === true) {
+        this._printMessage(
+          win,
+          "Нет соединения. Печать доступна только онлайн.",
+        );
+        return;
+      }
+      if (resp?.code === "aborted" || resp?._authLost) return;
+      if (resp?.code === "rate_limited") {
+        const sec = Number(
+          resp?.data?.retryAfterSec ?? REPORTS.PRINT_COOLDOWN_SEC,
+        );
+        this._printMessage(
+          win,
+          `Слишком частые запросы печати. Повторите через ${sec} с.`,
+        );
+        return;
+      }
+      if (resp?.code) {
+        this._printMessage(
+          win,
+          `Не удалось получить данные для печати (${resp.code}). Сузьте период или фильтры и повторите.`,
+        );
+        return;
+      }
+
+      const rows = Array.isArray(resp?.data?.rows) ? resp.data.rows : null;
+      if (!rows || rows.length === 0) {
+        this._printMessage(
+          win,
+          "По этому запросу ничего не найдено — печатать нечего.",
+        );
+        return;
+      }
+
+      renderPrintDocument(win, { rows, meta, sheetId });
+    } finally {
+      this._printBusy = false;
+    }
+  }
+
+  /** Сообщение в окне печати: статический каркас + textContent. */
+  _printMessage(win, text) {
+    if (!win || win.closed) return;
+    const doc = win.document;
+    doc.open();
+    doc.write(
+      "<!doctype html><html lang='ru'><head><meta charset='utf-8'><title>Отчёт</title></head><body></body></html>",
+    );
+    doc.close();
+    const p = doc.createElement("p");
+    p.style.cssText = "font:12pt Arial,sans-serif;padding:16px;margin:0;";
+    p.textContent = text;
+    doc.body.appendChild(p);
   }
 
   _subscribeNetwork() {
