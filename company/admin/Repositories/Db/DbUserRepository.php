@@ -62,34 +62,6 @@ final class DbUserRepository implements UserRepositoryInterface
         'user_edit_user',
     ];
 
-    /**
-     * Легаси-колонки NOT NULL БЕЗ дефолта (SHOW COLUMNS: Null=NO, Default пуст).
-     * В STRICT-режиме INSERT без них падает. Задаём явно пустыми значениями —
-     * работает и в strict, и в non-strict, без опоры на sql_mode хостера.
-     * user_phone здесь же: он writable, но в форме необязателен.
-     *
-     * Пяти флагов прав здесь нет: у них в БД DEFAULT 0, INSERT их не требует.
-     */
-    private const LEGACY_REQUIRED = [
-        'user_address'     => '',
-        'user_city'        => '',
-        'user_state'       => '',
-        'user_zip'         => '',
-        'user_country'     => '',
-        'user_phone'       => '',
-        'user_email2'      => '',
-        'user_company'     => '',
-        'user_im_icq'      => '',
-        'user_im_msn'      => '',
-        'user_im_yahoo'    => '',
-        'user_im_other'    => '',
-        'user_msg_subject' => '',
-        'last_ip'          => '',
-        'user_token'       => '',
-        'api_token'        => '',
-        'webgl_info_spa'   => '',
-    ];
-
     public function __construct(private readonly DB $db)
     {
     }
@@ -130,7 +102,6 @@ final class DbUserRepository implements UserRepositoryInterface
             [$userId]
         );
 
-        // Чтение обратно: решение о блокировке принимается по состоянию БД.
         $row = $this->db->fetchOne(
             'SELECT login_attempts FROM lift_users WHERE user_id = ?',
             [$userId]
@@ -171,8 +142,7 @@ final class DbUserRepository implements UserRepositoryInterface
     public function list(): array
     {
         // is_locked считает MySQL: PHP не разбирает DATETIME (зона SYSTEM).
-        // Флаги прав в список не берём — они нужны только форме, которая
-        // читает findById. Секреты не выбираем вовсе.
+        // Флаги прав в список не берём — они нужны только форме.
         $rows = $this->db->fetchAll(
             'SELECT user_id, user_login, user_email, user_name,
                     user_surname, user_firstname, user_patronymic, user_phone,
@@ -199,16 +169,11 @@ final class DbUserRepository implements UserRepositoryInterface
             }
         }
 
-        // Порядок слияния: легаси-заглушки → данные формы → серверные поля.
-        // Ключи только из WRITABLE, LEGACY_REQUIRED и литералов ниже, то есть
-        // из конечного набора — интерполяция имён колонок безопасна.
-        //
-        // user_date пишем сами: в схеме DEFAULT 0, без этого колонка «Создан»
-        // осталась бы пустой у всех панельных учёток. Unix-метка абсолютна,
-        // зоны не касается. В WRITABLE её нет — дату создания нельзя подделать
-        // из формы. last_login не трогаем: 0 = ещё не входил.
+        // Данные формы → серверные поля → недостающие обязательные колонки.
+        // user_date пишем сами: DEFAULT 0 оставил бы «Создан» пустым навсегда.
+        // Unix-метка абсолютна, зоны не касается; в WRITABLE её нет —
+        // подделать дату создания из формы нельзя. last_login не трогаем.
         $data = array_merge(
-            self::LEGACY_REQUIRED,
             $this->normalizeFlags($fields),
             [
                 'user_password' => $passwordHash,
@@ -216,6 +181,10 @@ final class DbUserRepository implements UserRepositoryInterface
             ]
         );
 
+        $data = $this->fillRequired($data);
+
+        // Ключи — из WRITABLE, литералов выше и имён колонок самой БД,
+        // то есть из конечного проверяемого набора.
         $columns = array_keys($data);
         $sql = 'INSERT INTO lift_users (`' . implode('`, `', $columns) . '`) VALUES ('
             . implode(', ', array_fill(0, count($columns), '?')) . ')';
@@ -223,7 +192,6 @@ final class DbUserRepository implements UserRepositoryInterface
         $this->db->execute($sql, array_values($data));
 
         // LAST_INSERT_ID(), а не метод обёртки: его наличие не подтверждено.
-        // Значение привязано к соединению, соединение одно на инстанс DB.
         $row = $this->db->fetchOne('SELECT LAST_INSERT_ID() AS id');
 
         return (int) ($row['id'] ?? 0);
@@ -264,10 +232,9 @@ final class DbUserRepository implements UserRepositoryInterface
 
     public function findIdentityConflict(string $login, string $email, int $exceptId = 0): ?string
     {
-        // Флаги считает MySQL, а не сравнение строк в PHP: collation
-        // регистронезависимая, 'Admin' против 'admin' в PHP не совпало бы.
-        // LIMIT 1: при двух конфликтах сообщаем один, второй всплывёт
-        // после исправления первого.
+        // Флаги считает MySQL: collation регистронезависимая, 'Admin'
+        // против 'admin' в PHP не совпало бы. LIMIT 1: при двух конфликтах
+        // сообщаем один, второй всплывёт после исправления первого.
         $row = $this->db->fetchOne(
             'SELECT (user_login = ?) AS login_taken, (user_email = ?) AS email_taken
              FROM lift_users
@@ -285,6 +252,61 @@ final class DbUserRepository implements UserRepositoryInterface
         }
 
         return (int) ($row['email_taken'] ?? 0) === 1 ? 'email' : null;
+    }
+
+    /**
+     * Добирает колонки NOT NULL без дефолта, которых нет в данных.
+     *
+     * Список НЕ хардкодим: схемы тенантов расходятся — в одной есть
+     * легаси user_im_*, в другой нет, и жёсткий список роняет INSERT.
+     * Читаем схему той БД, к которой подключён тенант.
+     *
+     * SHOW COLUMNS, а не information_schema: на этом хостинге I_S
+     * однажды ответил #1109 на живую таблицу.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    private function fillRequired(array $data): array
+    {
+        $columns = $this->db->fetchAll('SHOW COLUMNS FROM lift_users');
+
+        foreach ($columns as $column) {
+            $name = (string) ($column['Field'] ?? '');
+
+            if ($name === '' || array_key_exists($name, $data)) {
+                continue;
+            }
+            if (($column['Null'] ?? 'YES') !== 'NO') {
+                continue;
+            }
+            if (($column['Default'] ?? null) !== null) {
+                continue;
+            }
+            if (str_contains((string) ($column['Extra'] ?? ''), 'auto_increment')) {
+                continue;
+            }
+
+            $type = strtolower((string) ($column['Type'] ?? ''));
+
+            if (preg_match('/^(tinyint|smallint|mediumint|int|bigint|decimal|float|double|bit)/', $type) === 1) {
+                $data[$name] = 0;
+                continue;
+            }
+
+            if (preg_match('/^(char|varchar|tinytext|text|mediumtext|longtext|enum|set)/', $type) === 1) {
+                $data[$name] = '';
+                continue;
+            }
+
+            // Дата/время/binary без дефолта: подставлять нечего, выдумывать
+            // значение нельзя — падаем с именем колонки, а не пишем мусор.
+            throw new InvalidArgumentException(
+                "Колонка {$name} ({$type}) обязательна, значение по умолчанию неизвестно"
+            );
+        }
+
+        return $data;
     }
 
     /**
