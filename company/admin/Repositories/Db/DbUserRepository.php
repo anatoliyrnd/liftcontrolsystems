@@ -170,13 +170,21 @@ final class DbUserRepository implements UserRepositoryInterface
             }
         }
 
-        // Порядок слияния: легаси-заглушки → данные формы → пароль.
-        // Ключи берутся только из WRITABLE и LEGACY_REQUIRED, то есть из
-        // конечного литерального набора — интерполяция имён колонок безопасна.
+         // Порядок слияния: легаси-заглушки → данные формы → серверные поля.
+        // Ключи только из WRITABLE, LEGACY_REQUIRED и литералов ниже, то есть
+        // из конечного набора — интерполяция имён колонок безопасна.
+        //
+        // user_date пишем сами: в схеме DEFAULT 0, без этого колонка «Создан»
+        // осталась бы пустой у всех панельных учёток. Unix-метка абсолютна,
+        // зоны не касается. В WRITABLE её нет — дату создания нельзя подделать
+        // из формы. last_login не трогаем: 0 = ещё не входил.
         $data = array_merge(
             self::LEGACY_REQUIRED,
-            $fields,
-            ['user_password' => $passwordHash]
+            $this->normalizeFlags($fields),
+            [
+                'user_password' => $passwordHash,
+                'user_date'     => time(),
+            ]
         );
 
         $columns = array_keys($data);
