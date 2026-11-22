@@ -6,11 +6,11 @@ use Company\Admin\Support\Csrf;
 use Company\Admin\Support\Position;
 
 /**
- * @var string                     $title
- * @var array<string, mixed>|null  $record   редактируемая запись или null
- * @var array<string, mixed>       $old      значения полей
- * @var array<string, string>      $errors
- * @var array<string, string>      $positions
+ * @var string                    $title
+ * @var array<string, mixed>|null $record    редактируемая запись или null
+ * @var array<string, mixed>      $old       значения полей
+ * @var array<string, string>     $errors
+ * @var array<string, string>     $positions
  */
 
 $e = static fn(mixed $v): string => htmlspecialchars((string) $v, ENT_QUOTES, 'UTF-8');
@@ -18,10 +18,7 @@ $e = static fn(mixed $v): string => htmlspecialchars((string) $v, ENT_QUOTES, 'U
 $isEdit = $record !== null;
 $id = $isEdit ? (int) $record['user_id'] : 0;
 
-// Значение поля: только из $old, пароль никогда не переотрисовывается.
 $val = static fn(string $key): string => (string) ($old[$key] ?? '');
-
-// Чекбокс: 'on' из POST и '1' из БД одинаково означают «отмечен».
 $on = static fn(string $key): bool => !empty($old[$key]);
 
 $err = static function (string $key) use ($errors, $e): string {
@@ -31,6 +28,27 @@ $err = static function (string $key) use ($errors, $e): string {
 };
 
 $invalid = static fn(string $key): string => isset($errors[$key]) ? ' is-invalid' : '';
+
+// В БД цифры, в поле — маска. Невалидное значение не переформатируем:
+// человек должен видеть именно то, что ввёл, рядом с ошибкой.
+$phoneDisplay = static function (string $raw) use ($e): string {
+    $d = preg_replace('/\D+/', '', $raw) ?? '';
+    if ($d === '') {
+        return '';
+    }
+    if (strlen($d) === 11 && $d[0] === '8') {
+        $d = '7' . substr($d, 1);
+    } elseif (strlen($d) === 10) {
+        $d = '7' . $d;
+    }
+    if (strlen($d) !== 11 || $d[0] !== '7') {
+        return $e($raw);
+    }
+    $r = substr($d, 1);
+
+    return $e('+7 (' . substr($r, 0, 3) . ') ' . substr($r, 3, 3)
+        . '-' . substr($r, 6, 2) . '-' . substr($r, 8, 2));
+};
 
 $currentPosition = Position::tryFrom($val('user_position'));
 
@@ -42,6 +60,12 @@ $flags = [
     'user_disppermission'          => 'Права диспетчера (user_disppermission)',
     'user_edit_obj'                => 'Редактирование объектов (user_edit_obj)',
     'user_edit_user'               => 'Редактирование пользователей (user_edit_user)',
+];
+
+$messengers = [
+    'user_telegram' => 'Telegram ID',
+    'user_max'      => 'MAX ID',
+    'user_vk'       => 'VK ID',
 ];
 ?>
 <div class="d-flex align-items-center mb-3">
@@ -96,25 +120,56 @@ $flags = [
                     <?= $err('user_email') ?>
                 </div>
                 <div class="col-md-4">
-                    <label class="form-label" for="user_phone">Телефон</label>
-                    <input class="form-control<?= $invalid('user_phone') ?>" id="user_phone"
-                           name="user_phone" maxlength="39"
-                           value="<?= $e($val('user_phone')) ?>">
-                    <?= $err('user_phone') ?>
-                </div>
-
-                <div class="col-md-6">
                     <label class="form-label" for="password">Пароль</label>
                     <input type="password" class="form-control<?= $invalid('password') ?>" id="password"
-                           name="password" autocomplete="new-password"
-                           <?= $isEdit ? '' : 'required' ?>>
+                           name="password" autocomplete="new-password" <?= $isEdit ? '' : 'required' ?>>
                     <div class="form-text">
                         <?= $isEdit
                             ? 'Пусто = не менять. Минимум 8 символов при смене.'
-                            : 'Минимум 8 символов. Задаётся вручную, автоматически не генерируется.' ?>
+                            : 'Минимум 8 символов. Задаётся вручную.' ?>
                     </div>
                     <?= $err('password') ?>
                 </div>
+            </div>
+            <div class="form-text mt-2">
+                Первая буква фамилии, имени и отчества поднимается в верхний регистр автоматически.
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">Контакты</div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label" for="user_phone">Мобильный телефон</label>
+                    <input type="tel" class="form-control<?= $invalid('user_phone') ?>" id="user_phone"
+                           name="user_phone" inputmode="tel" autocomplete="off"
+                           placeholder="+7 (___) ___-__-__"
+                           value="<?= $phoneDisplay($val('user_phone')) ?>">
+                    <div class="form-text">В базе хранится цифрами: 79001234567.</div>
+                    <?= $err('user_phone') ?>
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label" for="user_address">Адрес</label>
+                    <input class="form-control<?= $invalid('user_address') ?>" id="user_address"
+                           name="user_address" maxlength="200"
+                           value="<?= $e($val('user_address')) ?>">
+                    <?= $err('user_address') ?>
+                </div>
+
+                <?php foreach ($messengers as $key => $label): ?>
+                    <div class="col-md-4">
+                        <label class="form-label" for="<?= $e($key) ?>"><?= $e($label) ?></label>
+                        <input type="text" class="form-control<?= $invalid($key) ?>" id="<?= $e($key) ?>"
+                               name="<?= $e($key) ?>" inputmode="numeric" pattern="[0-9]*"
+                               autocomplete="off" value="<?= $e($val($key)) ?>">
+                        <?= $err($key) ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            <div class="form-text mt-2">
+                Идентификаторы — только цифры. Пустое поле сохраняется как «не задано», не как ноль.
             </div>
         </div>
     </div>
@@ -161,3 +216,35 @@ $flags = [
     <button type="submit" class="btn btn-primary"><?= $isEdit ? 'Сохранить' : 'Создать' ?></button>
     <a class="btn btn-outline-secondary" href="?page=users">Отмена</a>
 </form>
+
+<script>
+// Маска мобильного: только представление, на сервер уходят цифры.
+// Зависимостей нет — AdminLTE JS в проекте не подключён.
+(function () {
+    var input = document.getElementById('user_phone');
+    if (!input) { return; }
+
+    function mask(raw) {
+        var d = raw.replace(/\D+/g, '');
+        if (d === '') { return ''; }
+        if (d.length === 11 && d.charAt(0) === '8') { d = '7' + d.slice(1); }
+        else if (d.length === 10) { d = '7' + d; }
+        if (d.charAt(0) !== '7') { d = '7' + d; }
+        d = d.slice(0, 11);
+
+        var r = d.slice(1), out = '+7';
+        if (r.length > 0) { out += ' (' + r.slice(0, 3); }
+        if (r.length >= 3) { out += ')'; }
+        if (r.length > 3) { out += ' ' + r.slice(3, 6); }
+        if (r.length > 6) { out += '-' + r.slice(6, 8); }
+        if (r.length > 8) { out += '-' + r.slice(8, 10); }
+        return out;
+    }
+
+    input.addEventListener('input', function () {
+        input.value = mask(input.value);
+        // Курсор в конец: простое предсказуемое поведение маски.
+        input.setSelectionRange(input.value.length, input.value.length);
+    });
+})();
+</script>
