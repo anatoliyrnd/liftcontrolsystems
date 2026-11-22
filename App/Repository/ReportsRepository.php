@@ -363,12 +363,103 @@ final class ReportsRepository
      * selectRows() тот же, что у getList(): WHERE не меняется,
      * инвариант «экспорт = список» цел — отличие только в mapItem.
      */
-    public function getExportRowsMapped(array $f, array $user, string $sort, int $limit): array
+    public function getExportRowsMapped(array $f, array $user, string $sort, int $limit, bool $withNotes = false): array
     {
-        return array_map([$this, 'mapItem'], $this->selectRows($f, $user, $sort, $limit, 0));
+        $rows = $this->selectRows($f, $user, $sort, $limit, 0, $withNotes);
+        $items = array_map([$this, 'mapItem'], $rows);
+        if (!$withNotes) {
+            return $items;
+        }
+        $live = $this->notesForCalls(array_column($rows, 'call_id'));
+        foreach ($items as $i => $item) {
+            $items[$i]['notes'] = $this->mergeNotes(
+                (string) ($rows[$i]['call_full_note_history'] ?? ''),
+                $live[(int) $item['id']] ?? []
+            );
+        }
+        return $items;
     }
 
-    private function selectRows(array $f, array $user, string $sort, int $limit, int $offset): array
+    /**
+     * Живые заметки открытых заявок. Позиционные «?» — образец
+     * CallRepository::getNotesForCalls: при EMULATE_PREPARES=false
+     * 2000 уникальных имён не нужны. Индекс note_relation есть.
+     */
+    private function notesForCalls(array $callIds): array
+    {
+        $ids = [];
+        foreach ($callIds as $id) {
+            $n = (int) $id;
+            if ($n > 0) {
+                $ids[$n] = $n;
+            }
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $ids = array_values($ids);
+        $in = implode(',', array_fill(0, count($ids), '?'));
+        $rows = $this->db->fetchAll(
+            "SELECT n.note_id, n.note_relation, n.note_body, n.note_post_date, u.user_name
+             FROM lift_notes n
+             LEFT JOIN lift_users u ON u.user_id = n.note_post_user
+             WHERE n.note_relation IN ($in)
+             ORDER BY n.note_post_date ASC, n.note_id ASC",
+            $ids
+        );
+        $grouped = [];
+        foreach ($rows as $r) {
+            $grouped[(int) $r['note_relation']][] = $r;
+        }
+        return $grouped;
+    }
+
+    /**
+     * Закрытые хранят заметки в слепке, открытые — в lift_notes.
+     * Переоткрытая заявка может иметь и то и другое (на демо 0, но
+     * CallRepository:290 сам упоминает «слепок прошлой закрытия»),
+     * поэтому merge с дедупом по note_id, живая строка главнее.
+     *
+     * Форма слепка не гарантирована: в real-данных нет note_post_user,
+     * хотя современные писатели делают SELECT n.* — значит писал легаси.
+     * Каждый ключ читается через ??.
+     */
+    private function mergeNotes(string $snapshot, array $live): array
+    {
+        $byId = [];
+        $collect = static function (array $note) use (&$byId): void {
+            $body = trim((string) ($note['note_body'] ?? ''));
+            if ($body === '') {
+                return;
+            }
+            $id = (int) ($note['note_id'] ?? 0);
+            $key = $id > 0 ? 'n' . $id : 'anon' . count($byId);
+            $byId[$key] = [
+                'id' => $id,
+                'ts' => (int) ($note['note_post_date'] ?? 0),
+                'author' => trim((string) ($note['user_name'] ?? '')),
+                'body' => $body,
+            ];
+        };
+
+        $decoded = json_decode($snapshot !== '' ? $snapshot : '[]', true);
+        foreach (is_array($decoded) ? $decoded : [] as $note) {
+            if (is_array($note)) {
+                $collect($note);
+            }
+        }
+        foreach ($live as $note) {
+            if (is_array($note)) {
+                $collect($note);
+            }
+        }
+
+        $out = array_values($byId);
+        usort($out, static fn (array $a, array $b): int => [$a['ts'], $a['id']] <=> [$b['ts'], $b['id']]);
+        return $out;
+    }
+
+    private function selectRows(array $f, array $user, string $sort, int $limit, int $offset, bool $withNotes = false): array
     {
         $qb = new ReportsQueryBuilder($f, $user);
         [$where, $p] = $qb->buildWhere();
@@ -380,7 +471,10 @@ final class ReportsRepository
         $joins = $sort === 'address' ? ReportsQueryBuilder::ADDRESS_JOINS : '';
 
         // LIMIT/OFFSET — числами после (int): нативный prepare не примет строку.
-        $sql = "SELECT c.call_id, c.call_status, c.call_adres, c.call_details, c.call_solution,
+        // Слепок заметок — TEXT до нескольких КБ на заявку. В reports_list
+        // не нужен: там 50 строк на страницу и комментарии не показываются.
+        $notesSel = $withNotes ? ' c.call_full_note_history,' : '';
+        $sql = "SELECT{$notesSel} c.call_id, c.call_status, c.call_adres, c.call_details, c.call_solution,
                        c.call_last_name, c.call_last_name_close, c.call_first_name,
                        c.call_date, c.call_date2, c.expected_repair_time, c.alert_level,
                        c.call_department, c.call_group, c.call_request,
