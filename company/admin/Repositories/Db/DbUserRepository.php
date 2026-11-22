@@ -14,13 +14,17 @@ use InvalidArgumentException;
  * findById/findByLogin возвращают сырую строку (контракт интерфейса).
  * list() возвращает урезанный набор: без user_password, user_token,
  * api_token — секреты не должны попадать в HTML таблицы.
+ *
+ * Роль НЕ выводится здесь: контроллер считает её через Position::role()
+ * и передаёт вместе с позицией. Репозиторий только проверяет парность.
  */
 final class DbUserRepository implements UserRepositoryInterface
 {
     /**
-     * Колонки, разрешённые к записи из панели. Ключи $fields в create/update
-     * проверяются по этому списку; вне списка → InvalidArgumentException.
-     * user_password здесь НЕТ — для него updatePasswordHash.
+     * Колонки, разрешённые к записи из панели. Ключ вне списка →
+     * InvalidArgumentException. user_password здесь НЕТ — updatePasswordHash.
+     * user_localadmin НЕТ намеренно: легаси-флаг не должен стать обходным
+     * путём к правам.
      */
     private const WRITABLE = [
         'user_login',
@@ -35,6 +39,27 @@ final class DbUserRepository implements UserRepositoryInterface
         'user_block',
         'user_hiden',
         'allow_dispatcher_quick_login',
+        'user_add_call',
+        'user_read_all_calls',
+        'user_disppermission',
+        'user_edit_obj',
+        'user_edit_user',
+    ];
+
+    /**
+     * Флаги, приводимые к 0/1. PDO биндует false как '' — для tinyint
+     * NOT NULL в STRICT это отказ. Чекбокс без value присылает 'on',
+     * поэтому приведение через (bool), а не (int).
+     */
+    private const FLAGS = [
+        'user_block',
+        'user_hiden',
+        'allow_dispatcher_quick_login',
+        'user_add_call',
+        'user_read_all_calls',
+        'user_disppermission',
+        'user_edit_obj',
+        'user_edit_user',
     ];
 
     /**
@@ -42,6 +67,8 @@ final class DbUserRepository implements UserRepositoryInterface
      * В STRICT-режиме INSERT без них падает. Задаём явно пустыми значениями —
      * работает и в strict, и в non-strict, без опоры на sql_mode хостера.
      * user_phone здесь же: он writable, но в форме необязателен.
+     *
+     * Пяти флагов прав здесь нет: у них в БД DEFAULT 0, INSERT их не требует.
      */
     private const LEGACY_REQUIRED = [
         'user_address'     => '',
@@ -103,8 +130,7 @@ final class DbUserRepository implements UserRepositoryInterface
             [$userId]
         );
 
-        // Чтение обратно, а не «прочитанное + 1» в сервисе: решение
-        // о блокировке принимается по состоянию БД.
+        // Чтение обратно: решение о блокировке принимается по состоянию БД.
         $row = $this->db->fetchOne(
             'SELECT login_attempts FROM lift_users WHERE user_id = ?',
             [$userId]
@@ -145,7 +171,8 @@ final class DbUserRepository implements UserRepositoryInterface
     public function list(): array
     {
         // is_locked считает MySQL: PHP не разбирает DATETIME (зона SYSTEM).
-        // Секреты (user_password, user_token, api_token) не выбираем вовсе.
+        // Флаги прав в список не берём — они нужны только форме, которая
+        // читает findById. Секреты не выбираем вовсе.
         $rows = $this->db->fetchAll(
             'SELECT user_id, user_login, user_email, user_name,
                     user_surname, user_firstname, user_patronymic, user_phone,
@@ -163,14 +190,16 @@ final class DbUserRepository implements UserRepositoryInterface
     public function create(array $fields, string $passwordHash): int
     {
         $this->assertWritable($fields);
+        $this->assertPositionRolePair($fields);
 
-        foreach (['user_login', 'user_email', 'user_name'] as $required) {
-            if (trim((string) ($fields[$required] ?? '')) === '') {
-                throw new InvalidArgumentException("Поле {$required} обязательно при создании");
+        $required = ['user_login', 'user_email', 'user_name', 'user_position', 'user_role'];
+        foreach ($required as $key) {
+            if (trim((string) ($fields[$key] ?? '')) === '') {
+                throw new InvalidArgumentException("Поле {$key} обязательно при создании");
             }
         }
 
-         // Порядок слияния: легаси-заглушки → данные формы → серверные поля.
+        // Порядок слияния: легаси-заглушки → данные формы → серверные поля.
         // Ключи только из WRITABLE, LEGACY_REQUIRED и литералов ниже, то есть
         // из конечного набора — интерполяция имён колонок безопасна.
         //
@@ -194,7 +223,7 @@ final class DbUserRepository implements UserRepositoryInterface
         $this->db->execute($sql, array_values($data));
 
         // LAST_INSERT_ID(), а не метод обёртки: его наличие не подтверждено.
-        // Значение привязано к соединению, а соединение одно на инстанс DB.
+        // Значение привязано к соединению, соединение одно на инстанс DB.
         $row = $this->db->fetchOne('SELECT LAST_INSERT_ID() AS id');
 
         return (int) ($row['id'] ?? 0);
@@ -203,10 +232,13 @@ final class DbUserRepository implements UserRepositoryInterface
     public function update(int $userId, array $fields): void
     {
         $this->assertWritable($fields);
+        $this->assertPositionRolePair($fields);
 
         if ($fields === []) {
             return;
         }
+
+        $fields = $this->normalizeFlags($fields);
 
         $set = [];
         foreach (array_keys($fields) as $column) {
@@ -233,7 +265,7 @@ final class DbUserRepository implements UserRepositoryInterface
     public function findIdentityConflict(string $login, string $email, int $exceptId = 0): ?string
     {
         // Флаги считает MySQL, а не сравнение строк в PHP: collation
-        // регистронезависимая, и 'Admin' против 'admin' в PHP не совпало бы.
+        // регистронезависимая, 'Admin' против 'admin' в PHP не совпало бы.
         // LIMIT 1: при двух конфликтах сообщаем один, второй всплывёт
         // после исправления первого.
         $row = $this->db->fetchOne(
@@ -265,5 +297,38 @@ final class DbUserRepository implements UserRepositoryInterface
                 throw new InvalidArgumentException("Колонка {$column} не разрешена к записи");
             }
         }
+    }
+
+    /**
+     * Позиция и роль идут вместе: смена должности без пересчёта роли
+     * оставила бы расхождение с матрицей прав SPA.
+     *
+     * @param array<string, mixed> $fields
+     */
+    private function assertPositionRolePair(array $fields): void
+    {
+        $hasPosition = array_key_exists('user_position', $fields);
+        $hasRole = array_key_exists('user_role', $fields);
+
+        if ($hasPosition !== $hasRole) {
+            throw new InvalidArgumentException(
+                'user_position и user_role должны передаваться вместе'
+            );
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    private function normalizeFlags(array $fields): array
+    {
+        foreach (self::FLAGS as $flag) {
+            if (array_key_exists($flag, $fields)) {
+                $fields[$flag] = (int) ((bool) $fields[$flag]);
+            }
+        }
+
+        return $fields;
     }
 }
