@@ -236,6 +236,34 @@ final class DbUserRepository implements UserRepositoryInterface
         );
     }
 
+    /**
+     * Принудительная перезагрузка клиента: force_reload = 1.
+     *
+     * Флаг не входит в WRITABLE намеренно: иначе сохранение профиля
+     * могло бы его выставить или снять мимо отдельного действия.
+     *
+     * Сброс в 0 — обязанность фронта (техдолг): SPA флаг пока не читает.
+     * Сервер его не снимает, иначе команда потеряется до доставки.
+     */
+    public function setForceReload(int $userId): void
+    {
+        $this->db->execute(
+            'UPDATE lift_users SET force_reload = 1 WHERE user_id = ?',
+            [$userId]
+        );
+    }
+
+    /**
+     * То же для всех записей тенанта. Возврат — изменённые строки:
+     * PDO::MYSQL_ATTR_FOUND_ROWS = false (подтверждено в docblock
+     * App\Repository\UserRepository::updateProfile), поэтому у кого
+     * флаг уже был 1, в число не попадёт. UI говорит «назначено N».
+     */
+    public function setForceReloadAll(): int
+    {
+        return $this->db->execute('UPDATE lift_users SET force_reload = 1');
+    }
+
     public function findIdentityConflict(string $login, string $email, int $exceptId = 0): ?string
     {
         // Флаги считает MySQL: collation регистронезависимая, 'Admin'
