@@ -213,6 +213,7 @@ final class ReportsService
         $formats = [
             'csv'  => ['bucket' => 'csv',   'window' => 30],
             'json' => ['bucket' => 'print', 'window' => 10],
+            'xlsx' => ['bucket' => 'xlsx',  'window' => 30],
         ];
         $fmt = $formats[$format] ?? null;
         if ($fmt === null) {
@@ -255,10 +256,20 @@ final class ReportsService
         // Печать ждёт контракт items (mapItem), CSV — сырые строки:
         // ReportsExporter читает имена колонок БД. selectRows() у обоих
         // один, WHERE не меняется — инвариант «экспорт = список» цел.
-        $sort = $this->sort($body);
-        $rows = $format === 'json'
-            ? $this->repo->getExportRowsMapped($f, $user, $sort, 2001)
-            : $this->repo->getExportRows($f, $user, $sort, 2001);
+         $sort = $this->sort($body);
+        if ($format === 'csv') {
+            // CSV читает имена колонок БД — ему нужно сырьё.
+            $rows = $this->repo->getExportRows($f, $user, $sort, 2001);
+        } else {
+            // Печать — контракт items; XLSX — items плюс заметки.
+            $rows = $this->repo->getExportRowsMapped(
+                $f,
+                $user,
+                $sort,
+                2001,
+                $format === 'xlsx'
+            );
+        }
         if (count($rows) > 2000) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
@@ -276,6 +287,16 @@ final class ReportsService
         if ($format === 'json') {
             return [
                 'rows' => $rows,
+                'rows_count' => count($rows),
+            ];
+        }
+
+        if ($format === 'xlsx') {
+            $xlsx = (new ReportsXlsxExporter())->renderXlsx($rows);
+            return [
+                'file_base64' => base64_encode($xlsx),
+                'filename' => 'report_' . date('Y-m-d') . '.xlsx',
+                'mime_type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 'rows_count' => count($rows),
             ];
         }
