@@ -355,6 +355,19 @@ final class ReportsRepository
         return $this->selectRows($f, $user, $sort, $limit, 0);
     }
 
+    /**
+     * Строки экспорта в контракте items — для печати (format:"json").
+     *
+     * why не getExportRows: он отдаёт сырьё с именами колонок БД,
+     * а печатный форматтер и responsibleCell() ждут контракт items.
+     * selectRows() тот же, что у getList(): WHERE не меняется,
+     * инвариант «экспорт = список» цел — отличие только в mapItem.
+     */
+    public function getExportRowsMapped(array $f, array $user, string $sort, int $limit): array
+    {
+        return array_map([$this, 'mapItem'], $this->selectRows($f, $user, $sort, $limit, 0));
+    }
+
     private function selectRows(array $f, array $user, string $sort, int $limit, int $offset): array
     {
         $qb = new ReportsQueryBuilder($f, $user);
