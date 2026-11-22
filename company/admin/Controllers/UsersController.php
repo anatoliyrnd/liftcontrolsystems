@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Company\Admin\Controllers;
 
+use App\Repository\UserRepository;
 use App\Support\Password;
 use Company\Admin\Repositories\Contracts\UserRepositoryInterface;
 use Company\Admin\Services\AuditService;
@@ -53,7 +54,6 @@ final class UsersController extends BaseController
         'user_patronymic' => 100,
         'user_phone' => 39,
         'user_address' => 200,
-        'user_name' => 200,
     ];
 
     public function __construct(
@@ -256,7 +256,7 @@ final class UsersController extends BaseController
             'user_email'      => $read('user_email'),
             'user_surname'    => $ucFirst($read('user_surname')),
             'user_firstname'  => $ucFirst($read('user_firstname')),
-            'user_patronymic' => $ucFirst($read('user_patronymic')),
+            'user_patronymic' => $ucFirst($read('user_patronymic')) ?: null,
             'user_address'    => $read('user_address'),
         ];
 
@@ -312,16 +312,15 @@ final class UsersController extends BaseController
             }
         }
 
-        $fields['user_name'] = trim((string) preg_replace(
-            '/\s+/',
-            ' ',
-            $fields['user_surname'] . ' ' . $fields['user_firstname'] . ' ' . $fields['user_patronymic']
-        ));
-
-        if (mb_strlen($fields['user_name']) > self::LIMITS['user_name']) {
-            $errors['user_surname'] = 'ФИО длиннее 200 символов';
-        }
-
+        // Формат «Фамилия И.О.» принадлежит App\Repository\UserRepository:
+        // его docblock обязывает админку звать composeDisplayName, а не
+        // собирать строку заново. Вызов статический, без БД — шов Db→Api
+        // не затрагивает. Обрезка не нужна: фамилия ≤100, инициалы ≤4.
+        $fields['user_name'] = UserRepository::composeDisplayName(
+            $fields['user_surname'],
+            $fields['user_firstname'],
+            $fields['user_patronymic']
+        );
         $position = Position::tryFrom($read('user_position'));
         if ($position === null) {
             $errors['user_position'] = 'Выберите должность из списка';
