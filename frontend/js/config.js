@@ -235,6 +235,26 @@ export const REPORTS = {
    */
   RESULTS_WINDOW_NAME: "liftcs_reports_results",
   RESULTS_HASH: "#/reports-results",
+  /** Печать — третье окно, чистый документ без бандла приложения. */
+  PRINT_WINDOW_NAME: "liftcs_reports_print",
+  PRINT_COOLDOWN_SEC: 10,
+  PRINT_WARN_ROWS: 300,
+  PRINT_MARGIN_MM: 8,
+  PRINT_SHEET_DEFAULT: "a4",
+  PRINT_SHEETS: {
+    a4: { label: "A4 альбомный", widthMm: 297, heightMm: 210 },
+    a3: { label: "A3 альбомный", widthMm: 420, heightMm: 297 },
+  },
+  /** Сумма mm = 281 = рабочая ширина A4 при полях 8 мм. */
+  PRINT_COLUMNS: [
+    { id: "head", title: "№ / открыта / кем / срок", mm: 36 },
+    { id: "address", title: "Адрес", mm: 42 },
+    { id: "details", title: "Описание", mm: 60 },
+    { id: "resp", title: "Ответственные", mm: 44 },
+    { id: "close", title: "Закрытие", mm: 30 },
+    { id: "solution", title: "Решение", mm: 47 },
+    { id: "class", title: "Отдел / Группа / Тип", mm: 22 },
+  ],
   TAB_DEFAULT: "summary",
   /**
    * Пресеты сводки. Границы считает СЕРВЕР в МСК: неделя = понедельник→
