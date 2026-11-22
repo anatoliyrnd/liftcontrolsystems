@@ -204,14 +204,24 @@ final class ReportsService
     private function export(array $user, array $body): ?array
     {
         $this->gate($user);
-        if ((string) ($body['format'] ?? '') !== 'csv') {
+         // Карта форматов: allowlist, бакет лимитера и окно — в одном
+        // месте. Новый формат нельзя добавить наполовину: либо строка
+        // целиком, либо unsupported_format. Окно печати короче: запрос
+        // тот же на 2001 строку, но перепечатать после правки фильтра
+        // диспетчер должен без получасовой блокировки.
+        $format = (string) ($body['format'] ?? '');
+        $formats = [
+            'csv'  => ['bucket' => 'csv',   'window' => 30],
+            'json' => ['bucket' => 'print', 'window' => 10],
+        ];
+        $fmt = $formats[$format] ?? null;
+        if ($fmt === null) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
                 'Неподдерживаемый формат выгрузки',
                 reason: 'unsupported_format'
             );
         }
-
         // Валидация дат — чистая арифметика, ни одного запроса. Заряжать
         // за неё окно 30 с незачем: диспетчер с опечаткой в периоде
         // получал блокировку вместо пустого результата.
@@ -225,9 +235,10 @@ final class ReportsService
         // значит открыть неограниченный перебор широких периодов.
         // Кнопка CSV гаснет при нуле строк, поэтому честный пустой
         // поиск окно не сжигает.
-        $retry = (new ExportRateLimiter(30))->tryAcquire(
+        $retry = (new ExportRateLimiter($fmt['window']))->tryAcquire(
             $this->tenant?->id ?? 'unknown',
-            (int) ($user['id'] ?? 0)
+            (int) ($user['id'] ?? 0),
+            $fmt['bucket']
         );
         if ($retry !== null) {
             // details уйдёт в ответ плоско (retry_after), §16.1.
@@ -241,7 +252,13 @@ final class ReportsService
 
         // 2001: ровно 2000 валидно, 2001-я строка — признак переполнения.
         // LIMIT 2000 не отличил бы «ровно 2000» от «больше».
-        $rows = $this->repo->getExportRows($f, $user, $this->sort($body), 2001);
+        // Печать ждёт контракт items (mapItem), CSV — сырые строки:
+        // ReportsExporter читает имена колонок БД. selectRows() у обоих
+        // один, WHERE не меняется — инвариант «экспорт = список» цел.
+        $sort = $this->sort($body);
+        $rows = $format === 'json'
+            ? $this->repo->getExportRowsMapped($f, $user, $sort, 2001)
+            : $this->repo->getExportRows($f, $user, $sort, 2001);
         if (count($rows) > 2000) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
@@ -251,6 +268,16 @@ final class ReportsService
         }
         if ($rows === []) {
             return null;
+        }
+
+        // Печать: строки уходят клиенту, документ собирает браузер через
+        // createElement + textContent. HTML с сервера не отдаём — это
+        // данные, а не статический шаблон (правило 1).
+        if ($format === 'json') {
+            return [
+                'rows' => $rows,
+                'rows_count' => count($rows),
+            ];
         }
 
         $csv = (new ReportsExporter())->renderCsv($rows);
