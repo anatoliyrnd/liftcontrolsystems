@@ -1,5 +1,7 @@
 <?php
+
 declare(strict_types=1);
+
 namespace App\Repository;
 
 use App\Database\DB;
@@ -23,12 +25,119 @@ final class UserRepository
         return $this->db->fetchOne("SELECT * FROM lift_users WHERE `$field` = :login LIMIT 1", ['login' => $login]);
     }
 
-
-
-
     public function updatePasswordHash(int $userId, string $newHash): void
     {
         $this->db->execute("UPDATE lift_users SET user_password = :hash WHERE user_id = :id", ['hash' => $newHash, 'id' => $userId]);
+    }
+
+    /**
+     * Сохранить раздельное ФИО и отображаемое имя (§13.4).
+     *
+     * ЧЕТЫРЕ КОЛОНКИ ОДНИМ ЗАПРОСОМ. user_name — производное от
+     * компонентов: разнеси мы их на два UPDATE, между ними читатель
+     * увидел бы новую фамилию со старой подписью. В шапке одно, в
+     * списке ответственных другое, и понять, какое верно, нельзя.
+     * Один UPDATE атомарен сам по себе — транзакция для этого не нужна.
+     *
+     * Транзакция нужна ВЫЗЫВАЮЩЕМУ: профиль + пароль + настройки
+     * колонок обязаны лечь вместе. Здесь только запись.
+     *
+     * rowCount не проверяем намеренно: PDO::MYSQL_ATTR_FOUND_ROWS = false,
+     * поэтому сохранение НЕИЗМЕНЁнного ФИО даёт 0 изменённых строк.
+     * Ноль здесь не означает «пользователя нет» — существование
+     * проверено сервисом через findById до вызова.
+     *
+     * Пустое отчество пишем NULL, не '': formatUser и get_user_settings
+     * отдают null, и два разных «пусто» в колонке разошлись бы при
+     * следующем чтении.
+     *
+     * Никаких role / position / флагов / login здесь нет и быть не
+     * должно: смена профиля иначе стала бы повышением привилегий.
+     *
+     * @throws \LogicException фамилия или имя пусты — ошибка программиста,
+     *                         не ввод пользователя. Валидация ввода
+     *                         (обязательность, белый список символов)
+     *                         живёт в ProfileService и даёт invalid_profile.
+     */
+    public function updateProfile(int $userId, string $surname, string $firstname, ?string $patronymic): void
+    {
+        $surname    = trim($surname);
+        $firstname  = trim($firstname);
+        $patronymic = trim((string) $patronymic);
+
+        if ($surname === '' || $firstname === '') {
+            throw new \LogicException(
+                'updateProfile: фамилия и имя обязательны. '
+                . 'Проверка ввода — в ProfileService, сюда пустые значения доходить не должны.'
+            );
+        }
+
+        $this->db->execute(
+            "UPDATE lift_users
+                SET user_surname    = :surname,
+                    user_firstname  = :firstname,
+                    user_patronymic = :patronymic,
+                    user_name       = :display_name
+              WHERE user_id = :uid",
+            [
+                'surname'      => $surname,
+                'firstname'    => $firstname,
+                'patronymic'   => $patronymic === '' ? null : $patronymic,
+                'display_name' => self::composeDisplayName($surname, $firstname, $patronymic),
+                'uid'          => $userId,
+            ]
+        );
+    }
+
+    /**
+     * Владелец формата отображаемого имени: «Фамилия И.О.»
+     *
+     * Фамилия целиком, пробел, инициал имени, инициал отчества при
+     * наличии. Точки после каждого инициала, между инициалами пробела
+     * нет: «Ковалёв А.П.», без отчества — «Ковалёв А.».
+     *
+     * Публичный статический, как CallRepository::normalizeGuid: формат
+     * принадлежит одному месту, а的消费者 не должен иметь экземпляр
+     * репозитория. Админка, импорт и генератор демо обязаны звать этот
+     * метод, а не собирать строку заново — две копии формата уже
+     * расходились в адресном слое (Address::format vs formatDisplay).
+     *
+     * Обрезка не нужна: фамилия ограничена колонкой varchar(100),
+     * инициалы добавляют максимум 4 символа, user_name — varchar(200).
+     *
+     * Массового пересчёта существующих строк НЕТ намеренно: у легаси
+     * компоненты NULL, и пересборка затёрла бы имена в пустоту —
+     * все стали бы «Сотрудник №N». Миграция ленивая, при сохранении
+     * профиля.
+     */
+    public static function composeDisplayName(string $surname, string $firstname, ?string $patronymic): string
+    {
+        $surname = trim($surname);
+
+        $initials = self::initial($firstname) . self::initial((string) $patronymic);
+
+        return $initials === '' ? $surname : $surname . ' ' . $initials;
+    }
+
+    /**
+     * Первая буква с точкой.
+     *
+     * mb_, а не substr/strtoupper: кириллица двухбайтная, побайтовый
+     * срез дал бы половину символа и  вместо буквы. Кодировка
+     * задана явно — иначе результат зависел бы от mb_internal_encoding
+     * хостера.
+     *
+     * Дефисное имя («Анна-Мария») даёт один инициал «А.» — по первой
+     * букве, как и принято.
+     */
+    private static function initial(string $part): string
+    {
+        $part = trim($part);
+        if ($part === '') {
+            return '';
+        }
+
+        return mb_strtoupper(mb_substr($part, 0, 1, 'UTF-8'), 'UTF-8') . '.';
     }
 
     /**
@@ -48,8 +157,7 @@ final class UserRepository
         $this->insertRefreshToken($userId, $rawToken, $webgl, $familyId);
     }
 
-
-     /**
+    /**
      * Ротация refresh-токена: предъявленный гасится, выпускается преемник.
      *
      * Возвращает status:
@@ -84,21 +192,24 @@ final class UserRepository
                 return ['status' => 'invalid'];
             }
 
-            $userId = (int) $row['user_id'];
+            $userId   = (int) $row['user_id'];
             $familyId = (string) $row['family_id'];
 
             if ($row['rotated_at'] !== null && (int) $row['in_grace'] === 0) {
                 $this->revokeRefreshFamily($userId, $familyId);
+
                 // Гасим и выданные access: иначе вор с уже полученным
                 // токеном работает ещё 2 часа после того, как кража
                 // распознана. Реакция живёт здесь, а не в контроллере:
                 // user_id есть только у репозитория, и забывать её
                 // в каждом вызывающем месте нельзя.
                 $this->deleteAccessTokensByUser($userId);
+
                 Logger::warning('Refresh вне grace-окна: семья отозвана, access погашены', [
                     'user_id' => $userId,
-                    'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+                    'ip'      => $_SERVER['REMOTE_ADDR'] ?? '',
                 ]);
+
                 return ['status' => 'reuse'];
             }
 
@@ -111,6 +222,7 @@ final class UserRepository
             }
 
             $newRaw = bin2hex(random_bytes(32));
+
             // Строка целиком: replaced_by — ожидаемое значение CAS,
             // device_fingerprint — наследство преемнику. Отдельными
             // параметрами список разросся бы до семи и разъехался бы
@@ -148,6 +260,7 @@ final class UserRepository
             ['hash' => $hash, 'grace' => AuthService::REFRESH_REUSE_GRACE_SEC]
         );
     }
+
     /**
      * Погасить предъявленный токен и выпустить преемника — атомарно.
      *
@@ -162,10 +275,16 @@ final class UserRepository
      * Иначе каждый повтор сдвигал бы окно, и украденный токен,
      * предъявляемый раз в 20 секунд, продлевал бы себе grace бесконечно.
      *
-     * Факт владения проверяем чтением replaced_by, а не rowCount: обёртка
-     * DB его не гарантирует (тот же приём, что в bindSpultGuid). Чтение
-     * ВНУТРИ транзакции: снаружи между коммитом и чтением строку забрал
-     * бы другой запрос, и мы получили бы ложный отказ на ровном месте.
+     * Факт владения проверяем чтением replaced_by ВНУТРИ транзакции:
+     * снаружи между коммитом и чтением строку забрал бы другой запрос,
+     * и мы получили бы ложный отказ на ровном месте.
+     *
+     * ПОПРАВКА К ПРЕЖНЕМУ КОММЕНТАРИЮ: DB::execute возвращает rowCount,
+     * обёртка его отдаёт. Здесь он тоже дал бы верный ответ — WHERE
+     * содержит CAS-предикат, поэтому и «изменённые», и «подошедшие»
+     * строки означают победу. Чтение оставлено как есть сознательно:
+     * путь рабочий и деликатный, замена — отдельной правкой, не вместе
+     * с профилем. Вынесено в техдолг.
      *
      * Преемник вставляется только после подтверждённого владения и в той
      * же транзакции: UPDATE без INSERT оставил бы токен погашенным без
@@ -173,7 +292,7 @@ final class UserRepository
      */
     private function claimRefreshToken(string $hash, array $row, string $newRaw, string $webgl): bool
     {
-        $newHash = hash('sha256', $newRaw);
+        $newHash  = hash('sha256', $newRaw);
         $expected = $row['replaced_by'] !== null ? (string) $row['replaced_by'] : null;
 
         // Клиент не шлёт webGL на refresh. Без наследства колонка пустела
@@ -184,12 +303,12 @@ final class UserRepository
         try {
             $this->db->execute(
                 "UPDATE lift_refresh_tokens
-                 SET rotated_at = COALESCE(rotated_at, NOW()),
-                     replaced_by = :new_hash,
-                     last_used_at = NOW()
-                 WHERE token_hash = :hash
-                   AND replaced_by <=> :expected
-                   AND expires_at > NOW()",
+                    SET rotated_at = COALESCE(rotated_at, NOW()),
+                        replaced_by = :new_hash,
+                        last_used_at = NOW()
+                  WHERE token_hash = :hash
+                    AND replaced_by <=> :expected
+                    AND expires_at > NOW()",
                 ['new_hash' => $newHash, 'hash' => $hash, 'expected' => $expected]
             );
 
@@ -211,6 +330,7 @@ final class UserRepository
                 $fingerprint,
                 (string) $row['family_id']
             );
+
             $this->db->commit();
         } catch (\Throwable $e) {
             $this->db->rollBack();
@@ -234,13 +354,16 @@ final class UserRepository
                 (user_id, token_hash, family_id, device_fingerprint, expires_at, user_ip, user_agent)
              VALUES (:uid, :hash, :family, :webgl, FROM_UNIXTIME(:expires), :ip, :ua)",
             [
-                'uid' => $userId,
-                'hash' => hash('sha256', $rawToken),
-                'family' => $familyId,
-                'webgl' => $webgl,
+                'uid'     => $userId,
+                'hash'    => hash('sha256', $rawToken),
+                'family'  => $familyId,
+                'webgl'   => $webgl,
                 'expires' => time() + AuthService::REFRESH_TTL,
-                'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
-                'ua' => mb_substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255),
+                // user_ip — varchar(45), IPv6 помещается целиком.
+                'ip'      => $_SERVER['REMOTE_ADDR'] ?? '',
+                // Кодировка явно: колонка varchar(255) считает символы,
+                // без аргумента обрезка зависела бы от mb_internal_encoding.
+                'ua'      => mb_substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255, 'UTF-8'),
             ]
         );
     }
@@ -260,6 +383,39 @@ final class UserRepository
         $this->db->execute(
             "DELETE FROM lift_refresh_tokens WHERE user_id = :uid AND family_id = :family",
             ['uid' => $userId, 'family' => $familyId]
+        );
+    }
+
+    /**
+     * Отозвать ВСЕ семьи пользователя, кроме указанной — при смене пароля.
+     *
+     * Смена пароля обязана выбросить остальные устройства: иначе
+     * украденный пароль оставляет вору живые сессии на 30 дней, и
+     * смена пароля не лечит компрометацию, ради которой её и делают.
+     *
+     * Текущая семья сохраняется — пользователь не разлогинивается
+     * на том устройстве, где меняет пароль. Определить её можно
+     * ТОЛЬКО по cookie lift_refresh: в lift_access_tokens нет
+     * family_id, связать access с семьёй нечем.
+     *
+     * $keepFamilyId = null (cookie нет) → отзываем ВСЕ. Это цена
+     * безопасности, а не дефект: без опознавателя текущей сессии
+     * выбор стоит между «выбросить всех, включая себя» и «оставить
+     * вора». Перелогин дешевле второй вариант.
+     */
+    public function revokeOtherRefreshFamilies(int $userId, ?string $keepFamilyId): void
+    {
+        if ($keepFamilyId === null || $keepFamilyId === '') {
+            $this->db->execute(
+                "DELETE FROM lift_refresh_tokens WHERE user_id = :uid",
+                ['uid' => $userId]
+            );
+            return;
+        }
+
+        $this->db->execute(
+            "DELETE FROM lift_refresh_tokens WHERE user_id = :uid AND family_id <> :family",
+            ['uid' => $userId, 'family' => $keepFamilyId]
         );
     }
 
@@ -284,24 +440,22 @@ final class UserRepository
             : null;
     }
 
-
     /**
      * Сохранить новый Access-токен для устройства
      */
     public function saveAccessToken(int $userId, string $rawToken, int $expiresAt): void
     {
-        $hash = hash('sha256', $rawToken);
         // Та же причина, что в insertRefreshToken: иначе access живёт
         // на 3 часа дольше AuthService::ACCESS_TTL.
-        $expires = $expiresAt;
-        $sql = "INSERT INTO lift_access_tokens (token_hash, user_id, expires_at)
-                VALUES (:hash, :user_id, FROM_UNIXTIME(:expires))";
-
-        $this->db->execute($sql, [
-            'hash' => $hash,
-            'user_id' => $userId,
-            'expires' => $expires
-        ]);
+        $this->db->execute(
+            "INSERT INTO lift_access_tokens (token_hash, user_id, expires_at)
+             VALUES (:hash, :user_id, FROM_UNIXTIME(:expires))",
+            [
+                'hash'    => hash('sha256', $rawToken),
+                'user_id' => $userId,
+                'expires' => $expiresAt,
+            ]
+        );
     }
 
     /**
@@ -309,13 +463,11 @@ final class UserRepository
      */
     public function findByAccessToken(string $rawToken): ?array
     {
-        $hash = hash('sha256', $rawToken);
-
-        $sql = "SELECT u.* FROM lift_users u 
-                JOIN lift_access_tokens a ON u.user_id = a.user_id 
+        $sql = "SELECT u.* FROM lift_users u
+                JOIN lift_access_tokens a ON u.user_id = a.user_id
                 WHERE a.token_hash = :hash AND a.expires_at > NOW() LIMIT 1";
 
-        return $this->db->fetchOne($sql, ['hash' => $hash]);
+        return $this->db->fetchOne($sql, ['hash' => hash('sha256', $rawToken)]);
     }
 
     /**
@@ -323,10 +475,41 @@ final class UserRepository
      */
     public function deleteAccessToken(string $rawToken): void
     {
-        $hash = hash('sha256', $rawToken);
-        $this->db->execute("DELETE FROM lift_access_tokens WHERE token_hash = :hash", ['hash' => $hash]);
+        $this->db->execute(
+            "DELETE FROM lift_access_tokens WHERE token_hash = :hash",
+            ['hash' => hash('sha256', $rawToken)]
+        );
     }
-        /**
+
+    /**
+     * Погасить access-токены пользователя, кроме предъявленного.
+     *
+     * Смена пароля: чужие access обязаны умереть немедленно, свой —
+     * продолжить работать, иначе вкладка, в которой человек меняет
+     * пароль, получит 401 на следующем же запросе и выглядит как
+     * «смена пароля меня разлогинила».
+     *
+     * $keepRawToken = null → удалить все. Тот же выбор, что в
+     * revokeOtherRefreshFamilies: без опознавателя своей сессии
+     * безопаснее выбросить всех.
+     */
+    public function deleteOtherAccessTokens(int $userId, ?string $keepRawToken): void
+    {
+        if ($keepRawToken === null || $keepRawToken === '') {
+            $this->db->execute(
+                "DELETE FROM lift_access_tokens WHERE user_id = :uid",
+                ['uid' => $userId]
+            );
+            return;
+        }
+
+        $this->db->execute(
+            "DELETE FROM lift_access_tokens WHERE user_id = :uid AND token_hash <> :hash",
+            ['uid' => $userId, 'hash' => hash('sha256', $keepRawToken)]
+        );
+    }
+
+    /**
      * Погасить ВСЕ access-токены пользователя — при обнаружении кражи.
      *
      * Отзыв семьи лишает вора возможности выпустить новый access, но
@@ -337,14 +520,16 @@ final class UserRepository
      * Побочный ущерб минимален: на других устройствах семья цела,
      * их access умрёт, клиент получит 401 и обновится своим refresh
      * без разлогина. Перелогинится только скомпрометированное устройство.
+     *
+     * Реализовано как null-случай deleteOtherAccessTokens: два DELETE
+     * с чуть разным WHERE — ровно те две копии, которые расходятся
+     * при первой же правке.
      */
     public function deleteAccessTokensByUser(int $userId): void
     {
-        $this->db->execute(
-            "DELETE FROM lift_access_tokens WHERE user_id = :uid",
-            ['uid' => $userId]
-        );
+        $this->deleteOtherAccessTokens($userId, null);
     }
+
     /**
      * Список для быстрого входа по ключу организации (B4.3).
      *
@@ -368,6 +553,10 @@ final class UserRepository
      * LIMIT нет намеренно: штат тенанта — десятки человек, а обрезка
      * списка молча закрыла бы вход части диспетчеров.
      *
+     * user_name после сохранения профиля — «Фамилия И.О.». Полные тёзки
+     * дают одинаковую строку и в списке неразличимы; это существующий
+     * долг, формат его не создаёт и не лечит.
+     *
      * @return list<array{id:int,name:string}>
      */
     public function listQuickLogin(): array
@@ -386,10 +575,10 @@ final class UserRepository
         foreach ($rows as $r) {
             $id = (int) $r['user_id'];
 
-            // user_name — собранное ФИО, а не имя: двух Иванов нужно
-            // различать в списке. Фамилия/имя — фолбэк для легаси-записей.
+            // user_name — собранное имя, а не просто имя: двух Иванов
+            // нужно различать в списке. Фамилия/имя — фолбэк для
+            // легаси-записей, где компоненты есть, а user_name пуст.
             $name = trim((string) $r['user_name']);
-
             if ($name === '') {
                 $name = trim(
                     trim((string) ($r['user_surname'] ?? '')) . ' ' .
@@ -408,5 +597,4 @@ final class UserRepository
 
         return $list;
     }
-
 }
