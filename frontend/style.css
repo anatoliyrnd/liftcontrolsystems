@@ -3757,3 +3757,21 @@ body.rr-standalone .container {
     font-size: 10pt;
   }
 }
+
+/* ============================================================
+   Отчёты: возврат к обрезке длинного текста (вариант B).
+   Составные ячейки остаются, перенос отключён.
+   Полный текст — в title, его ставит table-view.js decorate().
+   ============================================================ */
+#reportsTable tbody td[data-col-id="ticket"],
+#reportsTable tbody td[data-col-id="opening"],
+#reportsTable tbody td[data-col-id="resp1"],
+#reportsTable tbody td[data-col-id="resp2"],
+#reportsTable tbody td[data-col-id="resp3"],
+#reportsTable tbody td[data-col-id="classification"],
+#reportsTable tbody td[data-col-id="closure"] {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
