@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace App\Service;
@@ -14,6 +15,17 @@ use App\Database\DB;
  * Лента — best-effort канал: закрытая вкладка событие не увидит.
  * Долговременные каналы для сбоев интеграции: spult_events (30 дней)
  * и письмо админу через AdminAlert.
+ *
+ * ИНВАРИАНТ: методы событий (ticket*, spultError) и чтение ленты
+ * НЕ БРОСАЮТ. Событие пишется ПОСЛЕ коммита бизнес-операции —
+ * CallService зовёт ticket* в конце метода, транзакции в online-пути
+ * нет. Throw отсюда превращал уже созданную заявку в ответ 500, а
+ * в sp.php уводил сигнал в failed/ с письмом «сигнал потерян» — при
+ * существующей заявке. Отказ канала обязан стоить только самого
+ * уведомления.
+ *
+ * cleanup() — исключение из инварианта: публичный и бросающий,
+ * его зовёт cron, где отказ должен быть виден, а не проглочен.
  */
 final class NotificationsService
 {
@@ -26,6 +38,13 @@ final class NotificationsService
 
     /** Предел текста: колонка varchar(500). Клиент по §11.2.1 не обрезает. */
     private const TEXT_MAX = 500;
+
+    /**
+     * Окно свежести события. Одна константа на чистку и на выборку:
+     * раньше «30 минут» было вписано литералом в cleanup(), а getSince()
+     * окна не знал вовсе — два места одного правила разошлись бы.
+     */
+    private const TTL_SEC = 1800;
 
     /**
      * Окно агрегации расхождений: одно уведомление на kind за 15 минут.
@@ -104,8 +123,8 @@ final class NotificationsService
      * timeout = 0 — persistent, сервер шлёт явно; per-type override
      * на клиенте запрещён (§11.1).
      *
-     * Метод никогда не бросает: побочный канал не имеет права уронить
-     * приём сигнала — пульт не ретраит.
+     * try здесь оставлен, хотя create() уже безопасен: он покрывает
+     * isAggregated() — это чтение, и оно падает отдельно от записи.
      *
      * @param string   $kind     ключ из словаря SpultEventRepository::kinds()
      * @param string   $message  текст с адресом и причиной, формирует sp.php
@@ -119,7 +138,11 @@ final class NotificationsService
             // kind в lift_notifications нет, а по event_type все расхождения
             // неразличимы.
             $marker = '[SPult:' . $kind . '] ';
-            $text   = $this->fitText($marker . trim($message));
+
+            // Обрезка здесь не нужна: предел длины обеспечивает create()
+            // для ВСЕХ типов событий. Маркер стоит первым и переживает
+            // обрезку — агрегация по INSTR(text, marker) = 1 не ломается.
+            $text = $marker . trim($message);
 
             if ($ticketId !== null && $this->isAggregated($marker)) {
                 return;
@@ -149,6 +172,26 @@ final class NotificationsService
      * Без приведения sound срабатывал бы у всех событий, включая закрытие
      * и правку, где он выключён.
      *
+     * timeout сравнивается с null, а не на truthy: 0 — это persistent
+     * (§11.2.1). Truthy-проверка превратила бы ноль в null, клиент применил
+     * бы дефолт типа 8 с, и persistent-тост закрывался бы сам.
+     *
+     * ОКНО СВЕЖЕСТИ проверяется здесь, а не только чисткой (§11.4.1:
+     * «если вкладка была закрыта дольше 30 минут, событие в ленту
+     * не попадёт»). Чистка вероятностная и запускается при СОЗДАНИИ:
+     * на тихом тенанте она не выпадает вовсе, и вкладка после простоя
+     * получала тосты часовой давности со звуком и persistent-очередью.
+     *
+     * Условие в SQL, а не отбор в PHP: курсор last_id двигается только
+     * по отданным строкам. При отборе в PHP лимит 50 мог бы целиком
+     * состоять из протухших строк — ответ пустой, курсор стоит на месте,
+     * и свежие события с большим id не достигались бы никогда.
+     *
+     * Протухшие строки исчезает cleanup(); его стоит подключить к cron,
+     * иначе на тихом тенанте они висят до следующего события и диапазон
+     * id > since_id перечитывается на каждом тике. Таблица мала (TTL 30 мин,
+     * есть idx_created_at), но бесплатной эта перечитка не является.
+     *
      * @return array{notifications: array<int, array<string, mixed>>, last_id: int}
      */
     public function getSince(int $sinceId, int $limit = 50): array
@@ -159,10 +202,13 @@ final class NotificationsService
         $rows = $this->db->fetchAll(
             "SELECT id, event_type, ticket_id, user_id AS actor_id, text, sound, timeout, created_at
              FROM lift_notifications
-             WHERE id > :since_id
+             WHERE id > :since_id AND created_at > :cutoff
              ORDER BY id ASC
              LIMIT {$safeLimit}",
-            ['since_id' => $sinceId]
+            [
+                'since_id' => $sinceId,
+                'cutoff'   => time() - self::TTL_SEC,
+            ]
         );
 
         $notifications = [];
@@ -190,12 +236,18 @@ final class NotificationsService
         ];
     }
 
-    /** Окно свежести — 30 минут. */
+    /**
+     * Окно свежести — TTL_SEC.
+     *
+     * Публичный и бросающий: вызывается из cron_cleanup.php, где отказ
+     * должен быть виден. Внутри сервиса используется тихая обёртка
+     * cleanupProbabilistic().
+     */
     public function cleanup(): void
     {
         $this->db->execute(
-            "DELETE FROM lift_notifications WHERE created_at < :thirty_min_ago",
-            ['thirty_min_ago' => time() - (30 * 60)]
+            "DELETE FROM lift_notifications WHERE created_at < :cutoff",
+            ['cutoff' => time() - self::TTL_SEC]
         );
     }
 
@@ -203,29 +255,75 @@ final class NotificationsService
     // Внутреннее
     // -----------------------------------------------------------------------
 
-    /** Внутреннее создание события. */
+    /**
+     * Внутреннее создание события. Никогда не бросает.
+     *
+     * Причина отказа пишется в лог, но наружу не выходит: бизнес-операция
+     * к этому моменту уже закоммичена. Молчать совсем нельзя — потерянное
+     * уведомление иначе не отличить от «события не было».
+     *
+     * Текст события в лог не дублируем: DB::execute уже пишет SQL и params
+     * через Logger::error, адрес и ФИО там есть.
+     */
     private function create(array $data): void
     {
-        // Вероятностная чистка: 20% шанс удалить протухшие записи.
-        if (random_int(1, 100) <= 20) {
-            $this->cleanup();
-        }
+        try {
+            // Предел длины — здесь, а не в одном вызывающем методе.
+            // call_solution и call_details — TEXT без предела, колонка
+            // varchar(500). sql_mode без STRICT_TRANS_TABLES обрезает
+            // длинное значение МОЛЧА: раньше терялся хвост текста, а не
+            // операция. Своя обрезка сохраняет маркер и осмысленное начало
+            // и ставит многоточие — пользователь видит, что текст неполон.
+            $text = $this->fitText((string) ($data['text'] ?? ''));
 
-        $this->db->execute(
-            "INSERT INTO lift_notifications
-                 (event_type, ticket_id, user_id, text, sound, timeout, created_at)
-             VALUES
-                 (:event_type, :ticket_id, :user_id, :text, :sound, :timeout, :created_at)",
-            [
-                'event_type' => $data['event_type'],
-                'ticket_id'  => $data['ticket_id'] ?? null,
-                'user_id'    => $data['user_id'] ?? null,
-                'text'       => $data['text'],
-                'sound'      => $data['sound'] ?? 0,
-                'timeout'    => $data['timeout'] ?? null,
-                'created_at' => time(),
-            ]
-        );
+            // Показывать нечего, а NOT NULL дал бы 1048.
+            if ($text === '') {
+                return;
+            }
+
+            $this->cleanupProbabilistic();
+
+            $this->db->execute(
+                "INSERT INTO lift_notifications
+                    (event_type, ticket_id, user_id, text, sound, timeout, created_at)
+                 VALUES
+                    (:event_type, :ticket_id, :user_id, :text, :sound, :timeout, :created_at)",
+                [
+                    'event_type' => $data['event_type'] ?? 'unknown',
+                    'ticket_id'  => $data['ticket_id'] ?? null,
+                    'user_id'    => $data['user_id'] ?? null,
+                    'text'       => $text,
+                    'sound'      => $data['sound'] ?? 0,
+                    'timeout'    => $data['timeout'] ?? null,
+                    'created_at' => time(),
+                ]
+            );
+        } catch (\Throwable $e) {
+            error_log(sprintf(
+                'NotificationsService: create failed (event=%s, ticket=%s) — %s',
+                (string) ($data['event_type'] ?? 'unknown'),
+                isset($data['ticket_id']) ? (string) $data['ticket_id'] : 'null',
+                $e->getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Вероятностная чистка: 20% шанс удалить протухшие записи.
+     *
+     * Отдельный try обязателен: без него сорванная уборка (блокировка
+     * строки, моргнувшая БД) отменяла и сам INSERT — событие терялось
+     * из-за работы, к которой оно отношения не имеет.
+     */
+    private function cleanupProbabilistic(): void
+    {
+        try {
+            if (random_int(1, 100) <= 20) {
+                $this->cleanup();
+            }
+        } catch (\Throwable $e) {
+            error_log('NotificationsService: cleanup failed — ' . $e->getMessage());
+        }
     }
 
     /**
@@ -239,6 +337,11 @@ final class NotificationsService
      * INSTR вместо LIKE: в kind есть подчёркивание, а '_' в LIKE —
      * односимвольный wildcard. Через LIKE 'guid_mismatch' совпал бы
      * и с 'guidXmismatch'. INSTR сравнивает подстроку буквально.
+     *
+     * Гонка двух одновременных сигналов одного kind даст два тоста:
+     * проверка и вставка не атомарны. Осознанно — канал best-effort,
+     * а INSERT ... SELECT WHERE NOT EXISTS берёт gap-локи и на потоке
+     * сигналов рискует дедлоком. Цена дубля — один лишний тост.
      */
     private function isAggregated(string $marker): bool
     {
@@ -259,20 +362,27 @@ final class NotificationsService
 
     /**
      * Гарантия длины по §11.2.1: клиент текст не обрезает, значит предел
-     * обеспечивает сервер. Колонка varchar(500) NOT NULL — без обрезки
-     * длинный адрес дал бы 1406 Data too long и уведомления не было бы вовсе.
+     * обеспечивает сервер. Колонка varchar(500) NOT NULL.
      *
      * Маркер стоит первым и переживает обрезку; адрес и причину sp.php
      * ставит сразу за ним — теряется хвост, а не то, что передают голосом.
+     *
+     * Кодировка задана явно: varchar(500) считает СИМВОЛЫ, а без аргумента
+     * mb_strlen берёт mb_internal_encoding — предел начал бы зависеть
+     * от default_charset хостера и резал кириллицу не там.
+     *
+     * Таблица utf8mb4: 4-байтные символы проходят, отдельной фильтрации
+     * не требуется. В отличие от lift_notes.note_body (utf8mb3), где
+     * эмодзи обрезало бы строку на себе.
      */
     private function fitText(string $text): string
     {
         $text = trim($text);
 
-        if (mb_strlen($text) <= self::TEXT_MAX) {
+        if (mb_strlen($text, 'UTF-8') <= self::TEXT_MAX) {
             return $text;
         }
 
-        return mb_substr($text, 0, self::TEXT_MAX - 1) . '…';
+        return mb_substr($text, 0, self::TEXT_MAX - 1, 'UTF-8') . '…';
     }
 }
