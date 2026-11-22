@@ -73,11 +73,16 @@ export function createTableView(table, router) {
       }
       // Полный текст по наведению: описание СПульта с дополнениями
       // может быть длинным, а(title) даёт прочитать без раскрытия.
-      const opening = tr.querySelector('td[data-col-id="opening"]');
-      if (opening) opening.title = opening.textContent;
-      const closure = tr.querySelector('td[data-col-id="closure"]');
-      if (closure && closure.textContent !== "—")
-        closure.title = closure.textContent;
+      // Обрезка однострочная: полный текст нужен у КАЖДОЙ составной
+      // ячейки. Раньше title стоял только на opening и closure —
+      // при nowrap адрес, ответственные и классификация стали бы
+      // нечитаемыми без наведения.
+      for (const col of REPORTS.COLUMNS) {
+        const td = tr.querySelector(`td[data-col-id="${col.id}"]`);
+        if (!td) continue;
+        const text = td.textContent;
+        if (text && text !== "—") td.title = text;
+      }
     });
   }
 
