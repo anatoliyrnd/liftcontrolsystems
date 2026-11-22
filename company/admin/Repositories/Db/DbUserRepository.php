@@ -169,10 +169,15 @@ final class DbUserRepository implements UserRepositoryInterface
             }
         }
 
-        // Данные формы → серверные поля → недостающие обязательные колонки.
+              // Только реальные поля формы + пароль + дата создания.
+        // Обязательных колонок без дефолта в схеме нет (SHOW COLUMNS:
+        // Null=NO AND Default IS NULL → 0 строк), sql_mode без STRICT.
+        // Если на другом тенанте появится 1364 — лечится DEFAULT'ом
+        // в той базе, а не усложнением этого кода.
+        //
         // user_date пишем сами: DEFAULT 0 оставил бы «Создан» пустым навсегда.
-        // Unix-метка абсолютна, зоны не касается; в WRITABLE её нет —
-        // подделать дату создания из формы нельзя. last_login не трогаем.
+        // Unix-метка абсолютна; в WRITABLE её нет — подделать из формы нельзя.
+        // last_login не трогаем: 0 = ещё не входил.
         $data = array_merge(
             $this->normalizeFlags($fields),
             [
@@ -181,10 +186,7 @@ final class DbUserRepository implements UserRepositoryInterface
             ]
         );
 
-        $data = $this->fillRequired($data);
-
-        // Ключи — из WRITABLE, литералов выше и имён колонок самой БД,
-        // то есть из конечного проверяемого набора.
+        // Ключи — только из WRITABLE и двух литералов выше.
         $columns = array_keys($data);
         $sql = 'INSERT INTO lift_users (`' . implode('`, `', $columns) . '`) VALUES ('
             . implode(', ', array_fill(0, count($columns), '?')) . ')';
@@ -254,61 +256,7 @@ final class DbUserRepository implements UserRepositoryInterface
         return (int) ($row['email_taken'] ?? 0) === 1 ? 'email' : null;
     }
 
-    /**
-     * Добирает колонки NOT NULL без дефолта, которых нет в данных.
-     *
-     * Список НЕ хардкодим: схемы тенантов расходятся — в одной есть
-     * легаси user_im_*, в другой нет, и жёсткий список роняет INSERT.
-     * Читаем схему той БД, к которой подключён тенант.
-     *
-     * SHOW COLUMNS, а не information_schema: на этом хостинге I_S
-     * однажды ответил #1109 на живую таблицу.
-     *
-     * @param array<string, mixed> $data
-     * @return array<string, mixed>
-     */
-    private function fillRequired(array $data): array
-    {
-        $columns = $this->db->fetchAll('SHOW COLUMNS FROM lift_users');
-
-        foreach ($columns as $column) {
-            $name = (string) ($column['Field'] ?? '');
-
-            if ($name === '' || array_key_exists($name, $data)) {
-                continue;
-            }
-            if (($column['Null'] ?? 'YES') !== 'NO') {
-                continue;
-            }
-            if (($column['Default'] ?? null) !== null) {
-                continue;
-            }
-            if (str_contains((string) ($column['Extra'] ?? ''), 'auto_increment')) {
-                continue;
-            }
-
-            $type = strtolower((string) ($column['Type'] ?? ''));
-
-            if (preg_match('/^(tinyint|smallint|mediumint|int|bigint|decimal|float|double|bit)/', $type) === 1) {
-                $data[$name] = 0;
-                continue;
-            }
-
-            if (preg_match('/^(char|varchar|tinytext|text|mediumtext|longtext|enum|set)/', $type) === 1) {
-                $data[$name] = '';
-                continue;
-            }
-
-            // Дата/время/binary без дефолта: подставлять нечего, выдумывать
-            // значение нельзя — падаем с именем колонки, а не пишем мусор.
-            throw new InvalidArgumentException(
-                "Колонка {$name} ({$type}) обязательна, значение по умолчанию неизвестно"
-            );
-        }
-
-        return $data;
-    }
-
+   
     /**
      * @param array<string, mixed> $fields
      */
