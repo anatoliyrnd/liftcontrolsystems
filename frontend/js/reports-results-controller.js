@@ -42,6 +42,7 @@ export class ReportsResultsController {
     this._cooldownUntil = 0;
     this._exportBusy = false;
     this._printBusy = false;
+    this._xlsxBusy = false;
     this._payload = null;
     this._isEmpty = false;
     this._page = 1;
@@ -155,6 +156,11 @@ export class ReportsResultsController {
       this._run(this._page);
     });
     this._els.exportBtn.addEventListener("click", () => this._onExport());
+    // Кнопка ищется по id, а не через _grabElements: правка grab
+    // потребовала бы ещё одного якоря, а элемент статический.
+    document
+      .getElementById("rrXlsxBtn")
+      ?.addEventListener("click", () => this._onXlsx());
     this._els.printBtn.addEventListener("click", () => this._onPrint());
     this._syncExport();
   }
@@ -224,20 +230,21 @@ export class ReportsResultsController {
         return;
       }
       if (resp?.code === "aborted" || resp?._authLost) return;
+      // retryAfterSec и reason лежат на верхнем уровне — как в _onExport.
       if (resp?.code === "rate_limited") {
-        const sec = Number(
-          resp?.data?.retryAfterSec ?? REPORTS.PRINT_COOLDOWN_SEC,
-        );
+        const sec = Number(resp.retryAfterSec) || REPORTS.PRINT_COOLDOWN_SEC;
         this._printMessage(
           win,
           `Слишком частые запросы печати. Повторите через ${sec} с.`,
         );
         return;
       }
-      if (resp?.code) {
+      if (!resp || resp.status !== "ok") {
         this._printMessage(
           win,
-          `Не удалось получить данные для печати (${resp.code}). Сузьте период или фильтры и повторите.`,
+          resp?.reason === "export_too_many_rows"
+            ? "Слишком много результатов. Сузьте период поиска и повторите печать."
+            : resp?.message || "Не удалось получить данные для печати.",
         );
         return;
       }
@@ -254,6 +261,86 @@ export class ReportsResultsController {
       renderPrintDocument(win, { rows, meta, sheetId });
     } finally {
       this._printBusy = false;
+    }
+  }
+
+  /**
+   * XLSX. Кулдаун НЕ клиентский: серверные бакеты csv и xlsx разведены,
+   * а _startCooldown() гасит кнопку CSV. Вызов его здесь сомкнул бы
+   * бакеты обратно — после книги CSV молчал бы 30 с без причины.
+   */
+  async _onXlsx() {
+    if (!this._payload || this._xlsxBusy) return;
+    const btn = document.getElementById("rrXlsxBtn");
+    const myMountId = this._mountId;
+    const isStale = () => !this._isActive || this._mountId !== myMountId;
+
+    this._xlsxBusy = true;
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await this.repo.exportXlsx(this._payload);
+      if (isStale()) return;
+      if (resp?._authLost) return;
+      if (resp?.offline === true) {
+        this._showStub("Нет соединения. Выгрузка недоступна.");
+        return;
+      }
+      if (resp?.code === "rate_limited") {
+        const sec = Number(resp.retryAfterSec) || REPORTS.EXPORT_COOLDOWN_SEC;
+        notify.warning(
+          `Слишком часто. Повторите выгрузку XLSX через ${sec} с.`,
+        );
+        return;
+      }
+      if (!resp || resp.status !== "ok") {
+        if (resp?.reason === "export_too_many_rows") {
+          notify.warning("Слишком много результатов. Сузьте период поиска.");
+        } else {
+          notify.error(resp?.message || "Не удалось выгрузить книгу.");
+        }
+        logHistoryAction(
+          "Выгрузка XLSX отчёта: " + (resp?.message || resp?.code || "ошибка"),
+        );
+        return;
+      }
+      if (!resp.data) {
+        notify.info(resp.message || "По вашему запросу ничего не найдено");
+        return;
+      }
+      if (this._saveFile(resp.data, "report.xlsx")) {
+        notify.success(`Выгружено строк: ${resp.data.rows_count ?? 0}`);
+        logHistoryAction(
+          `Выгрузка XLSX отчёта (${resp.data.rows_count ?? 0} строк).`,
+        );
+      }
+    } finally {
+      this._xlsxBusy = false;
+      if (btn && !isStale()) btn.disabled = false;
+    }
+  }
+
+  /** base64 → blob → ссылка. Копия образца из _onExport. */
+  _saveFile(data, fallbackName) {
+    try {
+      const bin = atob(data.file_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], {
+        type: data.mime_type || "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename || fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      return true;
+    } catch (e) {
+      console.warn("[ReportsResults] save file failed:", e);
+      notify.error("Не удалось сохранить файл выгрузки.");
+      return false;
     }
   }
 

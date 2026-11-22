@@ -16,6 +16,7 @@ export function reportsResultsPageTemplate() {
         <span id="rrCount" class="rep-results-count"></span>
         <button type="button" id="rrRefreshBtn" class="menu-item">Обновить</button>
         <button type="button" id="rrExportBtn" class="menu-item rep-primary">Выгрузить CSV</button>
+        <button type="button" id="rrXlsxBtn" class="menu-item">Выгрузить XLSX</button>
         <button type="button" id="rrPrintBtn" class="menu-item">Печать</button>
         <select id="rrPrintSheet" class="menu-item" title="Формат листа">
           <option value="a4">A4</option>
