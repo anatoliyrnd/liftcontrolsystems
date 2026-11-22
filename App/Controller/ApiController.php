@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace App\Controller;
@@ -7,8 +8,15 @@ use App\Database\DB;
 use App\Http\{Request, Response, ErrorCode};
 use App\Tenant;
 use App\Exceptions\ApiException;
-use App\Support\CallPolicy;
-use App\Repository\{UserRepository, CallRepository, NoteRepository, HistoryRepository, ReportsRepository};
+use App\Support\{CallPolicy, PasswordChangeLimiter};
+use App\Repository\{
+    UserRepository,
+    CallRepository,
+    NoteRepository,
+    HistoryRepository,
+    ReportsRepository,
+    UserSettingsRepository
+};
 use App\Service\{
     AuthService,
     CallService,
@@ -18,8 +26,8 @@ use App\Service\{
     NotificationsService,
     AddressCacheService,
     OrgLoginService,
-    ReportsService
-
+    ReportsService,
+    ProfileService
 };
 
 final class ApiController
@@ -41,6 +49,7 @@ final class ApiController
     private NotificationsService $notificationsService;
     private AddressCacheService $addressCacheService;
     private ReportsService $reportsService;
+    private ProfileService $profileService;
     private OrgLoginService $orgLogin;
     private ?Tenant $tenant;
 
@@ -54,6 +63,7 @@ final class ApiController
         AddressCacheService $addressCacheService,
         OrgLoginService $orgLogin,
         ReportsService $reportsService,
+        ProfileService $profileService,
         ?Tenant $tenant
     ) {
         $this->authService = $authService;
@@ -65,6 +75,7 @@ final class ApiController
         $this->addressCacheService = $addressCacheService;
         $this->orgLogin = $orgLogin;
         $this->reportsService = $reportsService;
+        $this->profileService = $profileService;
         $this->tenant = $tenant;
     }
 
@@ -77,8 +88,8 @@ final class ApiController
         $callRepo    = new CallRepository($db);
         $noteRepo    = new NoteRepository($db);
         $historyRepo = new HistoryRepository($db);
-
         $legacyProxy = new LegacyProxyService(\LEGACY_API_URL ?? '', \LEGACY_API_SECRET ?? '');
+
         $configService = new ConfigService($db, $tenant);
         $addressService = new AddressService($db);
         $notificationsService = new NotificationsService($db);
@@ -88,6 +99,19 @@ final class ApiController
         // соединение и так одно на тенант.
         $orgLogin = new OrgLoginService($db, $userRepo, $tenant);
         $reportsService = new ReportsService(new ReportsRepository($db), $tenant);
+
+        // Профиль: свой репозиторий настроек (другая таблица, другой
+        // инвариант — слияние по scope), но тот же $userRepo. Лимитер
+        // попыток — отдельный класс: файловое состояние не место в
+        // сервисе-оркестраторе, а ExportRateLimiter переиспользовать
+        // нельзя, его ключ не различает действий.
+        $profileService = new ProfileService(
+            $db,
+            $userRepo,
+            new UserSettingsRepository($db),
+            new PasswordChangeLimiter(),
+            $tenant
+        );
 
         $callService = new CallService(
             $callRepo,
@@ -110,9 +134,11 @@ final class ApiController
             $addressCacheService,
             $orgLogin,
             $reportsService,
+            $profileService,
             $tenant
         );
     }
+
     public function handle(Request $request): Response
     {
         // Публичные действия — ДО проверки bearer. Экран входа токена
@@ -130,6 +156,16 @@ final class ApiController
 
         return match ($request->action) {
             'config'        => new Response(['status' => 'ok'] + $this->configService->getConfig($user)),
+
+            // §13: профиль и настройки колонок. Ответ ПЛОСКИЙ — profile и
+            // column_settings рядом со status, БЕЗ обёртки data. Это
+            // исключение из §0.3, и оно не случайное: profile-controller.js
+            // читает response.profile / response.column_settings напрямую.
+            // Обёртка «для единообразия с ticket» сломает экран молча —
+            // поля станут undefined, форма откроется пустой.
+            'get_user_settings'  => Response::ok($this->profileService->getSettings($user)),
+            'save_user_settings' => $this->saveUserSettings($request, $user),
+
             'loadAddress'   => Response::ok(['action' => 'loadAddress', 'message' => $this->addressService->getAddresses()]),
             'open'          => new Response($this->callService->open($user)),
             'close'         => new Response($this->callService->close($user, $request->input('period'))),
@@ -142,6 +178,7 @@ final class ApiController
 
             // B2.6: результат пачки — под data, как у ticket (§0.3).
             'syncCommands'  => Response::ok(['data' => $this->handleSyncCommands($user, $request)]),
+
             // Отчёты (§15 v6.2): ответ под data, права проверяет сервис.
             'reports_filters_data' => Response::ok(['data' => $this->reportsService->getFiltersData($user)]),
             'reports_summary'      => Response::ok(['data' => $this->reportsService->getSummary($user, $request->body)]),
@@ -185,6 +222,65 @@ final class ApiController
     }
 
     /**
+     * Сохранение профиля (§13.2) + инкремент справочника сотрудников.
+     *
+     * Транзакция внутри сервиса: ФИО, пароль и настройки колонок ложатся
+     * вместе либо не ложатся вовсе. К моменту возврата она уже закрыта,
+     * поэтому инкремент здесь — строго ПОСЛЕ коммита, как в sync-пути.
+     *
+     * Зачем bump staff: ФИО пересобирает user_name, а из него собираются
+     * staff_list в config и подпись ответственного. Без инкремента
+     * остальные пользователи увидят новое имя только после перелогина —
+     * справочник у них закэширован и версия не меняется.
+     *
+     * Только staff, не журналы: смена имени — косметика, а полный список
+     * заявок на порядок тяжелее справочника. Подписи в журналах обновятся
+     * при следующем естественном обновлении слоя.
+     *
+     * Сохранение ФИО без фактических изменений даст лишний инкремент.
+     * Осознанно: версии монотонны, цена — один перечитанный config,
+     * а сверять четыре поля с БД ради экономии значило бы дублировать
+     * чтение, которое сервис уже сделал.
+     */
+    private function saveUserSettings(Request $request, array $user): Response
+    {
+        $result = $this->profileService->save(
+            $user,
+            $request->body,
+            $request->bearer,
+            $this->currentRefreshToken()
+        );
+
+        if (is_array($request->input('profile'))) {
+            $this->addressCacheService->invalidateStaff();
+        }
+
+        return Response::ok($result);
+    }
+
+    /**
+     * Cookie текущей сессии — опознаватель семьи при смене пароля.
+     *
+     * Читается здесь, а не в сервисе: способ доставки токена — забота
+     * транспорта. Сервис обязан быть вызываемым из CLI-разбора и теста,
+     * где $_COOKIE нет вовсе.
+     *
+     * is_string обязателен: cookie вида lift_refresh[]=x приходит массивом,
+     * а параметр сервиса объявлен ?string. Под strict_types это TypeError
+     * → internal_error вместо смены пароля. Та же природа, что у org_key
+     * и versions — публичный вход не доверяет форме payload.
+     *
+     * null (cookie нет) сервис трактует как «свою семью не опознать»
+     * и отзывает все: перелогин дешевле, чем оставить вору сессию.
+     */
+    private function currentRefreshToken(): ?string
+    {
+        $raw = $_COOKIE['lift_refresh'] ?? null;
+
+        return is_string($raw) ? $raw : null;
+    }
+
+    /**
      * Эндпоинт одной заявки (§12.2).
      *
      * Прямой запрос по ID через сервис и репозиторий: старый перебор
@@ -199,6 +295,7 @@ final class ApiController
         if (!$callId) {
             return null;
         }
+
         return $this->callService->ticketDetailed($callId, $user);
     }
 
@@ -245,8 +342,9 @@ final class ApiController
             ['batch_id' => $batchId]
         );
 
-              if ($cachedResponse && !empty($cachedResponse['response_payload'])) {
+        if ($cachedResponse && !empty($cachedResponse['response_payload'])) {
             $decoded = json_decode($cachedResponse['response_payload'], true);
+
             // Нетерминальный кэш не отдаём: batch_id переиспользуется при
             // повторе команды (§11.2), иначе первый duplicate_detected
             // вернулся бы навсегда и повтор с force_create не создал бы
@@ -290,10 +388,11 @@ final class ApiController
                 $context['created_tickets'] = $createdTicketsMap;
             }
 
-                       // Слепок ответа для идемпотентности верхнего уровня.
-            // INVALID_UTF8_SUBSTITUTE: битая кодировка в payload не должна
-            // валить json_encode в false — колонка имеет CHECK(json_valid),
-            // и вся пачка откатилась бы из-за одного мусорного символа.
+            // Слепок ответа для идемпотентности верхнего уровня.
+            // INVALID_UTF8_SUBSTITUTE: битая кодировка в payload не
+            // должна валить json_encode в false — колонка имеет
+            // CHECK(json_valid), и вся пачка откатилась бы из-за
+            // одного мусорного символа.
             //
             // Кэшируем только терминальные пачки: нетерминальный слепок
             // «отравил» бы повтор с тем же batch_id. Перевыполнение пачки
@@ -427,7 +526,6 @@ final class ApiController
             // вернёт ignored, и заявка не создастся, хотя клиент покажет успех.
             if (in_array($pastStatus, ['success', 'archived'], true)) {
                 $context['summary']['ignored']++;
-
                 $resolvedId = (int) ($existing['ticket_id'] ?? 0);
 
                 // B2.13: связываем локальную заявку с серверным номером.
@@ -480,7 +578,6 @@ final class ApiController
 
         try {
             $this->checkCommandPermissions($user, $type);
-
             $res = $this->executeCommandBusinessLogic($user, $type, $payload);
 
             $context['summary']['success']++;
@@ -521,7 +618,7 @@ final class ApiController
         }
     }
 
-     /**
+    /**
      * Контроль прав на типы команд (§2.2) — через CallPolicy.
      *
      * Матрицу здесь не дублируем: те же предикаты обслуживают online-путь
@@ -593,7 +690,6 @@ final class ApiController
 
         if ($isDuplicate) {
             $existingTickets = [];
-
             if (is_array($details) && isset($details['existing_tickets']) && is_array($details['existing_tickets'])) {
                 $existingTickets = $details['existing_tickets'];
             } elseif (str_starts_with($message, $legacyPrefix)) {
@@ -648,6 +744,7 @@ final class ApiController
             'Внутренняя ошибка: ' . $e->getMessage(),
             $payload
         );
+
         $this->writeCommandLog($uuid, $batchId, $type, 'failed', null);
 
         $context['results'][] = [
@@ -708,11 +805,11 @@ final class ApiController
             "INSERT INTO offline_command_log (command_uuid, batch_id, command_type, status, ticket_id)
              VALUES (?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-                 batch_id     = VALUES(batch_id),
-                 command_type = VALUES(command_type),
-                 status       = VALUES(status),
-                 ticket_id    = VALUES(ticket_id),
-                 created_at   = CURRENT_TIMESTAMP",
+                batch_id     = VALUES(batch_id),
+                command_type = VALUES(command_type),
+                status       = VALUES(status),
+                ticket_id    = VALUES(ticket_id),
+                created_at   = CURRENT_TIMESTAMP",
             [$uuid, $batchId, $type, $status, $ticketId]
         );
     }
@@ -732,27 +829,31 @@ final class ApiController
     ): void {
         $this->db->execute(
             "INSERT INTO offline_actions_archive
-                 (command_uuid, batch_id, command_type, reason, message, payload_snapshot)
+                (command_uuid, batch_id, command_type, reason, message, payload_snapshot)
              VALUES (?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-                 batch_id         = VALUES(batch_id),
-                 command_type     = VALUES(command_type),
-                 reason           = VALUES(reason),
-                 message          = VALUES(message),
-                 payload_snapshot = VALUES(payload_snapshot)",
+                batch_id         = VALUES(batch_id),
+                command_type     = VALUES(command_type),
+                reason           = VALUES(reason),
+                message          = VALUES(message),
+                payload_snapshot = VALUES(payload_snapshot)",
             [
                 $uuid,
                 $batchId,
                 $type,
                 // Обрезка по фактической ширине колонок: длинный текст
                 // SQL-ошибки иначе даст 1406 Data too long → откат пачки.
-                mb_substr($reason, 0, 64),
-                mb_substr($message, 0, 500),
+                // Кодировка явно: колонки считают символы, без аргумента
+                // обрезка зависела бы от mb_internal_encoding хостера и
+                // резала кириллицу не там.
+                mb_substr($reason, 0, 64, 'UTF-8'),
+                mb_substr($message, 0, 500, 'UTF-8'),
                 (string) json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
             ]
         );
     }
-/**
+
+    /**
      * Все результаты пачки финальны (§6.1): success / archived / ignored.
      *
      * duplicate_detected и failed — «ждёт решения/повтора»: такой ответ
@@ -778,10 +879,10 @@ final class ApiController
             "INSERT INTO offline_sync_log (batch_id, tenant_id, user_id, response_payload)
              VALUES (?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
-                 tenant_id        = VALUES(tenant_id),
-                 user_id          = VALUES(user_id),
-                 response_payload = VALUES(response_payload),
-                 created_at       = CURRENT_TIMESTAMP",
+                tenant_id        = VALUES(tenant_id),
+                user_id          = VALUES(user_id),
+                response_payload = VALUES(response_payload),
+                created_at       = CURRENT_TIMESTAMP",
             [$batchId, $this->tenant?->id ?? 'unknown', $userId, $responseJson]
         );
     }
