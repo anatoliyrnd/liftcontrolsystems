@@ -31,7 +31,9 @@ final class DbTokenRepository implements TokenRepositoryInterface
         // Refresh первым: DELETE берёт исключительную блокировку строк,
         // и параллельная ротация Трека А (UPDATE lift_refresh_tokens)
         // заблокируется, а после нашего commit не найдёт строку.
-        $result = $this->db->transaction(static function () use ($userId): array {
+               // Замыкание НЕ static: внутри нужен $this->db. Статическое
+        // не привязывает $this → Error при первом же вызове.
+        $result = $this->db->transaction(function () use ($userId): array {
             $refresh = $this->db->execute(
                 'DELETE FROM lift_refresh_tokens WHERE user_id = ?',
                 [$userId]
