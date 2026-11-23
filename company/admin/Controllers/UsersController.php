@@ -171,6 +171,15 @@ final class UsersController extends BaseController
 
         if ($password !== '') {
             $this->users->updatePasswordHash($id, Password::hash($password));
+
+            // Смена пароля обязана выбросить все устройства: иначе
+            // украденный пароль оставляет вору живые сессии на 30 дней,
+            // и сброс не лечит компрометацию, ради которой его делают.
+            //
+            // Все семьи, а не «кроме текущей»: cookie lift_refresh
+            // целевого пользователя у панели нет — админ в своей сессии,
+            // опознать чужую текущую семью нечем. Сессия панели отдельная.
+            $this->tokens->revokeAllForUser($id);
         }
 
         $this->audit->log('user.update', [
@@ -179,9 +188,15 @@ final class UsersController extends BaseController
             'position' => $fields['user_position'],
             'role'     => $fields['user_role'],
             'password' => $password !== '' ? 'changed' : 'kept',
+            'sessions' => $password !== '' ? 'revoked' : 'kept',
         ]);
 
-        Flash::set('success', 'Изменения сохранены');
+        Flash::set(
+            'success',
+            $password !== ''
+                ? 'Сохранено. Пароль сменён, все сессии пользователя завершены'
+                : 'Изменения сохранены'
+        );
         $this->redirect('?page=users');
     }
 
