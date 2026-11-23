@@ -369,6 +369,8 @@ final class CallRepository
                 'department_id'  => (string) $c['call_department'],
                 'group'          => $c['group_name'],
                 'group_id'       => (string) $c['call_group'],
+                // §17: группа лифтов есть и в списках, не только в карточке.
+                ...$this->elevatorGroup($c),
                 'request'        => $c['request'],
                 'request_id'     => (string) $c['call_request'],
                 'date'           => (int) $c['call_date'],
@@ -426,6 +428,38 @@ final class CallRepository
             (string) $object,
             $row['addr_street_type'] ?? null
         );
+    }
+
+    /**
+     * Группа лифтов заявки — снимок на момент создания.
+     *
+     * Колонка elevator_group_id существует (DEFAULT 1), но читалась
+     * только литералом null: карточка и списки показывали заглушку при
+     * живом значении в БД (§17 помечает поля как «🆕 заглушки»).
+     *
+     * NULL и 0 → null: группа не назначена. Единица остаётся единицей —
+     * это реальное значение («Без группы» по комментарию
+     * lift_object.group_id), и трактовать его должен словарь или UI,
+     * а не репозиторий: когда появится таблица elevator_groups, join
+     * пойдёт по этому id, и подмена единицы на null скрыла бы данные.
+     *
+     * Имя ВСЕГДА null: таблицы elevator_groups в схеме нет — ни в демо,
+     * ни в легаси. API_PROTOCOL §2.7 утверждает обратное и устарел.
+     * Источника для имени не существует, выдумывать подписи нельзя.
+     *
+     * Один метод на список и карточку: две копии маппинга разошлись бы
+     * при появлении словаря, как уже расходились заметки до mapNote().
+     *
+     * @return array{elevator_group_id:int|null,elevator_group_name:null}
+     */
+    private function elevatorGroup(array $row): array
+    {
+        $id = isset($row['elevator_group_id']) ? (int) $row['elevator_group_id'] : 0;
+
+        return [
+            'elevator_group_id'   => $id > 0 ? $id : null,
+            'elevator_group_name' => null,
+        ];
     }
 
     /**
@@ -615,8 +649,9 @@ final class CallRepository
             'department_id'       => (string) $call['call_department'],
             'group'               => $call['group_name'],
             'group_id'            => (string) $call['call_group'],
-            'elevator_group_id'   => null,
-            'elevator_group_name' => null,
+            // Группа лифтов читается из колонки, а не заглушается: снимок
+            // на момент создания. Имя останется null, пока нет словаря.
+            ...$this->elevatorGroup($call),
             'request'             => $call['request'],
             'request_id'          => (string) $call['call_request'],
             'alert_level'         => (int) ($call['alert_level'] ?? 1),

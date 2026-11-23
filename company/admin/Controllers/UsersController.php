@@ -54,7 +54,7 @@ final class UsersController extends BaseController
         'user_patronymic' => 100,
         'user_phone' => 39,
         'user_address' => 200,
-    ];
+    ];св
 
     public function __construct(
         View $view,
