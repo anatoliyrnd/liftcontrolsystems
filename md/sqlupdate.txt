@@ -742,3 +742,15 @@ ALTER TABLE `lift_users`
 
 ALTER TABLE lift_users
     ADD UNIQUE KEY uniq_users_login (user_login);
+    -- Удаление избыточного idx_user_login после uniq_users_login (миграция 1.6).
+--
+-- Обе записи SHOW INDEX: Seq_in_index = 1, Sub_part = NULL — индекс
+-- одиночный и полноразмерный, не составной и не префиксный. Уникальный
+-- по той же колонке покрывает те же обращения, неуникальный остаётся
+-- только платой за запись при INSERT и смене логина.
+--
+-- Порядок важен: DROP только ПОСЛЕ того, как UNIQUE создан. Наоборот
+-- остался бы окно без ограничения уникальности — ровно то, ради чего
+-- миграция 1.6 и делалась.
+
+ALTER TABLE lift_users DROP INDEX idx_user_login;
