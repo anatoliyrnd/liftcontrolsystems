@@ -720,3 +720,25 @@ ALTER TABLE `lift_users`
     ADD COLUMN IF NOT EXISTS `locked_until` DATETIME NULL DEFAULT NULL
         COMMENT 'Вход запрещён до метки; NULL = не заблокирован. Запись FROM_UNIXTIME, сравнение NOW()'
         AFTER `login_attempts`;
+
+        -- UNIQUE на lift_users.user_login.
+--
+-- Зачем: findIdentityConflict в панели — проверка «прочитал, потом записал»,
+-- от гонки двух параллельных create она не защищает. Без ограничения обе
+-- вставки проходят, а findByLogin ... LIMIT 1 возвращает произвольного из
+-- двух пользователей с одним логином — это неоднозначность аутентификации.
+--
+-- Дубликат ключа отвергается при любом sql_mode, в отличие от обрезки
+-- строк и прижатия чисел: без STRICT это единственный жёсткий барьер.
+--
+-- Коллация CI совпадает с семантикой findByLogin: 'Admin' и 'admin'
+-- для поиска одна запись, значит и ограничение должно считать их одной.
+--
+-- user_email НЕ включаем: у всех 10 записей он пустая строка,
+-- UNIQUE на нём ALTER уронит. Отдельное решение — генерируемая колонка
+-- NULLIF(user_email,'') с UNIQUE, если понадобится.
+--
+-- Таблица 10 строк, ALGORITHM/LOCK не указываем: перестройка мгновенная.
+
+ALTER TABLE lift_users
+    ADD UNIQUE KEY uniq_users_login (user_login);
