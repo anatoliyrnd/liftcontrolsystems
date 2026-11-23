@@ -24,6 +24,7 @@ const LAYERS = [
   "staff",
   "dicts",
   "addresses",
+  "reports_access",
 ];
 
 const LAYER_EVENT = {
@@ -32,6 +33,11 @@ const LAYER_EVENT = {
   staff: "sync:fetch_staff",
   dicts: "sync:fetch_dicts",
   addresses: "sync:fetch_addresses",
+  // Хендлер в main.js (коммит 11): повторный config через
+  // menuManager.initialize() → userStore.setReportsAccess → reports:access.
+  // Событие строкой, как у остальных слоёв: словарь событий слоя живёт
+  // здесь, второй копии в config.js не заводим.
+  reports_access: "sync:fetch_reports_access",
 };
 /**
  * §11.2: сервер генерирует ticket_note, клиент исторически ждёт note_added.
