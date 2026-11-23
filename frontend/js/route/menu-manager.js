@@ -2,7 +2,7 @@ import { staffStore } from "../staff-store.js";
 import { userStore } from "../user-store.js";
 import { dictStore } from "../dict-store.js";
 import { authStore } from "../auth-store.js"; // <-- ДОБАВЛЕНО ДЛЯ FALLBACK
-
+import { REPORTS } from "../config.js";
 /**
  * Класс динамического адаптивного управления навигационным меню SPA.
  */
@@ -78,6 +78,20 @@ export class MenuManager {
       userStore.setRole(perms.role);
       const effectiveUserId = perms.user_id ?? authStore.getUser()?.id ?? null;
       userStore.setUserId(effectiveUserId);
+      // §16: уровень доступа к отчётам применяется ЗДЕСЬ — единственная
+      // точка распаковки config (boot и повторный config поллера идут
+      // через initialize). Вторая точка применения разошлась бы с ролью.
+      //
+      // Событие только при изменении: повторный config по staff/dicts
+      // не должен дёргать перерисовку замков в открытых окнах.
+      const accessChanged = userStore.setReportsAccess(
+        responseData.reports_level,
+        responseData.reports_features,
+        responseData.reports_limits,
+      );
+      if (accessChanged) {
+        window.dispatchEvent(new CustomEvent(REPORTS.ACCESS.APPLIED_EVENT));
+      }
       this.renderMenu(responseData.menu_structure, perms);
       return true;
     } catch (error) {

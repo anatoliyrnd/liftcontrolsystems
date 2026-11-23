@@ -42,6 +42,7 @@ import { reportsPageTemplate } from "./js/route/pages/reports.js";
 import { ReportsController } from "./js/reports-controller.js";
 import { reportsResultsPageTemplate } from "./js/route/pages/reports-results.js";
 import { ReportsResultsController } from "./js/reports-results-controller.js";
+
 const api = new ApiService(API.URL, { local: false });
 const router = new Router(() => authStore.hasAccess());
 
@@ -640,7 +641,38 @@ document.addEventListener("DOMContentLoaded", async () => {
       );
     }
   });
-
+  // §16: слой уровня доступа к отчётам. Копия staff-хендлера: повторный
+  // config применяет уровень через menu-manager (единственная точка),
+  // затем sync:applied маркирует applied-версию слоя в поллере.
+  //
+  // Отдельный слой, а не прицеп к staff/dicts: смена тарифа не должна
+  // тянуть переливку справочников. Поллер диспатчит это событие только
+  // после коммита 10 (ключ в LAYERS/LAYER_EVENT) — до него хендлер спит.
+  //
+  // Работает и в standalone-окне результатов: notifPoller.start() стоит
+  // внутри if (isAuth && user) без standalone-guard, поэтому замки там
+  // обновляются живьём, а не до F5.
+  window.addEventListener("sync:fetch_reports_access", async (e) => {
+    const version = e.detail?.version;
+    try {
+      if (!menuManager) await initAuthorizedApp();
+      const ok = await menuManager.initialize();
+      if (!ok) throw new Error("config not applied");
+      if (version != null) {
+        window.dispatchEvent(
+          new CustomEvent("sync:applied", {
+            detail: { layer: "reports_access", version },
+          }),
+        );
+      }
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("sync:apply_failed", {
+          detail: { layer: "reports_access" },
+        }),
+      );
+    }
+  });
   window.addEventListener("sync:fetch_addresses", async (e) => {
     const version = e.detail?.version;
     try {
