@@ -299,19 +299,22 @@ final class ApiController
         return $this->callService->ticketDetailed($callId, $user);
     }
 
-    private function getNotifications(Request $request): array
+      private function getNotifications(Request $request): array
     {
         $sinceId = (int) ($request->input('since_id') ?? 0);
-
         // Приводим к массиву: клиент может прислать null или строку,
         // а getOutdated типизирован array — иначе TypeError → internal_error.
         $clientVersions = $request->input('versions');
         $clientVersions = is_array($clientVersions) ? $clientVersions : [];
-
         $pollingData = $this->notificationsService->getSince($sinceId);
         $pollingData['versions'] = $this->addressCacheService->getVersions();
+        // §16: ревизия уровня доступа. Tenant уже в памяти после create()
+        // (Registry читается на каждый запрос) — ноль дополнительных
+        // запросов. Ключ отдельный от staff/dicts: смена тарифа не должна
+        // тянуть переливку справочников. В outdated НЕ мерджим: клиент его
+        // не читает (grep: только комментарии), драйвер — versions vs applied.
+        $pollingData['versions']['reports_access'] = $this->tenant?->reportsAccessRev ?? 0;
         $pollingData['outdated'] = $this->addressCacheService->getOutdated($clientVersions);
-
         return $pollingData;
     }
 

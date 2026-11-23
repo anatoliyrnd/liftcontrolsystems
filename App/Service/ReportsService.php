@@ -1,12 +1,12 @@
 <?php
 declare(strict_types=1);
-
 namespace App\Service;
 
 use App\Exceptions\ApiException;
 use App\Http\ErrorCode;
 use App\Repository\ReportsRepository;
 use App\Support\ExportRateLimiter;
+use App\Support\ReportsAccess;
 use App\Tenant;
 
 /**
@@ -17,9 +17,14 @@ use App\Tenant;
  * долга §20 для нового модуля. Иначе инженер или гость получили бы
  * выгрузку всего тенанта через DevTools.
  *
+ * §16: порядок проверок фиксирован и дешёвые раньше дорогих:
+ * роль → булева способность → группы фильтров/адрес-скоуп → даты →
+ * строки → лимитер экспорта. Отказ по уровню не сжигает окно лимитера
+ * и не зависит от мусорных дат.
+ *
  * Невалидные даты → data:null, не исключение: пользователь видит
  * пустой результат, а не ошибку там, где виновата форма.
- * Исключение — только период > 90 дней и лимиты экспорта.
+ * Исключение — только период выше потолка уровня и лимиты строк.
  */
 final class ReportsService
 {
@@ -41,6 +46,74 @@ final class ReportsService
                 ErrorCode::Forbidden,
                 'Отчёты недоступны для этой роли',
                 reason: 'no_rights'
+            );
+        }
+    }
+
+    /** §16: уровень тенанта. Нормализация fail-closed внутри ReportsAccess. */
+    private function level(): string
+    {
+        return ReportsAccess::normalizeLevel($this->tenant?->reportsLevel);
+    }
+
+    private function limits(): array
+    {
+        return ReportsAccess::limits($this->level());
+    }
+
+    /**
+     * §16: гейт булевой способности (сводка, форматы экспорта).
+     * reason верхнего уровня, details плоско (§10.1, прецедент retry_after):
+     * клиент читает resp.feature и рисует замок/тизер по нему.
+     */
+    private function gateFeature(string $feature): void
+    {
+        if (!ReportsAccess::featureAvailable($feature, $this->level())) {
+            throw new ApiException(
+                ErrorCode::Forbidden,
+                'Функция недоступна на текущем уровне доступа к отчётам',
+                reason: 'feature_not_available',
+                details: ['feature' => $feature]
+            );
+        }
+    }
+
+    /**
+     * §16: группы фильтров и адрес-скоуп уровня.
+     *
+     * Отказ ТОЛЬКО явный: дефолты (status=all, staff_id=0, пустые тексты,
+     * city_only=false, пустые списки) проходят молча — клиент light их
+     * просто не рендерит. Молчаливое игнорирование запрещено: оно вернуло
+     * бы выборку шире запрошенной, и пользователь получил бы не то, что просил.
+     */
+    private function assertAccess(array $f): void
+    {
+        $level = $this->level();
+        $used = [
+            ReportsAccess::GROUP_ADDRESS_MULTI => ($f['city_ids'] !== [] || $f['city_only'] === true),
+            ReportsAccess::GROUP_DEPARTMENT => ($f['department_ids'] !== []),
+            ReportsAccess::GROUP_STATUS => ($f['status'] !== 'all'),
+            ReportsAccess::GROUP_STAFF => ($f['staff_id'] > 0),
+            ReportsAccess::GROUP_TEXT => (trim($f['details_text']) !== '' || trim($f['solution_text']) !== ''),
+        ];
+        foreach ($used as $group => $isUsed) {
+            if ($isUsed && !ReportsAccess::groupAvailable($group, $level)) {
+                throw new ApiException(
+                    ErrorCode::Forbidden,
+                    'Фильтр недоступен на текущем уровне доступа к отчётам',
+                    reason: 'feature_not_available',
+                    details: ['feature' => $group]
+                );
+            }
+        }
+
+        // light: отчёт только по конкретному лифту. Дом/город как фильтр
+        // запрещены скоупом; city_only=true уже отсечён группой выше.
+        if ($this->limits()['address_scope'] === 'object_only' && (int) $f['object_id'] <= 0) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Лёгкий уровень: отчёт строится только по конкретному лифту. Выберите лифт в адресе.',
+                reason: 'object_required'
             );
         }
     }
@@ -71,18 +144,22 @@ final class ReportsService
         ];
     }
 
-    /** Порядок проверок фиксирован: сначала «пусто», потом «слишком длинно». */
-    private function validateDates(array $f): bool
+    /**
+     * Порядок проверок фиксирован: сначала «пусто», потом «слишком длинно».
+     * §16: потолок периода — из лимитов уровня (31 у light, 90 у остальных);
+     * reason прежний date_range_too_long, текст динамический.
+     */
+    private function validateDates(array $f, int $maxDays): bool
     {
         $from = (int) $f['date_from'];
         $to = (int) $f['date_to'];
         if ($from <= 0 || $from > $to || $to > strtotime('today 23:59:59')) {
             return false;
         }
-        if ($to - $from > 90 * 86400) {
+        if ($to - $from > $maxDays * 86400) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
-                'Период не может превышать 90 дней',
+                'Период не может превышать ' . $maxDays . ' дней',
                 reason: 'date_range_too_long'
             );
         }
@@ -105,16 +182,19 @@ final class ReportsService
      * семь дней назад.
      *
      * validateDates не нужен: пресет всегда валиден и ≤ 31 дня.
+     *
+     * §16: сводка — способность standard+. У light клиент рисует тизер
+     * без запроса; прямой вызов через DevTools получает 403 здесь.
      */
     public function getSummary(array $user, array $body): array
     {
         $this->gate($user);
+        $this->gateFeature(ReportsAccess::FEATURE_SUMMARY);
         $preset = (string) ($body['period'] ?? 'today');
         if (!in_array($preset, ['today', '2days', 'week', 'month'], true)) {
             $preset = 'today';
         }
         [$from, $to] = $this->periodBounds($preset);
-
         $f = [
             'city_ids' => is_array($body['city_ids'] ?? null) ? $body['city_ids'] : [],
         ];
@@ -149,6 +229,7 @@ final class ReportsService
         return [$from, $to];
     }
 
+    /** §16: справочники открыты всем уровням — словари и так в config.staff_list. */
     public function getFiltersData(array $user): array
     {
         $this->gate($user);
@@ -159,7 +240,8 @@ final class ReportsService
     {
         $this->gate($user);
         $f = $this->filters($body);
-        if (!$this->validateDates($f)) {
+        $this->assertAccess($f);
+        if (!$this->validateDates($f, $this->limits()['max_period_days'])) {
             return null;
         }
         return $this->repo->getStats($f, $user);
@@ -169,14 +251,25 @@ final class ReportsService
     {
         $this->gate($user);
         $f = $this->filters($body);
-        if (!$this->validateDates($f)) {
+        $this->assertAccess($f);
+        if (!$this->validateDates($f, $this->limits()['max_period_days'])) {
             return null;
         }
         $limit = min(200, max(10, (int) ($body['limit'] ?? 50)));
         $page = max(1, (int) ($body['page'] ?? 1));
         $sort = $this->sort($body);
-
         $total = $this->repo->countTotal($f, $user);
+        // §16: потолок списка только у light (100), проверка ДО выборки.
+        // reason переиспользован export_too_many_rows: сообщение «сузьте
+        // период» уже принято приёмкой №40, новый reason ломал бы клиент.
+        $cap = ReportsAccess::listCap($this->level());
+        if ($cap !== null && $total > $cap) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'Слишком много результатов. Сузьте период поиска.',
+                reason: 'export_too_many_rows'
+            );
+        }
         return [
             'items' => $this->repo->getList($f, $user, $limit, ($page - 1) * $limit, $sort),
             'pagination' => [
@@ -204,16 +297,16 @@ final class ReportsService
     private function export(array $user, array $body): ?array
     {
         $this->gate($user);
-         // Карта форматов: allowlist, бакет лимитера и окно — в одном
-        // месте. Новый формат нельзя добавить наполовину: либо строка
-        // целиком, либо unsupported_format. Окно печати короче: запрос
-        // тот же на 2001 строку, но перепечатать после правки фильтра
+        // Карта форматов: allowlist, бакет лимитера, окно и §16-способность
+        // — в одном месте. Новый формат нельзя добавить наполовину: либо
+        // строка целиком, либо unsupported_format. Окно печати короче:
+        // запрос тот же на 2001 строку, но перепечатать после правки фильтра
         // диспетчер должен без получасовой блокировки.
         $format = (string) ($body['format'] ?? '');
         $formats = [
-            'csv'  => ['bucket' => 'csv',   'window' => 30],
-            'json' => ['bucket' => 'print', 'window' => 10],
-            'xlsx' => ['bucket' => 'xlsx',  'window' => 30],
+            'csv'  => ['bucket' => 'csv',   'window' => 30, 'feature' => ReportsAccess::FEATURE_EXPORT_CSV],
+            'json' => ['bucket' => 'print', 'window' => 10, 'feature' => ReportsAccess::FEATURE_EXPORT_PRINT],
+            'xlsx' => ['bucket' => 'xlsx',  'window' => 30, 'feature' => ReportsAccess::FEATURE_EXPORT_XLSX],
         ];
         $fmt = $formats[$format] ?? null;
         if ($fmt === null) {
@@ -223,14 +316,18 @@ final class ReportsService
                 reason: 'unsupported_format'
             );
         }
+        // §16: гейт способности ДО лимитера и до запросов. Иначе standard-
+        // тенант, дёргая XLSX через DevTools, сжигал бы окно бакета отказом.
+        $this->gateFeature($fmt['feature']);
+
         // Валидация дат — чистая арифметика, ни одного запроса. Заряжать
         // за неё окно 30 с незачем: диспетчер с опечаткой в периоде
         // получал блокировку вместо пустого результата.
         $f = $this->filters($body);
-        if (!$this->validateDates($f)) {
+        $this->assertAccess($f);
+        if (!$this->validateDates($f, $this->limits()['max_period_days'])) {
             return null;
         }
-
         // Лимит остаётся ДО запроса: пустая выборка и too_many_rows
         // уже выполнили SELECT с JOIN и filesort. Снять с них лимит —
         // значит открыть неограниченный перебор широких периодов.
@@ -250,27 +347,28 @@ final class ReportsService
                 details: ['retry_after' => $retry]
             );
         }
-
-        // 2001: ровно 2000 валидно, 2001-я строка — признак переполнения.
-        // LIMIT 2000 не отличил бы «ровно 2000» от «больше».
+        // Потолок строк — из лимитов уровня. N+1: ровно N валидно,
+        // N+1-я строка — признак переполнения. LIMIT N не отличил бы
+        // «ровно N» от «больше».
         // Печать ждёт контракт items (mapItem), CSV — сырые строки:
         // ReportsExporter читает имена колонок БД. selectRows() у обоих
         // один, WHERE не меняется — инвариант «экспорт = список» цел.
-         $sort = $this->sort($body);
+        $maxRows = $this->limits()['max_rows'];
+        $sort = $this->sort($body);
         if ($format === 'csv') {
             // CSV читает имена колонок БД — ему нужно сырьё.
-            $rows = $this->repo->getExportRows($f, $user, $sort, 2001);
+            $rows = $this->repo->getExportRows($f, $user, $sort, $maxRows + 1);
         } else {
             // Печать — контракт items; XLSX — items плюс заметки.
             $rows = $this->repo->getExportRowsMapped(
                 $f,
                 $user,
                 $sort,
-                2001,
+                $maxRows + 1,
                 $format === 'xlsx'
             );
         }
-        if (count($rows) > 2000) {
+        if (count($rows) > $maxRows) {
             throw new ApiException(
                 ErrorCode::InvalidInput,
                 'Слишком много результатов. Сузьте период поиска.',
@@ -280,7 +378,6 @@ final class ReportsService
         if ($rows === []) {
             return null;
         }
-
         // Печать: строки уходят клиенту, документ собирает браузер через
         // createElement + textContent. HTML с сервера не отдаём — это
         // данные, а не статический шаблон (правило 1).
@@ -290,7 +387,6 @@ final class ReportsService
                 'rows_count' => count($rows),
             ];
         }
-
         if ($format === 'xlsx') {
             $xlsx = (new ReportsXlsxExporter())->renderXlsx($rows);
             return [
@@ -300,7 +396,6 @@ final class ReportsService
                 'rows_count' => count($rows),
             ];
         }
-
         $csv = (new ReportsExporter())->renderCsv($rows);
         return [
             'file_base64' => base64_encode($csv),

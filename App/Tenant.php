@@ -5,6 +5,7 @@ namespace App;
 use App\Exceptions\ApiException;
 use App\Http\ErrorCode;
 use App\Support\Logger;
+use App\Support\ReportsAccess;
 
 final readonly class Tenant
 {
@@ -19,6 +20,7 @@ final readonly class Tenant
      * bootstrap/config, а не правкой проверок ниже.
      */
     private const string BASE_DOMAIN = 'liftcs.ru';
+
     public function __construct(
         public string $id,
         public string $orgName,
@@ -27,7 +29,12 @@ final readonly class Tenant
         public string $dbName,
         public string $dbUser,
         public string $dbPassword,
-        public bool $legacyCompat = true
+        public bool $legacyCompat = true,
+        // §16: уровень доступа к отчётам и его ревизия. Дефолты в конструкторе
+        // сохраняют легаси-вызовы (тесты/CLI) на прежнем поведении standard;
+        // боевой путь fromRequest() всегда передаёт нормализованные значения.
+        public string $reportsLevel = ReportsAccess::STANDARD,
+        public int $reportsAccessRev = 1
     ) {
     }
 
@@ -112,7 +119,13 @@ final readonly class Tenant
             $data['db_name'],
             $data['db_user'],
             \App\Support\Crypto::decrypt($data['db_password']),
-            (bool) ($data['legacy_compat'] ?? true)
+            (bool) ($data['legacy_compat'] ?? true),
+            // §16: нормализация здесь, а не в сервисах: один источник
+            // истины на весь запрос. Registry отдаёт SELECT *, колонка
+            // доезжает без правки SQL. NULL (код раньше миграции) →
+            // fail-closed light + warning, см. ReportsAccess::normalizeLevel.
+            ReportsAccess::normalizeLevel($data['reports_level'] ?? null),
+            max(1, (int) ($data['reports_access_rev'] ?? 1))
         );
     }
 }
