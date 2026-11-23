@@ -11,9 +11,11 @@ namespace Company\Admin\Repositories\Contracts;
  * другая ответственность. Шов под Трек Б тем же приёмом: реализация
  * меняется одной строкой биндинга в Bootstrap.
  *
- * Отзыв — DELETE, а не пометка: revoked_at нет ни в одной из таблиц
- * (SHOW COLUMNS подтверждён), и Трек А делает так же
- * (App/Repository/UserRepository.php:261, 327, 344).
+ * Отзыв делегирован владельцу — App\Repository\UserRepository:
+ * revokeOtherRefreshFamilies($id, null) и deleteAccessTokensByUser($id).
+ * Свои DELETE не пишем: docblock владельца прямо называет две копии
+ * с разным WHERE тем дефектом, который расходится при первой правке.
+ * Третья копия была бы хуже двух.
  *
  * Легаси api_token / user_token в lift_users НЕ трогаем — решение
  * владельца: легаси-клиенты вне охвата панели.
@@ -23,14 +25,15 @@ interface TokenRepositoryInterface
     /**
      * Гасит все сессии пользователя на всех устройствах.
      *
-     * Порядок обязателен: сначала refresh, потом access. Наоборот —
-     * клиент обновит access по ещё живому refresh в окне между двумя
-     * DELETE и переживёт отзыв.
+     * void, а не счётчики: методы владельца возвращают void, а считать
+     * строки отдельными SELECT ради сообщения в UI — лишние запросы
+     * и гонка. Аудит пишет кто/кому/что, число строк ему не нужно.
      *
-     * Число удалённых строк нужно аудиту и UI: «активных сессий не было»
-     * и «завершено 5 сессий» — разные сообщения.
-     *
-     * @return array{refresh: int, access: int}
+     * Реализация обязана сохранить два инварианта:
+     *   1. refresh гасится ПЕРЕД access — наоборот клиент обновит
+     *      access по ещё живому refresh и переживёт отзыв;
+     *   2. оба удаления в одной транзакции — методы владельца
+     *      транзакцию не открывают, каждый делает один DELETE.
      */
-    public function revokeAllForUser(int $userId): array;
+    public function revokeAllForUser(int $userId): void;
 }
