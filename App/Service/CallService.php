@@ -1,6 +1,5 @@
 <?php
 declare(strict_types=1);
-
 namespace App\Service;
 
 use App\Repository\{CallRepository, NoteRepository, HistoryRepository};
@@ -50,7 +49,7 @@ class CallService
      *
      * @param string $source 'online' | 'offline_sync'
      */
-     public function callnew(array $user, array $data, string $source = 'online'): array
+    public function callnew(array $user, array $data, string $source = 'online'): array
     {
         // Право проверяем до валидации и до поиска дублей: отказ не должен
         // зависеть от содержимого заявки и не должен стоить запросов в БД.
@@ -59,6 +58,7 @@ class CallService
         // (справочник type 3), а НЕ группа лифтов. Группа появится из
         // адресного слоя вместе с группами лифтов (точка C в CallPolicy).
         $this->assertAllowed(CallPolicy::canCreate($user));
+
         $isOffline = ($source === 'offline_sync');
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
@@ -80,10 +80,9 @@ class CallService
                 reason: 'details_too_short'
             );
         }
-
         $comments = trim((string) ($data['comments'] ?? ''));
-        $repairTime = isset($data['repair_time']) ? (int) $data['repair_time'] : 0;
 
+        $repairTime = isset($data['repair_time']) ? (int) $data['repair_time'] : 0;
         // B2.2: офлайн срок не задаётся — валидация к нему не применяется.
         if (!$isOffline && $repairTime > 0 && $repairTime < time()) {
             throw new ApiException(
@@ -97,9 +96,20 @@ class CallService
 
         // Идемпотентность по offline_uuid: повтор после обрыва связи не
         // должен создавать вторую заявку.
-        $offlineUuid = $data['offline_uuid'] ?? null;
-        if ($isOffline && $offlineUuid) {
-            $existing = $this->callRepo->findByOfflineUuid((string) $offlineUuid);
+        //
+        // Нормализация ДО поиска и ДО записи, одной точкой на оба:
+        // offline_uuid varchar(64) UNIQUE допускает сколько угодно NULL,
+        // но пустая строка — обычное значение и может существовать лишь
+        // в одном экземпляре. Без нормализации вторая заявка с
+        // offline_uuid:"" упиралась в Duplicate entry и не создавалась,
+        // а идемпотентность не спасала: поиск стоит под условием truthy,
+        // и '' проходит мимо него прямо в INSERT.
+        //
+        // Пробелы опаснее пустоты: '   ' truthy, поиск нашёл бы чужую
+        // строку с пробелами и вернул чужой call_id как «уже создана».
+        $offlineUuid = $this->normalizeOfflineUuid($data['offline_uuid'] ?? null);
+        if ($isOffline && $offlineUuid !== null) {
+            $existing = $this->callRepo->findByOfflineUuid($offlineUuid);
             if ($existing) {
                 // B2.8: без префикса 'ignored:' в тексте. Статус результата
                 // остаётся success — смена на ignored отнесена в P3 (§14),
@@ -123,7 +133,6 @@ class CallService
         // Дубликаты (§5, правило «объект + отдел»). Список снимается ОДИН раз
         // и ДО создания: нужен и для отказа, и для аудита force_create.
         $activeDuplicates = $this->callRepo->findActiveDuplicates($addr['lift'], $depId);
-
         if (!$forceCreate && !empty($activeDuplicates)) {
             $errorData = [];
             foreach ($activeDuplicates as $dup) {
@@ -133,7 +142,6 @@ class CallService
                     'date'      => (int) $dup['call_date'],
                 ];
             }
-
             // 8.10 / B2.8: конкретика в reason, список в details.
             // ApiController кладёт existing_tickets плоско в результат,
             // как ждёт клиент (§10.1). Префикс в message больше не нужен.
@@ -150,7 +158,6 @@ class CallService
         $correctionNotes = [];
         $hasDateCorrection = false;
         $originalDateStr = '';
-
         if ($isOffline && $openedAt > ($now + 86400)) {
             $originalDateStr = date('d.m.Y H:i', $openedAt);
             $openedAt = $now;
@@ -165,7 +172,6 @@ class CallService
         $closeName = $data['closed_by_name'] ?? $authorName;
         $hasSolutionCorrection = false;
         $hasClosedAtCorrection = false;
-
         if ($solution !== '') {
             if (mb_strlen($solution) < 6) {
                 throw new ApiException(
@@ -175,7 +181,6 @@ class CallService
                 );
             }
             $callStatus = 1;
-
             if ($closedAt === null) {
                 $closedAt = $now;
                 $hasSolutionCorrection = true;
@@ -198,7 +203,7 @@ class CallService
             if ($comments !== '') {
                 $comments .= "\n" . $block;
             } else {
-                $details .= "\n\n" . $block;
+                $details .= "\n" . $block;
             }
         }
 
@@ -225,6 +230,15 @@ class CallService
             'address_home'           => $addr['home'],
             'address_lift'           => $addr['lift'],
             'call_adres'             => $addr['full_address'],
+            // Группа лифта — СНИМОК на момент создания (комментарий
+            // колонки elevator_group_id). Если лифт позже переведут в
+            // другую группу, историческая заявка обязана остаться в
+            // прежней: иначе отчёт «по группам» задним числом переедет.
+            // Источник — lift_object.group_id через validateAddress,
+            // значение уже int и имеет DEFAULT 1 для легаси-строк.
+            // Бэкфилл из ТЕКУЩЕЙ группы заполнил бы историю неверно,
+            // поэтому пишем только здесь и только сейчас.
+            'elevator_group_id'      => $addr['group_id'],
             'call_department'        => $depId,
             'call_request'           => $reqId,
             'call_group'             => $groupId,
@@ -280,7 +294,6 @@ class CallService
                 $source
             );
         }
-
         $this->historyRepo->add(
             $callId,
             $isOffline
@@ -289,7 +302,6 @@ class CallService
             $authorId,
             $source
         );
-
         if (!$addr['vis']) {
             $this->historyRepo->add(
                 $callId,
@@ -373,21 +385,20 @@ class CallService
         if (!$callId) {
             throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен', reason: 'call_id_required');
         }
-
         $call = $this->callRepo->findById($callId);
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
-               // Право проверяем после загрузки заявки и ДО проверки закрытости:
+        // Право проверяем после загрузки заявки и ДО проверки закрытости:
         // $call уже есть и уезжает в политику как контекст — когда появится
         // назначенность (точка C), вызов менять не придётся. Состояние
         // заявки не должно опережать права: иначе пользователь без прав
         // узнаёт, закрыта ли чужая заявка.
         $this->assertAllowed(CallPolicy::canEdit($user, $call));
-
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
+
         $isOffline = ($source === 'offline_sync');
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
@@ -395,16 +406,15 @@ class CallService
         $fields = [];
         $newDetails = trim((string) ($data['description_delta'] ?? $data['details'] ?? ''));
         $currentDetails = (string) ($call['call_details'] ?? '');
-
         if ($newDetails !== '') {
             if ($isOffline) {
                 $fields['call_details'] = $currentDetails
-                    . "\n\n[Оффлайн {$authorName} " . date('d.m.Y H:i') . "]:\n"
+                    . "\n[Оффлайн {$authorName} " . date('d.m.Y H:i') . "]:\n"
                     . $newDetails;
             } else {
                 $fields['call_details'] = $currentDetails === ''
                     ? $newDetails
-                    : $currentDetails . "\n\n" . $newDetails;
+                    : $currentDetails . "\n" . $newDetails;
             }
         }
 
@@ -440,7 +450,6 @@ class CallService
         if (array_key_exists('staff_id', $data) && $canUpdate('call_staff')) {
             $fields['call_staff'] = (int) $data['staff_id'];
         }
-
         if (array_key_exists('notify_status', $data) && $canUpdate('call_staff_status')) {
             $fields['call_staff_status'] = (int) $data['notify_status'];
             $fields['call_staff_date'] = $fields['call_staff_status'] !== 0 ? time() : 0;
@@ -452,7 +461,6 @@ class CallService
             $colStaff  = "call_staff{$i}";
             $colStatus = "call_staff_status{$i}";
             $colDate   = "call_staff_date{$i}";
-
             if (array_key_exists("staff_id{$i}", $data) && $canUpdate($colStaff)) {
                 $fields[$colStaff] = (int) $data["staff_id{$i}"];
             }
@@ -473,10 +481,8 @@ class CallService
         if (!empty($fields)) {
             $this->callRepo->updateFields($callId, $fields);
             $this->historyRepo->add($callId, "Отредактирована пользователем {$authorName}", $authorId, $source);
-
             // B2.4: правка меняет только открытый слой.
             $this->invalidateAfterWrite($source, true, false);
-
             // Событие шлём ТОЛЬКО при фактических изменениях. Раньше вызов
             // стоял после if — пустое редактирование спамило тостами и
             // Telegram остальным пользователям.
@@ -510,17 +516,18 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
-         // Право до проверки закрытости — причина та же, что в calledit.
+        // Право до проверки закрытости — причина та же, что в calledit.
         // Именно здесь была дыра: online-экшен приходит в сервис минуя
         // checkCommandPermissions, и guest закрывал чужую заявку.
         $this->assertAllowed(CallPolicy::canClose($user, $call));
-
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
+
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
         $closedAt = isset($data['closed_at']) ? (int) $data['closed_at'] : time();
+
         // Слепок сохраняем ДО удаления заметок.
         $notes = $this->noteRepo->listByCall($callId);
         if (!empty($notes)) {
@@ -548,7 +555,6 @@ class CallService
 
         // B2.4: заявка уходит из открытых в закрытые — меняются оба слоя.
         $this->invalidateAfterWrite($source, true, true);
-
         $this->notificationsService->ticketClosed($callId, $solution, $authorName, $authorId);
 
         return ['message' => "Заявка №{$callId} успешно закрыта."];
@@ -561,7 +567,6 @@ class CallService
     {
         $callId = (int) ($data['call_id'] ?? 0);
         $note = trim((string) ($data['text'] ?? $data['note'] ?? ''));
-
         if (!$callId) {
             throw new ApiException(ErrorCode::InvalidInput, 'call_id обязателен', reason: 'call_id_required');
         }
@@ -577,7 +582,7 @@ class CallService
         if (!$call) {
             throw new ApiException(ErrorCode::NotFound, 'Заявка не найдена', reason: 'ticket_not_found');
         }
-                // Право до проверки закрытости — причина та же, что в calledit.
+        // Право до проверки закрытости — причина та же, что в calledit.
         // Именно здесь была дыра: online-экшен приходит в сервис минуя
         // checkCommandPermissions, и guest комментировал чужую заявку.
         //
@@ -591,9 +596,11 @@ class CallService
         if ((int) $call['call_status'] === 1) {
             throw new ApiException(ErrorCode::Closed, 'Заявка уже закрыта', reason: 'ticket_already_closed');
         }
+
         $authorName = $data['offline_author_name'] ?? $user['name'];
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
-                // Время заметки — время устройства: офлайн-комментарий мог быть
+
+        // Время заметки — время устройства: офлайн-комментарий мог быть
         // написан час назад. updateOfflineFlag пишет не только is_offline,
         // но и note_post_date, поэтому серверная метка исказила бы историю.
         //
@@ -612,13 +619,59 @@ class CallService
 
         // B2.4: комментарий меняет только открытый слой.
         $this->invalidateAfterWrite($source, true, false);
-
         $this->notificationsService->ticketNote($callId, $authorName, $authorId);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
     }
 
-     /**
+    /**
+     * Нормализация offline_uuid: единственная точка на поиск и запись.
+     *
+     * null = идентификатора нет (онлайн-заявка, пустое поле, не-строка):
+     * UNIQUE допускает любое число NULL, поэтому онлайн-поток и СПульт
+     * коллизию не дают вовсе.
+     *
+     * Пустая строка и пробелы приводятся к null осознанно: как ЗНАЧЕНИЕ
+     * пустая строка могла бы лежать в колонке лишь в одном экземпляре —
+     * вторая заявка с "" упиралась в Duplicate entry и не создавалась.
+     * '   ' ещё хуже: truthy, поиск нашёл бы чужую строку с пробелами и
+     * вернул чужой call_id под видом «уже создана ранее».
+     *
+     * Длина ограничена шириной колонки ОТКАЗОМ, а не обрезкой: varchar(64)
+     * при sql_mode без STRICT обрезал бы значение молча, и два разных
+     * UUID с общим 64-символьным префиксом стали бы одним — идемпотентность
+     * вернула бы чужой call_id. Это подмена данных, а не потеря, поэтому
+     * здесь исключение, а не терпимость.
+     *
+     * Алфавит не ограничиваем: идентификатор генерирует клиент (offlineDB),
+     * его формат нам неизвестен, в отображение поле не попадает. Отказ по
+     * длине — единственный случай, когда мы вправе значение не принять.
+     *
+     * @return string|null нормализованный идентификатор или null
+     */
+    private function normalizeOfflineUuid(mixed $raw): ?string
+    {
+        if (!is_string($raw)) {
+            return null;
+        }
+
+        $s = trim($raw);
+        if ($s === '') {
+            return null;
+        }
+
+        if (mb_strlen($s, 'UTF-8') > 64) {
+            throw new ApiException(
+                ErrorCode::InvalidInput,
+                'offline_uuid длиннее 64 символов',
+                reason: 'offline_uuid_too_long'
+            );
+        }
+
+        return $s;
+    }
+
+    /**
      * Отказ в правах — одна форма на все четыре метода.
      *
      * Решение принимает CallPolicy, здесь только исключение: четыре копии
@@ -689,7 +742,7 @@ class CallService
             // справочника, где маркер уже был, получалось «д.д. 20/1».
             // Address нормализует защитно — даже если кто-то руками
             // впишет «д.20/1» в справочник, двойного маркера не будет.
-             'full_address' => Address::formatDisplay(
+            'full_address' => Address::formatDisplay(
                 (string) $address['city_name'],
                 (string) $address['street_name'],
                 (string) $address['home_name'],
