@@ -18,10 +18,24 @@ $ts = static function (mixed $value) use ($e): string {
     $unix = (int) $value;
     return $unix > 0 ? $e(date('d.m.Y H:i', $unix)) : '—';
 };
+
+$selfId = (int) ($user['user_id'] ?? 0);
+$csrf = $e(Csrf::token());
 ?>
-<div class="d-flex align-items-center mb-3">
+<div class="d-flex align-items-center flex-wrap gap-2 mb-3">
     <h1 class="h3 mb-0"><?= $e($title ?? 'Пользователи') ?></h1>
-    <a class="btn btn-primary ms-auto" href="?page=users&amp;action=create">Создать</a>
+    <div class="ms-auto d-flex gap-2">
+        <form method="post" action="?page=users&amp;action=reloadall"
+              onsubmit="return confirm('Назначить принудительную перезагрузку ВСЕМ пользователям тенанта?')">
+            <input type="hidden" name="_csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="confirm" value="all">
+            <button type="submit" class="btn btn-outline-warning"
+                    title="SPA пока не читает флаг — эффект появится после доработки фронта">
+                Перезагрузка всем
+            </button>
+        </form>
+        <a class="btn btn-primary" href="?page=users&amp;action=create">Создать</a>
+    </div>
 </div>
 
 <div class="card">
@@ -50,6 +64,7 @@ $ts = static function (mixed $value) use ($e): string {
                 $blocked = (int) $row['user_block'] === 1;
                 $rawPosition = (string) ($row['user_position'] ?? '');
                 $position = Position::tryFrom($rawPosition);
+                $login = $e($row['user_login']);
                 ?>
                 <tr>
                     <td>
@@ -58,7 +73,7 @@ $ts = static function (mixed $value) use ($e): string {
                             <span class="badge text-bg-secondary ms-1">скрыт</span>
                         <?php endif; ?>
                     </td>
-                    <td><code><?= $e($row['user_login']) ?></code></td>
+                    <td><code><?= $login ?></code></td>
                     <td>
                         <?php if ($position !== null): ?>
                             <?= $e($position->label()) ?>
@@ -90,23 +105,46 @@ $ts = static function (mixed $value) use ($e): string {
                     </td>
                     <td><small><?= $ts($row['user_date']) ?></small></td>
                     <td><small><?= $ts($row['last_login']) ?></small></td>
-                    <td class="text-end text-nowrap">
-                        <a class="btn btn-sm btn-outline-secondary"
-                           href="?page=users&amp;action=edit&amp;id=<?= $id ?>">Редактировать</a>
-                        <?php if ($id !== (int) ($user['user_id'] ?? 0)): ?>
-                            <form method="post" action="?page=users&amp;action=block" class="d-inline">
-                                <input type="hidden" name="_csrf" value="<?= $e(Csrf::token()) ?>">
+                    <td class="text-end">
+                        <div class="d-inline-flex flex-wrap gap-1 justify-content-end">
+                            <a class="btn btn-sm btn-outline-secondary"
+                               href="?page=users&amp;action=edit&amp;id=<?= $id ?>">Изменить</a>
+
+                            <?php if ($id !== $selfId): ?>
+                                <form method="post" action="?page=users&amp;action=block"
+                                      onsubmit="return confirm('<?= $blocked ? 'Разблокировать' : 'Заблокировать' ?> <?= $login ?>?')">
+                                    <input type="hidden" name="_csrf" value="<?= $csrf ?>">
+                                    <input type="hidden" name="id" value="<?= $id ?>">
+                                    <input type="hidden" name="blocked" value="<?= $blocked ? 0 : 1 ?>">
+                                    <button type="submit"
+                                            class="btn btn-sm <?= $blocked ? 'btn-outline-success' : 'btn-outline-danger' ?>">
+                                        <?= $blocked ? 'Разблок.' : 'Блок.' ?>
+                                    </button>
+                                </form>
+                            <?php else: ?>
+                                <span class="text-muted small align-self-center">это вы</span>
+                            <?php endif; ?>
+
+                            <form method="post" action="?page=users&amp;action=revoke"
+                                  onsubmit="return confirm('Завершить все сессии <?= $login ?> в SPA? Вход в панель не затрагивается.')">
+                                <input type="hidden" name="_csrf" value="<?= $csrf ?>">
                                 <input type="hidden" name="id" value="<?= $id ?>">
-                                <input type="hidden" name="blocked" value="<?= $blocked ? 0 : 1 ?>">
-                                <button type="submit"
-                                        class="btn btn-sm <?= $blocked ? 'btn-outline-success' : 'btn-outline-danger' ?>"
-                                        onclick="return confirm('<?= $blocked ? 'Разблокировать' : 'Заблокировать' ?> пользователя?')">
-                                    <?= $blocked ? 'Разблокировать' : 'Блокировать' ?>
+                                <button type="submit" class="btn btn-sm btn-outline-dark"
+                                        title="Сбросить авторизацию на всех устройствах (токены SPA)">
+                                    Сессии
                                 </button>
                             </form>
-                        <?php else: ?>
-                            <span class="text-muted small ms-2">это вы</span>
-                        <?php endif; ?>
+
+                            <form method="post" action="?page=users&amp;action=reload"
+                                  onsubmit="return confirm('Назначить перезагрузку клиенту <?= $login ?>?')">
+                                <input type="hidden" name="_csrf" value="<?= $csrf ?>">
+                                <input type="hidden" name="id" value="<?= $id ?>">
+                                <button type="submit" class="btn btn-sm btn-outline-warning"
+                                        title="force_reload = 1. SPA пока не читает флаг — эффект после доработки фронта">
+                                    Reload
+                                </button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
             <?php endforeach; ?>
@@ -117,5 +155,7 @@ $ts = static function (mixed $value) use ($e): string {
 
 <p class="text-muted small mt-3 mb-0">
     Удаление не предусмотрено: блокировка сохраняет историю и связи пользователя.
-    Роль назначается автоматически из должности.
+    Роль назначается автоматически из должности. «Сессии» гасит токены SPA,
+    вход в эту панель не затрагивает. «Reload» и «Перезагрузка всем» выставляют
+    флаг, который SPA начнёт читать после доработки фронта.
 </p>
