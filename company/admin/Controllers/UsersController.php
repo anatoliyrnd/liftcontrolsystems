@@ -234,18 +234,31 @@ final class UsersController extends BaseController
 
         $this->users->setBlocked($id, $blocked);
 
-        // Разблокировка снимает и rate-limit: иначе человек выйдет из
-        // административного блока прямо в блокировку по попыткам.
-        if (!$blocked) {
+        if ($blocked) {
+            // Блокировка обязана гасить сессии на сервере, а не ждать
+            // клиента: user_block проверяется только в login() и validate()
+            // (AuthService:59, :93). validate — cooperative, вор может его
+            // не звать. Ротация refresh флаг не читает вовсе и выдаёт
+            // преемнику новые 30 дней — цепочка продлевается бесконечно.
+            $this->tokens->revokeAllForUser($id);
+        } else {
+            // Разблокировка снимает и rate-limit: иначе человек выйдет из
+            // административного блока прямо в блокировку по попыткам.
             $this->users->resetLoginState($id);
         }
 
         $this->audit->log('user.block', [
-            'user_id' => $id,
-            'blocked' => $blocked ? 1 : 0,
+            'user_id'  => $id,
+            'blocked'  => $blocked ? 1 : 0,
+            'sessions' => $blocked ? 'revoked' : 'untouched',
         ]);
 
-        Flash::set('success', $blocked ? 'Пользователь заблокирован' : 'Пользователь разблокирован');
+        Flash::set(
+            'success',
+            $blocked
+                ? 'Пользователь заблокирован, все его сессии завершены'
+                : 'Пользователь разблокирован'
+        );
         $this->redirect('?page=users');
     }
 
