@@ -6,6 +6,7 @@ namespace Company\Admin\Controllers;
 
 use App\Repository\UserRepository;
 use App\Support\Password;
+use Company\Admin\Repositories\Contracts\TokenRepositoryInterface;
 use Company\Admin\Repositories\Contracts\UserRepositoryInterface;
 use Company\Admin\Services\AuditService;
 use Company\Admin\Services\SessionAuth;
@@ -54,13 +55,14 @@ final class UsersController extends BaseController
         'user_patronymic' => 100,
         'user_phone' => 39,
         'user_address' => 200,
-    ];св
+    ];
 
     public function __construct(
         View $view,
         SessionAuth $auth,
         AuditService $audit,
-        private readonly UserRepositoryInterface $users
+        private readonly UserRepositoryInterface $users,
+        private readonly TokenRepositoryInterface $tokens
     ) {
         parent::__construct($view, $auth, $audit);
     }
@@ -233,6 +235,102 @@ final class UsersController extends BaseController
     }
 
     /**
+     * Сброс авторизации на всех устройствах: гасим refresh и access SPA.
+     *
+     * Сессия самой панели отдельная (LIFTCS_ADMIN, PHP-session), токены
+     * SPA её не касаются — админ может погасить свои же SPA-сессии и
+     * остаться в панели. Поэтому self-guard здесь не нужен.
+     *
+     * Легаси api_token / user_token вне охвата по решению владельца.
+     */
+    public function revoke(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            $this->redirect('?page=users');
+        }
+
+        $id = (int) ($_POST['id'] ?? 0);
+        $user = $this->users->findById($id);
+
+        if ($user === null) {
+            http_response_code(404);
+            echo 'Пользователь не найден';
+            return;
+        }
+
+        // Возврат не используем намеренно: форма результата зависит от
+        // нерешённой развилки «делегируем отзыв владельцу или свои DELETE».
+        // Аудит фиксирует кто/кому/что, число строк ему не нужно.
+        $this->tokens->revokeAllForUser($id);
+
+        $this->audit->log('user.revoke_sessions', [
+            'user_id' => $id,
+            'login'   => (string) $user['user_login'],
+        ]);
+
+        Flash::set('success', 'Сессии завершены на всех устройствах');
+        $this->redirect('?page=users');
+    }
+
+    /**
+     * Принудительная перезагрузка клиента одного пользователя.
+     *
+     * SPA флаг пока не читает — чтение и сброс в 0 записаны в техдолг.
+     * Сообщение говорит об этом прямо, иначе админ ищет несуществующий дефект.
+     */
+    public function reload(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            $this->redirect('?page=users');
+        }
+
+        $id = (int) ($_POST['id'] ?? 0);
+        $user = $this->users->findById($id);
+
+        if ($user === null) {
+            http_response_code(404);
+            echo 'Пользователь не найден';
+            return;
+        }
+
+        $this->users->setForceReload($id);
+
+        $this->audit->log('user.force_reload', [
+            'user_id' => $id,
+            'login'   => (string) $user['user_login'],
+        ]);
+
+        Flash::set('success', 'Флаг перезагрузки выставлен. SPA применит его после доработки фронта');
+        $this->redirect('?page=users');
+    }
+
+    /**
+     * Массовая перезагрузка: force_reload = 1 у всех записей тенанта.
+     *
+     * Маркер confirm=all — защита от случайной отправки формы, не граница
+     * безопасности: её держат CSRF и авторизация. Без маркера отказ.
+     */
+    public function reloadAll(): void
+    {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            $this->redirect('?page=users');
+        }
+
+        if (($_POST['confirm'] ?? '') !== 'all') {
+            Flash::set('danger', 'Массовая перезагрузка не подтверждена');
+            $this->redirect('?page=users');
+        }
+
+        $count = $this->users->setForceReloadAll();
+
+        $this->audit->log('user.force_reload_all', ['affected' => $count]);
+
+        // changed, не found: у кого флаг уже был 1, в число не попал.
+        Flash::set('success', 'Флаг выставлен у ' . $count . ' записей, у остальных он уже был');
+        $this->redirect('?page=users');
+    }
+
+    /**
      * Сбор и валидация полей. Роль выводится из должности, не приходит из формы.
      *
      * @return array{0: array<string, mixed>, 1: array<string, string>}
@@ -256,6 +354,8 @@ final class UsersController extends BaseController
             'user_email'      => $read('user_email'),
             'user_surname'    => $ucFirst($read('user_surname')),
             'user_firstname'  => $ucFirst($read('user_firstname')),
+            // NULL, не '': updateProfile и get_user_settings отдают null,
+            // два разных «пусто» в колонке разошлись бы при чтении.
             'user_patronymic' => $ucFirst($read('user_patronymic')) ?: null,
             'user_address'    => $read('user_address'),
         ];
@@ -321,6 +421,7 @@ final class UsersController extends BaseController
             $fields['user_firstname'],
             $fields['user_patronymic']
         );
+
         $position = Position::tryFrom($read('user_position'));
         if ($position === null) {
             $errors['user_position'] = 'Выберите должность из списка';
