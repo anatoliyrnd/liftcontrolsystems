@@ -49,77 +49,70 @@ export const userStore = {
    * Роли, которым разрешено базовое редактирование заявки.
    * Используется как быстрый фильтр в can().
    */
-  ROLES_EDIT: ["administrator", "dispatcher"],
+    ROLES_EDIT: ['administrator', 'dispatcher'],
 
-  /**
-   * Установить ID текущего пользователя (из user_permissions.user_id).
-   */
-  setUserId(id) {
-    this.userId = id != null ? Number(id) : null;
-  },
-  setRole(newRole) {
-    this.role = this.ROLES.includes(newRole) ? newRole : "guest";
-  },
+    // §16: уровень доступа к отчётам — свойство тенанта, приезжает из config.
+    // null = поля reports_* не пришли (сервер без §16): тогда гейтов нет,
+    // UI совпадает с поведением старого сервера. Серверный fail-closed —
+    // другой слой, противоречия нет.
+    reportsLevel: null,
+    reportsFeatures: null,
+    reportsLimits: null,
+    /** Сигнатура для события reports:access — см. setReportsAccess. */
+    _reportsAccessSig: '',
 
-  /**
-   * §16: применить блок доступа из config. Возвращает true, если
-   * что-то изменилось — menu-manager диспатчит reports:access только
-   * при изменении, иначе повторный config по staff/dicts дёргал бы
-   * перерисовку замков на каждом полле.
-   *
-   * Неизвестный уровень → null (без замков): сервер нормализует сам,
-   * мусор сюда не доходит; клиент не выводит уровень заново.
-   */
-  setReportsAccess(level, features, limits) {
-    const known = REPORTS.ACCESS.LEVELS;
-    const nextLevel =
-      typeof level === "string" &&
-      Object.prototype.hasOwnProperty.call(known, level)
-        ? level
-        : null;
-    const nextFeatures = Array.isArray(features) ? features.map(String) : null;
-    const nextLimits =
-      limits && typeof limits === "object" ? { ...limits } : null;
+    /**
+     * Установить ID текущего пользователя (из user_permissions.user_id).
+     */
+    setUserId(id) {
+        this.userId = (id != null) ? Number(id) : null;
+    },
+    setRole(newRole) {
+        this.role = (this.ROLES.includes(newRole)) ? newRole : 'guest';
+    },
 
-    const sig = (l, f, m) => JSON.stringify([l, f, m]);
-    const changed =
-      sig(this.reportsLevel, this.reportsFeatures, this.reportsLimits) !==
-      sig(nextLevel, nextFeatures, nextLimits);
+    /**
+     * §16: применение уровня из config. Возвращает true при реальном
+     * изменении: initialize() зовётся и по bump staff/dicts, безусловное
+     * событие reports:access пересобирало бы filtersView и теряло
+     * введённые фильтры.
+     */
+    setReportsAccess(level, features, limits) {
+        const nextLevel = (typeof level === 'string' && level) ? level : null;
+        const nextFeatures = Array.isArray(features) ? features.map(String) : null;
+        const nextLimits = (limits && typeof limits === 'object') ? limits : null;
+        const sig = JSON.stringify([nextLevel, nextFeatures, nextLimits]);
+        const changed = sig !== this._reportsAccessSig;
+        this._reportsAccessSig = sig;
+        this.reportsLevel = nextLevel;
+        this.reportsFeatures = nextFeatures;
+        this.reportsLimits = nextLimits;
+        return changed;
+    },
 
-    this.reportsLevel = nextLevel;
-    this.reportsFeatures = nextFeatures;
-    this.reportsLimits = nextLimits;
-    return changed;
-  },
+    /** Булева способность: summary, export_csv, export_print, export_xlsx. */
+    hasReportFeature(key) {
+        if (this.reportsFeatures === null) return true;
+        return this.reportsFeatures.includes(key);
+    },
 
-  /** §16: булева способность (сводка, форматы экспорта). */
-  hasReportFeature(name) {
-    if (this.reportsFeatures === null) return true;
-    return this.reportsFeatures.includes(String(name));
-  },
+    /** Группа фильтров payload: date, address, department, status, staff, text… */
+    reportGroupAllowed(group) {
+        const groups = this.reportsLimits?.filter_groups;
+        if (!Array.isArray(groups)) return true;
+        return groups.includes(group);
+    },
 
-  /** §16: группа фильтров payload (date/address/department/status/…). */
-  reportGroupAllowed(group) {
-    const groups = this.reportsLimits?.filter_groups;
-    if (!Array.isArray(groups)) return true;
-    return groups.includes(String(group));
-  },
+    /** Числовой потолок уровня; fallback — константа config.js (правило 8). */
+    reportLimit(key, fallback) {
+        const v = Number(this.reportsLimits?.[key]);
+        return Number.isFinite(v) && v > 0 ? v : fallback;
+    },
 
-  /**
-   * §16: числовой лимит уровня с фолбэком на константу config.js.
-   * Фолбэк — прежнее поведение standard (90 дней / 2000 строк):
-   * сервер без reports_limits не должен сужать форму.
-   */
-  reportLimit(key, fallback) {
-    const raw = this.reportsLimits?.[key];
-    const n = Number(raw);
-    return raw != null && Number.isFinite(n) ? n : fallback;
-  },
-
-  /** §16: light — отчёт только по конкретному лифту. */
-  isObjectOnlyAddress() {
-    return this.reportsLimits?.address_scope === "object_only";
-  },
+    /** light: отчёт только по конкретному лифту, дом/город недоступны. */
+    reportObjectOnly() {
+        return this.reportsLimits?.address_scope === 'object_only';
+    },
 
   isAdmin() {
     return this.role === "administrator";

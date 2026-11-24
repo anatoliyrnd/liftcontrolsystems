@@ -173,15 +173,6 @@ final class DbUserRepository implements UserRepositoryInterface
             }
         }
 
-              // Только реальные поля формы + пароль + дата создания.
-        // Обязательных колонок без дефолта в схеме нет (SHOW COLUMNS:
-        // Null=NO AND Default IS NULL → 0 строк), sql_mode без STRICT.
-        // Если на другом тенанте появится 1364 — лечится DEFAULT'ом
-        // в той базе, а не усложнением этого кода.
-        //
-        // user_date пишем сами: DEFAULT 0 оставил бы «Создан» пустым навсегда.
-        // Unix-метка абсолютна; в WRITABLE её нет — подделать из формы нельзя.
-        // last_login не трогаем: 0 = ещё не входил.
         $data = array_merge(
             $this->normalizeFlags($fields),
             [
@@ -190,19 +181,36 @@ final class DbUserRepository implements UserRepositoryInterface
             ]
         );
 
-        // Ключи — только из WRITABLE и двух литералов выше.
         $columns = array_keys($data);
         $sql = 'INSERT INTO lift_users (`' . implode('`, `', $columns) . '`) VALUES ('
             . implode(', ', array_fill(0, count($columns), '?')) . ')';
 
-        $this->db->execute($sql, array_values($data));
+        try {
+            $this->db->execute($sql, array_values($data));
+        } catch (\App\Exceptions\DbException $e) {
+            // Перевод 1062 (дубликат уникального ключа) в понятный
+            // конфликт: сейчас проигравший гонку INSERT даёт 500
+            // «Сервис временно недоступен» вместо «Логин уже занят».
+            //
+            // findIdentityConflict ловит обычный случай (админ ввёл
+            // занятый логин) ДО вставки. 1062 возникает только при
+            // одновременном создании одного логина двумя админами —
+            // целостность данных уже обеспечена UNIQUE на user_login,
+            // это полировка редчайшего пути.
+            $previous = $e->getPrevious();
+            if ($previous instanceof \PDOException) {
+                $code = (int) ($previous->errorInfo[1] ?? 0);
+                if ($code === 1062) {
+                    throw new InvalidArgumentException('Логин уже занят');
+                }
+            }
+            throw $e;
+        }
 
-        // LAST_INSERT_ID(), а не метод обёртки: его наличие не подтверждено.
         $row = $this->db->fetchOne('SELECT LAST_INSERT_ID() AS id');
 
         return (int) ($row['id'] ?? 0);
     }
-
     public function update(int $userId, array $fields): void
     {
         $this->assertWritable($fields);
