@@ -178,7 +178,7 @@ export class ReportsResultsController {
     // Порядок критичен: гейт после window.open открыл бы пустое третье
     // окно, которое пользователь закрывает руками.
     if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_PRINT)) {
-      notify.warning(REPORTS.ACCESS.LOCK_FEATURE_HINT);
+      notify.warning(REPORTS.ACCESS.LOCK_HINT);
       return;
     }
     if (this._printBusy) return;
@@ -504,7 +504,7 @@ export class ReportsResultsController {
   // ------------------------------------------------------------------
   async _onExport() {
     if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_CSV)) {
-      notify.warning(REPORTS.ACCESS.LOCK_FEATURE_HINT);
+      notify.warning(REPORTS.ACCESS.LOCK_HINT);
       return;
     }
 
@@ -612,7 +612,7 @@ export class ReportsResultsController {
       ? "Генерация..."
       : "Выгрузить CSV";
     this._els.exportBtn.title = csvLocked
-      ? REPORTS.ACCESS.LOCK_FEATURE_HINT
+      ? REPORTS.ACCESS.LOCK_HINT
       : this._isEmpty
         ? "В выборке нет строк — выгружать нечего"
         : "";
@@ -620,9 +620,7 @@ export class ReportsResultsController {
 
     this._els.printBtn.disabled =
       printLocked || !this._payload || this._isEmpty;
-    this._els.printBtn.title = printLocked
-      ? REPORTS.ACCESS.LOCK_FEATURE_HINT
-      : "";
+    this._els.printBtn.title = printLocked ? REPORTS.ACCESS.LOCK_HINT : "";
     this._els.printBtn.classList.toggle("locked", printLocked);
 
     const sheet = document.getElementById("rrPrintSheet");
