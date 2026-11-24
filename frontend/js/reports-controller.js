@@ -36,6 +36,7 @@ export class ReportsController {
     this._isActive = false;
     this._filtersData = null;
     this.summaryView = null;
+        this._summaryTeaser = false;
     this.filtersView = null;
     this.state = null;
     this._summaryDebounce = null;
@@ -87,6 +88,7 @@ export class ReportsController {
     this.api.abortTag("reports_summary");
     this.summaryView?.destroy();
     this.summaryView = null;
+        this._summaryTeaser = false;
     this.filtersView?.destroy();
     this.filtersView = null;
     this._filtersData = null;
@@ -124,7 +126,24 @@ export class ReportsController {
     const position = authStore.getUser()?.user_position ?? null;
     return userStore.can("view_reports") || position === "foreman";
   }
-
+ _accessOptions() {
+    const g = REPORTS.ACCESS.GROUPS;
+    return {
+      objectOnly: userStore.reportObjectOnly(),
+      maxRangeDays: userStore.reportLimit(
+        "max_period_days",
+        REPORTS.MAX_RANGE_DAYS,
+      ),
+      maxRows: userStore.reportLimit("max_rows", REPORTS.EXPORT_MAX_ROWS),
+      groups: {
+        department: userStore.reportGroupAllowed(g.DEPARTMENT),
+        status: userStore.reportGroupAllowed(g.STATUS),
+        staff: userStore.reportGroupAllowed(g.STAFF),
+        text: userStore.reportGroupAllowed(g.TEXT),
+        addressMulti: userStore.reportGroupAllowed(g.ADDRESS_MULTI),
+      },
+    };
+  }
   _userId() {
     return userStore.userId ?? authStore.getUser()?.id ?? null;
   }
@@ -282,12 +301,25 @@ export class ReportsController {
     window.addEventListener("focus", () => this._updateResultHint(), {
       signal,
     });
+     window.addEventListener("reports:access", () => this._onAccessChanged(), {
+      signal,
+    });
   }
 
   // ------------------------------------------------------------------
   // Сводка
   // ------------------------------------------------------------------
   async _ensureSummary() {
+    // §16: способность проверяется первой — до городов, до запроса,
+    // до создания вьюхи. Порядок тот же, что на сервере: дешёвое раньше.
+    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.SUMMARY)) {
+      if (!this._summaryTeaser) this._renderSummaryTeaser();
+      return;
+    }
+    if (this._summaryTeaser) {
+      this._summaryTeaser = false;
+      this._els.summaryHost.innerHTML = "";
+    }
     if (this.summaryView) {
       this._refreshSummary({ skeleton: true });
       return;
@@ -382,10 +414,14 @@ export class ReportsController {
       this._filtersData = resp.data;
     }
     if (isStale() || this.state.tab !== "advanced") return;
+const access = this._accessOptions();
     this.filtersView = createFiltersView({
       departments: this._filtersData.departments || [],
       staff: this._filtersData.staff || [],
-      canStaffFilter: this._canView(),
+      // Ролевое право И уровень: прораб на light фильтр по ответственному
+      // не получает. Два независимых предиката, а не один вывод из роли.
+      canStaffFilter: this._canView() && access.groups.staff,
+      access,
       initial: this.state,
       onSubmit: (payload) => {
         this.state.sort = payload.sort;
@@ -397,6 +433,89 @@ export class ReportsController {
     this._els.filtersHost.innerHTML = "";
     this._els.filtersHost.appendChild(this.filtersView.element);
     this._updateResultHint();
+  }
+/**
+   * §16: реакция на смену уровня без F5.
+   *
+   * Фильтры пересобираются, а не патчатся: лимиты и замки применяются
+   * при создании вьюхи. Введённое сохраняем через snapshot в state —
+   * иначе диспетчер терял бы заполненную форму из-за апгрейда тарифа,
+   * произошедшего в соседней вкладке.
+   *
+   * Сводку при понижении уровня уничтожаем: оставить её значило бы
+   * показать цифры, на которые сервер уже отвечает 403.
+   */
+  _onAccessChanged() {
+    if (!this._isActive || !this._els) return;
+
+    if (this.filtersView) {
+      this.state = { ...this.state, ...this.filtersView.snapshot() };
+      this.filtersView.destroy();
+      this.filtersView = null;
+      this._els.filtersHost.innerHTML = "";
+    }
+
+    if (this._summaryTeaser) {
+      this._summaryTeaser = false;
+      this._els.summaryHost.innerHTML = "";
+    }
+
+    if (
+      this.summaryView &&
+      !userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.SUMMARY)
+    ) {
+      this.summaryView.destroy();
+      this.summaryView = null;
+      this._els.summaryHost.innerHTML = "";
+    }
+
+    this._applyTab(this.state.tab);
+    this._saveState();
+  }
+
+  /**
+   * §16: тизер сводки для light. Только createElement + textContent
+   * (правило 1), только статичные подписи из config.js.
+   *
+   * Запрос НЕ уходит: цифры не нужны, а лишний reports_summary вернул
+   * бы 403 и замусорил историю действий. Прямой вызов экшена через
+   * DevTools отсекает серверный гейт — тизер не является защитой.
+   */
+  _renderSummaryTeaser() {
+    const host = this._els.summaryHost;
+    host.innerHTML = "";
+
+    const box = document.createElement("div");
+    box.className = "rep-summary";
+
+    const note = document.createElement("div");
+    note.className = "rep-stub locked";
+    note.textContent =
+      REPORTS.ACCESS.TEASER_TITLE + ". " + REPORTS.ACCESS.TEASER_NOTE;
+    box.appendChild(note);
+
+    const kpis = document.createElement("div");
+    kpis.className = "rep-kpis";
+    for (const label of REPORTS.ACCESS.TEASER_TILES) {
+      const tile = document.createElement("div");
+      tile.className = "rep-kpi locked";
+      tile.title = REPORTS.ACCESS.LOCK_HINT;
+
+      const value = document.createElement("div");
+      value.className = "rep-kpi-value";
+      value.textContent = "—";
+
+      const cap = document.createElement("div");
+      cap.className = "rep-kpi-label";
+      cap.textContent = label;
+
+      tile.appendChild(value);
+      tile.appendChild(cap);
+      kpis.appendChild(tile);
+    }
+    box.appendChild(kpis);
+    host.appendChild(box);
+    this._summaryTeaser = true;
   }
 
   _onReset() {
