@@ -92,8 +92,8 @@ export function createFiltersView(opts) {
     },
   };
   const g = acc.groups;
-  const LOCK_FILTER = REPORTS.ACCESS.LOCK_FILTER_HINT;
-
+  //const LOCK_FILTER = REPORTS.ACCESS.LOCK_FILTER_HINT;
+  const LOCK_FILTER = REPORTS.ACCESS.LOCK_HINT;
   const v = initial || {};
   const root = el("div", { class: "rep-filters" });
   let busy = false;
