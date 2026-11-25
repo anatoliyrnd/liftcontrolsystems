@@ -754,3 +754,78 @@ ALTER TABLE lift_users
 -- миграция 1.6 и делалась.
 
 ALTER TABLE lift_users DROP INDEX idx_user_login;
+
+START TRANSACTION;
+
+ALTER TABLE `lift_street`
+  ADD COLUMN IF NOT EXISTS `street_note` varchar(255) DEFAULT NULL
+  COMMENT 'Доп. описание улицы из скобок (СПульт)' AFTER `street_type`;
+
+-- Кандидаты: улицы со скобками. Имя только из скобок не трогаем.
+DROP TEMPORARY TABLE IF EXISTS tmp_street_fix;
+CREATE TEMPORARY TABLE tmp_street_fix AS
+SELECT id, city_id, street_type,
+       TRIM(REGEXP_REPLACE(REGEXP_REPLACE(street_name, '\\([^)]*\\)', ''), '[[:space:]]+', ' ')) AS clean_name,
+       NULLIF(TRIM(REGEXP_REPLACE(street_name, '^[^(]*\\(([^)]*)\\).*$', '$1')), '') AS note_new
+FROM lift_street
+WHERE street_name LIKE '%(%';
+DELETE FROM tmp_street_fix WHERE clean_name = '';
+
+ALTER TABLE tmp_street_fix ADD COLUMN new_key varchar(190) NULL;
+UPDATE tmp_street_fix
+SET new_key = CONCAT(COALESCE(street_type, ''), '|', LOWER(REPLACE(REPLACE(clean_name, ' ', ''), '.', '')));
+
+-- Выживший id на каждый (city_id, new_key): минимум среди чистых и кандидатов.
+DROP TEMPORARY TABLE IF EXISTS tmp_street_keep;
+CREATE TEMPORARY TABLE tmp_street_keep AS
+SELECT city_id, new_key, MIN(id) AS keep_id
+FROM (
+    SELECT id, city_id, new_key FROM tmp_street_fix
+    UNION ALL
+    SELECT s.id, s.city_id, s.street_key
+    FROM lift_street s
+    JOIN tmp_street_fix f ON s.city_id = f.city_id AND s.street_key = f.new_key
+) u
+GROUP BY city_id, new_key;
+
+DROP TEMPORARY TABLE IF EXISTS tmp_street_map;
+CREATE TEMPORARY TABLE tmp_street_map AS
+SELECT f.id AS old_id, k.keep_id
+FROM tmp_street_fix f
+JOIN tmp_street_keep k ON k.city_id = f.city_id AND k.new_key = f.new_key;
+
+-- Перепривязка домов и заявок на выжившую улицу.
+UPDATE lift_home h
+JOIN tmp_street_map m ON h.street_id = m.old_id AND m.old_id <> m.keep_id
+SET h.street_id = m.keep_id;
+
+UPDATE lift_calls c
+JOIN tmp_street_map m ON c.address_street = m.old_id AND m.old_id <> m.keep_id
+SET c.address_street = m.keep_id;
+
+-- Чистое имя/ключ/примечание — выжившим кандидатам.
+UPDATE lift_street s
+JOIN tmp_street_fix f ON s.id = f.id
+JOIN tmp_street_map m ON m.old_id = f.id AND m.keep_id = f.id
+SET s.street_name = f.clean_name,
+    s.street_key  = f.new_key,
+    s.street_note = f.note_new;
+
+-- Примечание в уже чистый выживший, если у него пусто.
+UPDATE lift_street s
+JOIN tmp_street_map m ON s.id = m.keep_id AND m.old_id <> m.keep_id
+JOIN tmp_street_fix f ON f.id = m.old_id
+SET s.street_note = COALESCE(NULLIF(s.street_note, ''), f.note_new);
+
+-- Поглощённые дубли.
+DELETE s FROM lift_street s
+JOIN tmp_street_map m ON s.id = m.old_id AND m.old_id <> m.keep_id;
+
+-- Версия справочников: фронт перечитает кэш с street_note.
+UPDATE lift_dict_versions SET version = version + 1, updated_at = UNIX_TIMESTAMP();
+
+COMMIT;
+
+-- Контроль: остаточные дубли ключа (должно быть пусто)
+SELECT city_id, street_key, COUNT(*) c, GROUP_CONCAT(id) ids
+FROM lift_street GROUP BY city_id, street_key HAVING c > 1;
