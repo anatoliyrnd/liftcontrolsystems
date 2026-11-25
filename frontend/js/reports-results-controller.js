@@ -18,17 +18,17 @@ import { renderPrintDocument } from "./reports/print-document.js";
  *
  * Запрос приходит из вкладки фильтров: при загрузке читается ключ
  * localStorage, дальше — событие storage. Собственных фильтров нет,
- * поэтому таблица всегда показывает ровно то, что запросил диспетчер,
- * а не то, что успели поменять в форме после поиска.
+ * поэтому таблица всегда показывает ровно то, что запросил диспетчер.
  *
- * Экспорт работает по последнему принятому payload. Кулдаун свой:
- * обновление таблицы его не сбрасывает.
+ * Эхо фильтров — не декорация: это единственный след выборки в печатном
+ * документе. По нему коллега должен воспроизвести отчёт, не спрашивая
+ * автора, что тот выбрал. Поэтому здесь ВСЕ слои отбора: период, тип
+ * даты, отделы по именам, статус, адрес строкой, ответственный по ФИО,
+ * оба полнотекстовых запроса дословно, сортировка и страница.
  *
  * REPORTS §17: замки способностей. CSV и печать — standard+, XLSX —
- * extended. Замок берётся ИЗ СПИСКА reports_features, а не из имени
- * уровня: матрица живёт на сервере, клиент не выводит её заново.
- * Замок вплетён в выражение disabled внутри _syncExport — навешенный
- * поверх он снимался бы первой же выгрузкой.
+ * extended. Замок берётся ИЗ СПИСКА reports_features и вплетён в
+ * выражение disabled внутри _syncExport.
  *
  * После каждого await — isStale() (правило 2). Офлайн — по флагу
  * resp.offline === true, не по кодам (правило 6).
@@ -50,6 +50,9 @@ export class ReportsResultsController {
     this._printBusy = false;
     this._xlsxBusy = false;
     this._payload = null;
+    // Подписи к ID из вкладки фильтров: справочники в это окно не
+    // грузятся, по одному ID адрес и ФИО не восстановить.
+    this._labels = { address: "", departments: [], staff: "" };
     this._isEmpty = false;
     this._page = 1;
     this._seq = 0;
@@ -139,7 +142,6 @@ export class ReportsResultsController {
       sheetSelect: get("rrPrintSheet"),
     };
     // XLSX и лист печати не обязательны: шаблон мог остаться прежним.
-    // Без них окно обязано работать, а не гаснуть целиком.
     for (const [name, node] of Object.entries(els)) {
       if (!node && name !== "xlsxBtn" && name !== "sheetSelect") {
         console.warn("[ReportsResults] нет элемента:", name);
@@ -159,12 +161,6 @@ export class ReportsResultsController {
     return userStore.userId ?? authStore.getUser()?.id ?? null;
   }
 
-  /**
-   * Ключи способностей. Фолбэк-литералы страхуют от рассинхрона
-   * config.js и контроллера: отсутствующий словарь не должен ни
-   * гасить разрешённое, ни открывать запрещённое — сервер всё равно
-   * гейтит, а UI обязан совпадать с присланным списком.
-   */
   _featureKeys() {
     const f = REPORTS.ACCESS?.FEATURES || {};
     return {
@@ -201,17 +197,13 @@ export class ReportsResultsController {
   }
 
   /**
-   * Печать — третье окно с чистым документом, не window.print()
-   * по экранной таблице: там липкие колонки, ширины ресайзера
-   * и только текущая страница.
+   * Печать — третье окно с чистым документом.
+   * Окно открывается СИНХРОННО в клике, до первого await.
    *
-   * Окно открывается СИНХРОННО в клике, до первого await — иначе
-   * блокировщик попапов. noopener нельзя: нужен win.document.
-   * Данные — по _payload последнего принятого поиска, не по форме.
+   * meta.filters берётся из эхо-строки, а она теперь несёт все слои
+   * отбора: без этого распечатанный отчёт нельзя воспроизвести.
    *
-   * §17: гейт способности стоит ДО window.open — иначе запрещённая
-   * печать открывала бы пустое третье окно, которое пользователь
-   * закрывает руками.
+   * §17: гейт способности стоит ДО window.open.
    */
   async _onPrint() {
     const K = this._featureKeys();
@@ -235,7 +227,7 @@ export class ReportsResultsController {
 
     if (!this._payload) {
       const req = readResultRequest(this._userId());
-      if (req?.payload) this._payload = req.payload;
+      if (req?.payload) this._accept(req);
     }
     if (!this._payload) {
       this._printMessage(
@@ -261,11 +253,9 @@ export class ReportsResultsController {
 
     try {
       const resp = await this.repo.fetchPrintRows(this._payload);
-      // Правило 2: после каждого await. Плюс окно мог закрыть сам пользователь.
       if (this._mountId !== myMountId || !this._isActive) return;
       if (win.closed) return;
 
-      // Правило 6: отказ канала — по флагу, не по коду.
       if (resp?.offline === true) {
         this._printMessage(
           win,
@@ -312,8 +302,7 @@ export class ReportsResultsController {
 
   /**
    * XLSX. Кулдаун НЕ клиентский: серверные бакеты csv и xlsx разведены,
-   * а _startCooldown() гасит кнопку CSV. Вызов его здесь сомкнул бы
-   * бакеты обратно — после книги CSV молчал бы 30 с без причины.
+   * а _startCooldown() гасит кнопку CSV.
    */
   async _onXlsx() {
     const K = this._featureKeys();
@@ -327,8 +316,6 @@ export class ReportsResultsController {
     const isStale = () => !this._isActive || this._mountId !== myMountId;
 
     this._xlsxBusy = true;
-    // Единственная точка расчёта состояния кнопок: ручной
-    // btn.disabled = true/false разъезжался бы с замком уровня.
     this._syncExport();
 
     try {
@@ -440,17 +427,25 @@ export class ReportsResultsController {
       { signal },
     );
 
-    // §17: поллер работает и в служебном окне (start по isAuth, без
-    // standalone-guard), поэтому уровень меняется здесь на лету.
-    // Замки пересчитываются, а не навешиваются один раз при mount.
+    // §17: поллер работает и в служебном окне — замки пересчитываются.
     window.addEventListener("reports:access", () => this._syncExport(), {
       signal,
     });
   }
 
+  /**
+   * Приём запроса.
+   *
+   * ui_labels — служебный слой подписей, а не фильтр. Снимаем ЗДЕСЬ,
+   * до сохранения в _payload: этот объект уходит на сервер как есть,
+   * и лишние поля в контракте фильтров (§4) не нужны.
+   *
+   * address_label — прежний формат подписи адреса: запрос из вкладки,
+   * открытой до этого коммита, обязан деградировать, а не падать.
+   */
   _accept(req) {
     if (!req || !req.payload || typeof req.payload !== "object") return;
-    // Чужой аккаунт в этой же вкладке — запрос не применяем.
+
     const uid = this._userId();
     if (
       req.userId != null &&
@@ -462,36 +457,90 @@ export class ReportsResultsController {
       );
       return;
     }
-    this._payload = req.payload;
+
+    const {
+      ui_labels: labels,
+      address_label: legacyAddress,
+      ...filters
+    } = req.payload;
+
+    const L = labels && typeof labels === "object" ? labels : {};
+    this._labels = {
+      address: String(L.address ?? legacyAddress ?? "").trim(),
+      departments: Array.isArray(L.departments)
+        ? L.departments.map((s) => String(s).trim()).filter(Boolean)
+        : [],
+      staff: String(L.staff ?? "").trim(),
+    };
+
+    this._payload = filters;
     this._page = 1;
     this._hideStub();
     this._run(1);
   }
 
+  /**
+   * Все слои отбора одной строкой.
+   *
+   * Порядок — от рамки к уточнениям: тип даты, отделы, статус, адрес,
+   * ответственный, полнотекст, сортировка, страница. Сам период живёт
+   * в rrPeriod отдельной строкой и уходит в печать как meta.period —
+   * дублировать его здесь значило бы показать одну дату дважды.
+   *
+   * Подписи берём из ui_labels; без них (старый запрос) показываем ID:
+   * неточная строка лучше, чем потерянный слой отбора.
+   */
   _echoText(p, pg) {
+    const L = this._labels || {};
     const parts = [];
+
     parts.push(
       p.date_type === "closed" ? "по дате закрытия" : "по дате создания",
     );
-    const deps = Array.isArray(p.department_ids) ? p.department_ids.length : 0;
-    parts.push(deps ? `отделов: ${deps}` : "все отделы");
+
+    const depIds = Array.isArray(p.department_ids) ? p.department_ids : [];
+    if (depIds.length === 0) {
+      parts.push("отделы: все");
+    } else if (Array.isArray(L.departments) && L.departments.length > 0) {
+      parts.push(`отделы: ${L.departments.join(", ")}`);
+    } else {
+      parts.push(`отделов: ${depIds.length}`);
+    }
+
     parts.push(
-      p.status === "open"
-        ? "открытые"
-        : p.status === "close"
-          ? "закрытые"
-          : "все статусы",
+      "статус: " +
+        (p.status === "open"
+          ? "открытые"
+          : p.status === "close"
+            ? "закрытые"
+            : "все"),
     );
-    if (p.city_only) parts.push("только город");
-    else if (p.object_id) parts.push("конкретный лифт");
-    else if (p.home_id) parts.push("конкретный дом");
-    else if (p.city_id) parts.push("город");
-    if (p.staff_id) parts.push("по ответственному");
-    if (p.details_text) parts.push("поиск в описании");
-    if (p.solution_text) parts.push("поиск в решении");
-    parts.push(REPORTS.SORTS[p.sort]?.toLowerCase() || "по дате");
-    if (pg)
+
+    if (L.address) {
+      parts.push(`адрес: ${L.address}${p.city_only ? " (только город)" : ""}`);
+    } else if (p.city_only) parts.push("адрес: только город");
+    else if (p.object_id) parts.push(`адрес: лифт ID ${p.object_id}`);
+    else if (p.home_id) parts.push(`адрес: дом ID ${p.home_id}`);
+    else if (p.street_id) parts.push(`адрес: улица ID ${p.street_id}`);
+    else if (p.city_id) parts.push(`адрес: город ID ${p.city_id}`);
+    else parts.push("адрес: все");
+
+    if (p.staff_id) {
+      parts.push(`ответственный: ${L.staff || `ID ${p.staff_id}`}`);
+    }
+
+    // Дословно и без обрезки: по этой строке выборку воспроизводят.
+    if (p.details_text) parts.push(`описание содержит: «${p.details_text}»`);
+    if (p.solution_text) parts.push(`решение содержит: «${p.solution_text}»`);
+
+    parts.push(
+      `сортировка: ${REPORTS.SORTS[p.sort]?.toLowerCase() || "по дате"}`,
+    );
+
+    if (pg) {
       parts.push(`стр. ${pg.current_page} из ${Math.max(1, pg.total_pages)}`);
+    }
+
     return parts.join(" · ");
   }
 
@@ -546,12 +595,15 @@ export class ReportsResultsController {
       this._run(next),
     );
 
-    this._els.echo.textContent = this._echoText(this._payload, pg);
+    const echo = this._echoText(this._payload, pg);
+    this._els.echo.textContent = echo;
+    // Длинная строка обрезается стилями — полный текст по наведению,
+    // как в составных ячейках таблицы. В печать уходит целиком.
+    this._els.echo.title = echo;
+
     this._els.period.textContent = `Период МСК: ${formatTsMsk(this._payload.date_from)} — ${formatTsMsk(this._payload.date_to)}`;
     this._els.count.textContent = pg ? `Найдено: ${pg.total_items}` : "";
 
-    // Номер в заголовке вкладки: диспетчер находит нужную вкладку
-    // среди десятка открытых по одному взгляду.
     document.title = pg
       ? `Отчёт (${pg.total_items}) — LiftCS`
       : "Таблица отчёта — LiftCS";
@@ -637,12 +689,8 @@ export class ReportsResultsController {
 
   /**
    * Состояние всех кнопок выгрузки — в одном месте и на каждое
-   * изменение: после _run, кулдауна, старта/финиша выгрузки и смены
-   * уровня. Замок уровня вплетён В выражение disabled, а не навешен
-   * поверх: иначе первая же выгрузка его снимала (§17).
-   *
-   * Источник замка — reports_features с сервера. Имя уровня здесь
-   * не участвует: клиент не выводит матрицу заново.
+   * изменение. Замок уровня вплетён В выражение disabled, а не
+   * навешен поверх: иначе первая же выгрузка его снимала (§17).
    */
   _syncExport() {
     if (!this._els) return;
@@ -655,10 +703,6 @@ export class ReportsResultsController {
     const printLocked = !userStore.hasReportFeature(K.print);
     const xlsxLocked = !userStore.hasReportFeature(K.xlsx);
 
-    // Пустая выборка: сервер вернёт data:null, но окно 30 с уже
-    // сгорит — лимит стоит до запроса намеренно (защита от перебора
-    // широких периодов). Гасим кнопку здесь, чтобы честный пустой
-    // поиск не блокировал следующую выгрузку.
     const blocked =
       !this._payload || this._exportBusy || cooling || this._isEmpty;
 
@@ -685,8 +729,6 @@ export class ReportsResultsController {
     }
 
     if (this._els.xlsxBtn) {
-      // Пустая выборка гасит и XLSX — раньше кнопка горела, а сервер
-      // отвечал data:null. Выравниваем с CSV, поведение не расширяем.
       this._els.xlsxBtn.disabled =
         xlsxLocked || !this._payload || this._xlsxBusy || this._isEmpty;
       this._els.xlsxBtn.textContent = this._xlsxBusy

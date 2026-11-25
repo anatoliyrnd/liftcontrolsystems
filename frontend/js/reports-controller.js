@@ -17,15 +17,18 @@ import { createFiltersView } from "./reports/views/filters-view.js";
 /**
  * Страница отчётов: сводка + фильтры. Таблицы здесь нет.
  *
- * «Найти» publishes запрос в localStorage и открывает вкладку
- * браузера. Порядок критичен: window.open вызывается СИНХРОННО
- * внутри клика, до любого await — иначе браузер теряет пользовательский
- * жест и блокирует вкладку.
+ * «Найти» публикует запрос в localStorage и открывает вкладку браузера.
+ * Порядок критичен: window.open вызывается СИНХРОННО внутри клика, до
+ * любого await — иначе браузер теряет пользовательский жест и блокирует
+ * вкладку.
  *
- * Повторный клик по живому окну не перезагружает его: запрос уже
- * ушёл событием storage, остаётся только focus(). Закрытая вкладка
- * определяется по win.closed и открывается заново. Handle хранится
- * на инстансе и переживает unmount — возврат на экран не теряет окно.
+ * Повторный клик по живому окну не перезагружает его: запрос уже ушёл
+ * событием storage, остаётся только focus(). Закрытая вкладка определяется
+ * по win.closed и открывается заново. Handle хранится на инстансе и
+ * переживает unmount — возврат на экран не теряет окно.
+ *
+ * REPORTS §17: тизер сводки для light и снимок доступа для вьюхи фильтров.
+ * Матрица уровней живёт на сервере; контроллер только передаёт присланное.
  */
 export class ReportsController {
   constructor(apiInstance, routerInstance) {
@@ -36,13 +39,15 @@ export class ReportsController {
     this._isActive = false;
     this._filtersData = null;
     this.summaryView = null;
-        this._summaryTeaser = false;
     this.filtersView = null;
     this.state = null;
     this._summaryDebounce = null;
     this._eventsAbort = null;
     this._els = null;
     this._summarySeq = 0;
+    // §17: тизер сводки живёт здесь, а не в summary-view. Вьюха не знает
+    // о тарифах: она рисует данные, которых у light нет.
+    this._summaryTeaser = false;
     // Не сбрасывается в unmount: вкладка браузера живёт своей жизнью.
     this._resultsWindow = null;
   }
@@ -55,6 +60,7 @@ export class ReportsController {
     const myMountId = ++this._mountId;
     const isStale = () => this._mountId !== myMountId;
     this._isActive = true;
+
     this.state = loadReportState();
     if (!REPORTS.TABS[this.state.tab]) this.state.tab = REPORTS.TAB_DEFAULT;
 
@@ -66,10 +72,12 @@ export class ReportsController {
       this._showStub("Отчёты недоступны для вашей роли.");
       return;
     }
+
     this._bindTabs();
     this._bindById();
     this._bindResultHint();
     this._applyTab(this.state.tab);
+
     if (isStale()) return;
   }
 
@@ -88,7 +96,7 @@ export class ReportsController {
     this.api.abortTag("reports_summary");
     this.summaryView?.destroy();
     this.summaryView = null;
-        this._summaryTeaser = false;
+    this._summaryTeaser = false;
     this.filtersView?.destroy();
     this.filtersView = null;
     this._filtersData = null;
@@ -97,6 +105,7 @@ export class ReportsController {
   }
 
   // ------------------------------------------------------------------
+
   _grabElements() {
     const get = (id) => document.getElementById(id);
     const els = {
@@ -126,8 +135,20 @@ export class ReportsController {
     const position = authStore.getUser()?.user_position ?? null;
     return userStore.can("view_reports") || position === "foreman";
   }
- _accessOptions() {
-    const g = REPORTS.ACCESS.GROUPS;
+
+  _userId() {
+    return userStore.userId ?? authStore.getUser()?.id ?? null;
+  }
+
+  /**
+   * §17: снимок доступа для вьюхи фильтров.
+   *
+   * Вьюха получает опции, а не читает userStore сама: тот же принцип,
+   * что у canStaffFilter. Иначе матрица уровней расползлась бы по
+   * компонентам, и расхождение с сервером стало бы незаметным.
+   */
+  _accessOptions() {
+    const g = REPORTS.ACCESS?.GROUPS || {};
     return {
       objectOnly: userStore.reportObjectOnly(),
       maxRangeDays: userStore.reportLimit(
@@ -136,16 +157,97 @@ export class ReportsController {
       ),
       maxRows: userStore.reportLimit("max_rows", REPORTS.EXPORT_MAX_ROWS),
       groups: {
-        department: userStore.reportGroupAllowed(g.DEPARTMENT),
-        status: userStore.reportGroupAllowed(g.STATUS),
-        staff: userStore.reportGroupAllowed(g.STAFF),
-        text: userStore.reportGroupAllowed(g.TEXT),
-        addressMulti: userStore.reportGroupAllowed(g.ADDRESS_MULTI),
+        department: userStore.reportGroupAllowed(g.DEPARTMENT || "department"),
+        status: userStore.reportGroupAllowed(g.STATUS || "status"),
+        staff: userStore.reportGroupAllowed(g.STAFF || "staff"),
+        text: userStore.reportGroupAllowed(g.TEXT || "text"),
+        addressMulti: userStore.reportGroupAllowed(
+          g.ADDRESS_MULTI || "address_multi",
+        ),
       },
     };
   }
-  _userId() {
-    return userStore.userId ?? authStore.getUser()?.id ?? null;
+
+  /**
+   * §17: реакция на смену уровня без F5. Фильтры пересобираются, а не
+   * патчатся: лимиты и замки применяются при создании вьюхи. Введённое
+   * сохраняем через snapshot в state.
+   */
+  _onAccessChanged() {
+    if (!this._isActive || !this._els) return;
+
+    if (this.filtersView) {
+      this.state = { ...this.state, ...this.filtersView.snapshot() };
+      this.filtersView.destroy();
+      this.filtersView = null;
+      this._els.filtersHost.innerHTML = "";
+    }
+
+    if (this._summaryTeaser) {
+      this._summaryTeaser = false;
+      this._els.summaryHost.innerHTML = "";
+    }
+
+    const summaryKey = REPORTS.ACCESS?.FEATURES?.SUMMARY || "summary";
+    if (this.summaryView && !userStore.hasReportFeature(summaryKey)) {
+      this.summaryView.destroy();
+      this.summaryView = null;
+      this._els.summaryHost.innerHTML = "";
+    }
+
+    this._applyTab(this.state.tab);
+    this._saveState();
+  }
+
+  /** §17: тизер сводки для light. Запрос НЕ уходит. */
+  _renderSummaryTeaser() {
+    const A = REPORTS.ACCESS || {};
+    const host = this._els.summaryHost;
+    host.innerHTML = "";
+
+    const box = document.createElement("div");
+    box.className = "rep-summary";
+
+    const note = document.createElement("div");
+    note.className = "rep-stub locked";
+    note.textContent =
+      (A.TEASER_TITLE || "Сводка недоступна на лёгком уровне") +
+      ". " +
+      (A.TEASER_NOTE || "Цифры скрыты.");
+    box.appendChild(note);
+
+    const kpis = document.createElement("div");
+    kpis.className = "rep-kpis";
+    const tiles = Array.isArray(A.TEASER_TILES)
+      ? A.TEASER_TILES
+      : [
+          "Открыто сейчас",
+          "Просрочено",
+          "Закрыто за период",
+          "Создано за период",
+          "Застревания",
+          "Среднее закрытие",
+        ];
+    for (const label of tiles) {
+      const tile = document.createElement("div");
+      tile.className = "rep-kpi locked";
+      tile.title = A.LOCK_FEATURE_HINT || "Недоступно на текущем уровне";
+
+      const value = document.createElement("div");
+      value.className = "rep-kpi-value";
+      value.textContent = "—";
+
+      const cap = document.createElement("div");
+      cap.className = "rep-kpi-label";
+      cap.textContent = label;
+
+      tile.appendChild(value);
+      tile.appendChild(cap);
+      kpis.appendChild(tile);
+    }
+    box.appendChild(kpis);
+    host.appendChild(box);
+    this._summaryTeaser = true;
   }
 
   _bindTabs() {
@@ -166,20 +268,22 @@ export class ReportsController {
       advanced: this._els.tabAdvanced,
       byId: this._els.tabById,
     };
+
     // ?.() обязателен: ?. на получателе не проверяет наличие метода.
-    // Без него несовпадение версий вьюхи и контроллера роняло клик
-    // по вкладке целиком, а не деградировало до «оверлей не закрыт».
     if (tab !== "summary") this.summaryView?.closeOverlays?.();
     if (tab !== "advanced") this.filtersView?.closeOverlays?.();
+
     for (const [key, node] of Object.entries(panels)) {
       node.style.display = key === tab ? "" : "none";
     }
+
     this._els.tabs.querySelectorAll(".rep-tab").forEach((btn) => {
       btn.classList.toggle(
         "rep-tab-active",
         btn.getAttribute("data-tab") === tab,
       );
     });
+
     if (tab === "summary") this._ensureSummary();
     if (tab === "advanced") this._ensureFilters();
   }
@@ -191,6 +295,8 @@ export class ReportsController {
         notify.warning("Введите номер заявки числом.");
         return;
       }
+      // §17: byId вне гейта отчётов — карточку обслуживает экшен ticket,
+      // видимость режет CallScope, а не уровень доступа к отчётам.
       this.router.navigate("#/ticket/" + encodeURIComponent(raw));
     };
     this._els.byIdBtn.addEventListener("click", go);
@@ -201,7 +307,6 @@ export class ReportsController {
 
   _bindResultHint() {
     this._els.showBtn.addEventListener("click", () => {
-      // Жест пользователя: фокус и переоткрытие разрешены.
       this._focusOrReopen();
     });
     this._updateResultHint();
@@ -244,19 +349,68 @@ export class ReportsController {
   }
 
   /**
+   * Человекочитаемые подписи к фильтрам.
+   *
+   * Окно результатов получает только ID: справочники в него не грузятся
+   * (standalone пропускает refreshAddresses), а «по ответственному» и
+   * «отделов: 2» не говорят, ЧТО именно отобрано. Печатный документ без
+   * этого неполон — по нему нельзя воспроизвести выборку.
+   *
+   * Имена берём из _filtersData, который уже загружен для формы: второго
+   * запроса не нужно, и подписи гарантированно из того же справочника,
+   * что видел диспетчер в момент «Найти».
+   *
+   * Заблокированная группа шлёт department_ids: [] — имён тогда нет,
+   * эхо покажет «все отделы». Это верно: условия по отделу в запросе нет.
+   */
+  _uiLabels(payload) {
+    const snap = this.filtersView?.snapshot?.() ?? {};
+
+    const depIds = Array.isArray(payload.department_ids)
+      ? payload.department_ids.map(String)
+      : [];
+    const departments = (this._filtersData?.departments || [])
+      .filter((d) => depIds.includes(String(d.id)))
+      .map((d) => String(d.name ?? "").trim())
+      .filter(Boolean);
+
+    const staffId = payload.staff_id != null ? String(payload.staff_id) : "";
+    const staff = staffId
+      ? String(
+          (this._filtersData?.staff || []).find((s) => String(s.id) === staffId)
+            ?.name ?? "",
+        ).trim()
+      : "";
+
+    return {
+      address: String(snap.address?.address ?? "").trim(),
+      departments,
+      staff,
+    };
+  }
+
+  /**
    * Публикация запроса + открытие/фокус вкладки. Строго синхронно.
    * Порядок: сначала пишем запрос, потом открываем — свежая вкладка
    * читает ключ при загрузке и не ждёт события.
+   *
+   * ui_labels — служебный слой для эха и печати. Контроллер результатов
+   * снимает его перед отправкой на сервер: контракт фильтров (§4) не
+   * меняется, лишние поля в запрос не уезжают.
    */
   _dispatchResults(payload) {
     const uid = this._userId();
-    const req = publishResultRequest(uid, payload);
+    const req = publishResultRequest(uid, {
+      ...payload,
+      ui_labels: this._uiLabels(payload),
+    });
     if (!req) {
       notify.error(
         "Не удалось передать запрос в таблицу: хранилище недоступно.",
       );
       return;
     }
+
     if (this._resultsAlive()) {
       // Живая вкладка получит storage-событие и обновится сама.
       try {
@@ -265,6 +419,7 @@ export class ReportsController {
       this._updateResultHint();
       return;
     }
+
     const win = window.open(resultsUrl(), REPORTS.RESULTS_WINDOW_NAME);
     if (!win) {
       notify.warning(
@@ -284,9 +439,11 @@ export class ReportsController {
   _subscribeNetwork() {
     this._eventsAbort = new AbortController();
     const signal = this._eventsAbort.signal;
+
     window.addEventListener("offline", () => this._setOffline(true), {
       signal,
     });
+
     window.addEventListener(
       "online",
       () => {
@@ -297,11 +454,13 @@ export class ReportsController {
       },
       { signal },
     );
-    // Возврат из вкладки таблицы — обновляем подпись состояния.
+
     window.addEventListener("focus", () => this._updateResultHint(), {
       signal,
     });
-     window.addEventListener("reports:access", () => this._onAccessChanged(), {
+
+    // §17: уровень сменился на лету — переприменяем текущую вкладку.
+    window.addEventListener("reports:access", () => this._onAccessChanged(), {
       signal,
     });
   }
@@ -309,10 +468,12 @@ export class ReportsController {
   // ------------------------------------------------------------------
   // Сводка
   // ------------------------------------------------------------------
+
   async _ensureSummary() {
-    // REPORTS §17: способность проверяется первой — до городов, до запроса,
-    // до создания вьюхи. Порядок тот же, что на сервере: дешёвое раньше.
-    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.SUMMARY)) {
+    // §17: способность проверяется первой — до городов, до запроса,
+    // до создания вьюхи. Порядок тот же, что на сервере.
+    const summaryKey = REPORTS.ACCESS?.FEATURES?.SUMMARY || "summary";
+    if (!userStore.hasReportFeature(summaryKey)) {
       if (!this._summaryTeaser) this._renderSummaryTeaser();
       return;
     }
@@ -320,12 +481,15 @@ export class ReportsController {
       this._summaryTeaser = false;
       this._els.summaryHost.innerHTML = "";
     }
+
     if (this.summaryView) {
       this._refreshSummary({ skeleton: true });
       return;
     }
+
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
+
     let cities = [];
     try {
       cities = await offlineDB.getCities();
@@ -333,6 +497,7 @@ export class ReportsController {
       console.warn("[ReportsController] getCities failed:", e);
     }
     if (isStale() || this.state.tab !== "summary") return;
+
     this.summaryView = createSummaryView({
       cities,
       initialPeriod: this.state.summaryPeriod,
@@ -351,6 +516,7 @@ export class ReportsController {
       },
       onRefresh: () => this._refreshSummary({ skeleton: false }),
     });
+
     this._els.summaryHost.innerHTML = "";
     this._els.summaryHost.appendChild(this.summaryView.element);
     this._refreshSummary({ skeleton: true });
@@ -361,6 +527,7 @@ export class ReportsController {
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
     const seq = ++this._summarySeq;
+
     if (skeleton) this.summaryView.showSkeleton();
     else this.summaryView.setUpdating(true);
 
@@ -369,12 +536,14 @@ export class ReportsController {
       this.summaryView.getCityIds(),
     );
     if (isStale() || seq !== this._summarySeq) return;
+
     if (resp?._authLost) return;
     if (resp?.offline === true) {
       this._setOffline(true);
       return;
     }
     if (resp?.code === "aborted") return;
+
     if (!resp || resp.status !== "ok") {
       this.summaryView.setUpdating(false);
       const msg = resp?.message || "Не удалось загрузить сводку.";
@@ -382,6 +551,7 @@ export class ReportsController {
       notify.error(msg);
       return;
     }
+
     this._setOffline(false);
     this.summaryView.render(resp.data ?? null);
   }
@@ -389,13 +559,16 @@ export class ReportsController {
   // ------------------------------------------------------------------
   // Фильтры
   // ------------------------------------------------------------------
+
   async _ensureFilters() {
     if (this.filtersView) {
       this._updateResultHint();
       return;
     }
+
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
+
     if (!this._filtersData) {
       const resp = await this.repo.fetchFiltersData();
       if (isStale()) return;
@@ -413,13 +586,15 @@ export class ReportsController {
       }
       this._filtersData = resp.data;
     }
+
     if (isStale() || this.state.tab !== "advanced") return;
-const access = this._accessOptions();
+
+    const access = this._accessOptions();
     this.filtersView = createFiltersView({
       departments: this._filtersData.departments || [],
       staff: this._filtersData.staff || [],
       // Ролевое право И уровень: прораб на light фильтр по ответственному
-      // не получает. Два независимых предиката, а не один вывод из роли.
+      // не получает. Два независимых предиката, а не вывод из роли.
       canStaffFilter: this._canView() && access.groups.staff,
       access,
       initial: this.state,
@@ -430,92 +605,10 @@ const access = this._accessOptions();
       },
       onReset: () => this._onReset(),
     });
+
     this._els.filtersHost.innerHTML = "";
     this._els.filtersHost.appendChild(this.filtersView.element);
     this._updateResultHint();
-  }
-/**
-   * REPORTS §17: реакция на смену уровня без F5.
-   *
-   * Фильтры пересобираются, а не патчатся: лимиты и замки применяются
-   * при создании вьюхи. Введённое сохраняем через snapshot в state —
-   * иначе диспетчер терял бы заполненную форму из-за апгрейда тарифа,
-   * произошедшего в соседней вкладке.
-   *
-   * Сводку при понижении уровня уничтожаем: оставить её значило бы
-   * показать цифры, на которые сервер уже отвечает 403.
-   */
-  _onAccessChanged() {
-    if (!this._isActive || !this._els) return;
-
-    if (this.filtersView) {
-      this.state = { ...this.state, ...this.filtersView.snapshot() };
-      this.filtersView.destroy();
-      this.filtersView = null;
-      this._els.filtersHost.innerHTML = "";
-    }
-
-    if (this._summaryTeaser) {
-      this._summaryTeaser = false;
-      this._els.summaryHost.innerHTML = "";
-    }
-
-    if (
-      this.summaryView &&
-      !userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.SUMMARY)
-    ) {
-      this.summaryView.destroy();
-      this.summaryView = null;
-      this._els.summaryHost.innerHTML = "";
-    }
-
-    this._applyTab(this.state.tab);
-    this._saveState();
-  }
-
-  /**
-   * REPORTS §17: тизер сводки для light. Только createElement + textContent
-   * (правило 1), только статичные подписи из config.js.
-   *
-   * Запрос НЕ уходит: цифры не нужны, а лишний reports_summary вернул
-   * бы 403 и замусорил историю действий. Прямой вызов экшена через
-   * DevTools отсекает серверный гейт — тизер не является защитой.
-   */
-  _renderSummaryTeaser() {
-    const host = this._els.summaryHost;
-    host.innerHTML = "";
-
-    const box = document.createElement("div");
-    box.className = "rep-summary";
-
-    const note = document.createElement("div");
-    note.className = "rep-stub locked";
-    note.textContent =
-      REPORTS.ACCESS.TEASER_TITLE + ". " + REPORTS.ACCESS.TEASER_NOTE;
-    box.appendChild(note);
-
-    const kpis = document.createElement("div");
-    kpis.className = "rep-kpis";
-    for (const label of REPORTS.ACCESS.TEASER_TILES) {
-      const tile = document.createElement("div");
-      tile.className = "rep-kpi locked";
-      tile.title = REPORTS.ACCESS.LOCK_HINT;
-
-      const value = document.createElement("div");
-      value.className = "rep-kpi-value";
-      value.textContent = "—";
-
-      const cap = document.createElement("div");
-      cap.className = "rep-kpi-label";
-      cap.textContent = label;
-
-      tile.appendChild(value);
-      tile.appendChild(cap);
-      kpis.appendChild(tile);
-    }
-    box.appendChild(kpis);
-    host.appendChild(box);
-    this._summaryTeaser = true;
   }
 
   _onReset() {
@@ -531,6 +624,7 @@ const access = this._accessOptions();
   }
 
   // ------------------------------------------------------------------
+
   _setOffline(flag) {
     if (!this._els) return;
     if (flag) {
