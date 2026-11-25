@@ -1,5 +1,3 @@
-import { REPORTS } from "./config.js";
-
 /**
  * Глобальное хранилище роли и прав пользователя.
  * Заполняется один раз при инициализации SPA из ответа config.
@@ -7,17 +5,18 @@ import { REPORTS } from "./config.js";
  * Модель: роль + контекст. Фронт сам решает, доступно ли действие,
  * на основе роли пользователя и текущего состояния заявки.
  *
- * REPORTS §17: уровень доступа к отчётам — свойство ТЕНАНТА, не пользователя.
- * Хранится здесь рядом с ролью, потому что точка применения одна —
- * menu-manager.initialize(). Матрицу уровней фронт НЕ хранит: он
- * рендерит присланные сервером reports_features / reports_limits.
+ * REPORTS §17: уровень доступа к отчётам — свойство ТЕНАНТА, не
+ * пользователя. Хранится здесь рядом с ролью, потому что точка
+ * применения одна — menu-manager.initialize(). Матрицу уровней фронт
+ * НЕ хранит: он рендерит присланные сервером reports_features /
+ * reports_limits.
  *
  * Использование:
  *   userStore.setRole('dispatcher');
  *   userStore.can('close_ticket', { isAssigned: true });       // → true
- *   userStore.can('change_group', { currentValue: '' });       // → true (поле пусто)
- *   userStore.can('change_group', { currentValue: '8' });      // → false (уже заполнено)
- *   userStore.hasReportFeature('export_xlsx');                 // → замок кнопки
+ *   userStore.can('change_group', { currentValue: '' });       // → true
+ *   userStore.can('change_group', { currentValue: '8' });      // → false
+ *   userStore.hasReportFeature('export_csv');                  // → замок кнопки
  */
 export const userStore = {
   /**
@@ -33,7 +32,7 @@ export const userStore = {
   userId: null,
 
   /**
-   * REPORTS §17: доступ к отчётам. null = поля reports_* не пришли.
+   * §17: доступ к отчётам. null = поля reports_* не пришли.
    *
    * Дефолт null осознан и НЕ противоречит серверному fail-closed:
    * старый сервер без гейта разрешает всё, поэтому UI без замков
@@ -44,75 +43,77 @@ export const userStore = {
   reportsLevel: null,
   reportsFeatures: null,
   reportsLimits: null,
+  /** Сигнатура набора — чтобы событие reports:access не звало зря. */
+  _reportsAccessSig: "",
 
   /**
    * Роли, которым разрешено базовое редактирование заявки.
    * Используется как быстрый фильтр в can().
    */
-    ROLES_EDIT: ['administrator', 'dispatcher'],
+  ROLES_EDIT: ["administrator", "dispatcher"],
 
-    // REPORTS §17: уровень доступа к отчётам — свойство тенанта, приезжает из config.
-    // null = поля reports_* не пришли (сервер без REPORTS §17): тогда гейтов нет,
-    // UI совпадает с поведением старого сервера. Серверный fail-closed —
-    // другой слой, противоречия нет.
-    reportsLevel: null,
-    reportsFeatures: null,
-    reportsLimits: null,
-    /** Сигнатура для события reports:access — см. setReportsAccess. */
-    _reportsAccessSig: '',
+  /**
+   * Установить ID текущего пользователя (из user_permissions.user_id).
+   */
+  setUserId(id) {
+    this.userId = id != null ? Number(id) : null;
+  },
 
-    /**
-     * Установить ID текущего пользователя (из user_permissions.user_id).
-     */
-    setUserId(id) {
-        this.userId = (id != null) ? Number(id) : null;
-    },
-    setRole(newRole) {
-        this.role = (this.ROLES.includes(newRole)) ? newRole : 'guest';
-    },
+  setRole(newRole) {
+    this.role = this.ROLES.includes(newRole) ? newRole : "guest";
+  },
 
-    /**
-     * REPORTS §17: применение уровня из config. Возвращает true при реальном
-     * изменении: initialize() зовётся и по bump staff/dicts, безусловное
-     * событие reports:access пересобирало бы filtersView и теряло
-     * введённые фильтры.
-     */
-    setReportsAccess(level, features, limits) {
-        const nextLevel = (typeof level === 'string' && level) ? level : null;
-        const nextFeatures = Array.isArray(features) ? features.map(String) : null;
-        const nextLimits = (limits && typeof limits === 'object') ? limits : null;
-        const sig = JSON.stringify([nextLevel, nextFeatures, nextLimits]);
-        const changed = sig !== this._reportsAccessSig;
-        this._reportsAccessSig = sig;
-        this.reportsLevel = nextLevel;
-        this.reportsFeatures = nextFeatures;
-        this.reportsLimits = nextLimits;
-        return changed;
-    },
+  /**
+   * §17: применить блок доступа из config. Возвращает true, если
+   * что-то изменилось — menu-manager диспатчит reports:access только
+   * при изменении, иначе повторный config по staff/dicts дёргал бы
+   * перерисовку замков и пересборку формы на каждом полле.
+   *
+   * Пустой массив — валидное значение (light: способностей нет) и
+   * обязан отличаться от null (гейта нет). Приведение [] → null
+   * открыло бы light весь экран, поэтому проверяем именно Array.isArray.
+   */
+  setReportsAccess(level, features, limits) {
+    const nextLevel = typeof level === "string" && level ? level : null;
+    const nextFeatures = Array.isArray(features) ? features.map(String) : null;
+    const nextLimits = limits && typeof limits === "object" ? limits : null;
 
-    /** Булева способность: summary, export_csv, export_print, export_xlsx. */
-    hasReportFeature(key) {
-        if (this.reportsFeatures === null) return true;
-        return this.reportsFeatures.includes(key);
-    },
+    const sig = JSON.stringify([nextLevel, nextFeatures, nextLimits]);
+    const changed = sig !== this._reportsAccessSig;
+    this._reportsAccessSig = sig;
+    this.reportsLevel = nextLevel;
+    this.reportsFeatures = nextFeatures;
+    this.reportsLimits = nextLimits;
+    return changed;
+  },
 
-    /** Группа фильтров payload: date, address, department, status, staff, text… */
-    reportGroupAllowed(group) {
-        const groups = this.reportsLimits?.filter_groups;
-        if (!Array.isArray(groups)) return true;
-        return groups.includes(group);
-    },
+  /**
+   * Булева способность: summary, export_csv, export_print, export_xlsx.
+   * Ключи — из REPORTS.ACCESS.FEATURES, значения совпадают с серверными
+   * константами ReportsAccess::FEATURE_*.
+   */
+  hasReportFeature(key) {
+    if (this.reportsFeatures === null) return true;
+    return this.reportsFeatures.includes(String(key));
+  },
 
-    /** Числовой потолок уровня; fallback — константа config.js (правило 8). */
-    reportLimit(key, fallback) {
-        const v = Number(this.reportsLimits?.[key]);
-        return Number.isFinite(v) && v > 0 ? v : fallback;
-    },
+  /** Группа фильтров payload: date, address, department, status, staff, text… */
+  reportGroupAllowed(group) {
+    const groups = this.reportsLimits?.filter_groups;
+    if (!Array.isArray(groups)) return true;
+    return groups.includes(String(group));
+  },
 
-    /** light: отчёт только по конкретному лифту, дом/город недоступны. */
-    reportObjectOnly() {
-        return this.reportsLimits?.address_scope === 'object_only';
-    },
+  /** Числовой потолок уровня; fallback — константа config.js (правило 8). */
+  reportLimit(key, fallback) {
+    const v = Number(this.reportsLimits?.[key]);
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  },
+
+  /** light: отчёт только по конкретному лифту, дом/город недоступны. */
+  reportObjectOnly() {
+    return this.reportsLimits?.address_scope === "object_only";
+  },
 
   isAdmin() {
     return this.role === "administrator";
@@ -189,7 +190,7 @@ export const userStore = {
         if (this.isEngineer()) return !!ctx.isAssigned && !ctx.notifyStatus;
         return false;
 
-      // ---------- МЕНЮ (грубая проверка, что вообще имеет смысл показывать) ----------
+      // ---------- МЕНЮ ----------
       // Что видно в меню — решает сервер через menu_structure.required_permission.
       case "view_reports":
         return this.isAdmin() || this.isDispatcher();

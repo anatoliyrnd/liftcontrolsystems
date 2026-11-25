@@ -24,6 +24,12 @@ import { renderPrintDocument } from "./reports/print-document.js";
  * Экспорт работает по последнему принятому payload. Кулдаун свой:
  * обновление таблицы его не сбрасывает.
  *
+ * REPORTS §17: замки способностей. CSV и печать — standard+, XLSX —
+ * extended. Замок берётся ИЗ СПИСКА reports_features, а не из имени
+ * уровня: матрица живёт на сервере, клиент не выводит её заново.
+ * Замок вплетён в выражение disabled внутри _syncExport — навешенный
+ * поверх он снимался бы первой же выгрузкой.
+ *
  * После каждого await — isStale() (правило 2). Офлайн — по флагу
  * resp.offline === true, не по кодам (правило 6).
  */
@@ -58,6 +64,7 @@ export class ReportsResultsController {
     const myMountId = ++this._mountId;
     const isStale = () => this._mountId !== myMountId;
     this._isActive = true;
+
     if (!this._grabElements()) return;
 
     if (!this._canView()) {
@@ -68,6 +75,7 @@ export class ReportsResultsController {
     this.tableView = createTableView(this._els.table, this.router);
     this.tableView.rebuildHeaders();
     this.tableView.bindRowClick();
+
     this._bindButtons();
     this._subscribeNetwork();
 
@@ -110,6 +118,7 @@ export class ReportsResultsController {
   }
 
   // ------------------------------------------------------------------
+
   _grabElements() {
     const get = (id) => document.getElementById(id);
     const els = {
@@ -126,9 +135,13 @@ export class ReportsResultsController {
       refreshBtn: get("rrRefreshBtn"),
       exportBtn: get("rrExportBtn"),
       printBtn: get("rrPrintBtn"),
+      xlsxBtn: get("rrXlsxBtn"),
+      sheetSelect: get("rrPrintSheet"),
     };
+    // XLSX и лист печати не обязательны: шаблон мог остаться прежним.
+    // Без них окно обязано работать, а не гаснуть целиком.
     for (const [name, node] of Object.entries(els)) {
-      if (!node) {
+      if (!node && name !== "xlsxBtn" && name !== "sheetSelect") {
         console.warn("[ReportsResults] нет элемента:", name);
         return false;
       }
@@ -146,6 +159,30 @@ export class ReportsResultsController {
     return userStore.userId ?? authStore.getUser()?.id ?? null;
   }
 
+  /**
+   * Ключи способностей. Фолбэк-литералы страхуют от рассинхрона
+   * config.js и контроллера: отсутствующий словарь не должен ни
+   * гасить разрешённое, ни открывать запрещённое — сервер всё равно
+   * гейтит, а UI обязан совпадать с присланным списком.
+   */
+  _featureKeys() {
+    const f = REPORTS.ACCESS?.FEATURES || {};
+    return {
+      csv: f.EXPORT_CSV || "export_csv",
+      print: f.EXPORT_PRINT || "export_print",
+      xlsx: f.EXPORT_XLSX || "export_xlsx",
+    };
+  }
+
+  _lockHints() {
+    const a = REPORTS.ACCESS || {};
+    return {
+      generic:
+        a.LOCK_FEATURE_HINT || "Недоступно на текущем уровне доступа к отчётам",
+      xlsx: a.XLSX_LOCK_HINT || "Выгрузка XLSX доступна в тарифе «Расширенный»",
+    };
+  }
+
   _bindButtons() {
     this._els.refreshBtn.addEventListener("click", () => {
       if (!this._payload) {
@@ -155,13 +192,11 @@ export class ReportsResultsController {
       }
       this._run(this._page);
     });
+
     this._els.exportBtn.addEventListener("click", () => this._onExport());
-    // Кнопка ищется по id, а не через _grabElements: правка grab
-    // потребовала бы ещё одного якоря, а элемент статический.
-    document
-      .getElementById("rrXlsxBtn")
-      ?.addEventListener("click", () => this._onXlsx());
+    this._els.xlsxBtn?.addEventListener("click", () => this._onXlsx());
     this._els.printBtn.addEventListener("click", () => this._onPrint());
+
     this._syncExport();
   }
 
@@ -173,15 +208,19 @@ export class ReportsResultsController {
    * Окно открывается СИНХРОННО в клике, до первого await — иначе
    * блокировщик попапов. noopener нельзя: нужен win.document.
    * Данные — по _payload последнего принятого поиска, не по форме.
+   *
+   * §17: гейт способности стоит ДО window.open — иначе запрещённая
+   * печать открывала бы пустое третье окно, которое пользователь
+   * закрывает руками.
    */
   async _onPrint() {
-    // Порядок критичен: гейт после window.open открыл бы пустое третье
-    // окно, которое пользователь закрывает руками.
-    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_PRINT)) {
-      notify.warning(REPORTS.ACCESS.LOCK_HINT);
+    const K = this._featureKeys();
+    if (!userStore.hasReportFeature(K.print)) {
+      notify.warning(this._lockHints().generic);
       return;
     }
     if (this._printBusy) return;
+
     const win = window.open(
       "",
       REPORTS.PRINT_WINDOW_NAME,
@@ -207,17 +246,17 @@ export class ReportsResultsController {
     }
 
     const myMountId = this._mountId;
-    const sheetId =
-      document.getElementById("rrPrintSheet")?.value ??
-      REPORTS.PRINT_SHEET_DEFAULT;
+    const sheetId = this._els.sheetSelect?.value ?? REPORTS.PRINT_SHEET_DEFAULT;
+
     const meta = {
       tenant: this._baseTitle,
-      period: document.getElementById("rrPeriod")?.textContent?.trim() ?? "",
-      filters: document.getElementById("rrEcho")?.textContent?.trim() ?? "",
+      period: this._els.period?.textContent?.trim() ?? "",
+      filters: this._els.echo?.textContent?.trim() ?? "",
       generated: `Сформировано: ${formatTsMsk(Math.floor(Date.now() / 1000))} (МСК)`,
     };
 
     this._printBusy = true;
+    this._syncExport();
     this._printMessage(win, "Загрузка данных для печати…");
 
     try {
@@ -235,7 +274,7 @@ export class ReportsResultsController {
         return;
       }
       if (resp?.code === "aborted" || resp?._authLost) return;
-      // retryAfterSec и reason лежат на верхнем уровне — как в _onExport.
+
       if (resp?.code === "rate_limited") {
         const sec = Number(resp.retryAfterSec) || REPORTS.PRINT_COOLDOWN_SEC;
         this._printMessage(
@@ -244,6 +283,7 @@ export class ReportsResultsController {
         );
         return;
       }
+
       if (!resp || resp.status !== "ok") {
         this._printMessage(
           win,
@@ -266,6 +306,7 @@ export class ReportsResultsController {
       renderPrintDocument(win, { rows, meta, sheetId });
     } finally {
       this._printBusy = false;
+      if (this._isActive) this._syncExport();
     }
   }
 
@@ -275,25 +316,31 @@ export class ReportsResultsController {
    * бакеты обратно — после книги CSV молчал бы 30 с без причины.
    */
   async _onXlsx() {
-    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_XLSX)) {
-      notify.warning(REPORTS.ACCESS.XLSX_LOCK_HINT);
+    const K = this._featureKeys();
+    if (!userStore.hasReportFeature(K.xlsx)) {
+      notify.warning(this._lockHints().xlsx);
       return;
     }
     if (!this._payload || this._xlsxBusy) return;
+
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
+
     this._xlsxBusy = true;
-    // Единственная точка расчёта состояния кнопок. Ручной
+    // Единственная точка расчёта состояния кнопок: ручной
     // btn.disabled = true/false разъезжался бы с замком уровня.
     this._syncExport();
+
     try {
       const resp = await this.repo.exportXlsx(this._payload);
       if (isStale()) return;
       if (resp?._authLost) return;
+
       if (resp?.offline === true) {
         this._showStub("Нет соединения. Выгрузка недоступна.");
         return;
       }
+
       if (resp?.code === "rate_limited") {
         const sec = Number(resp.retryAfterSec) || REPORTS.EXPORT_COOLDOWN_SEC;
         notify.warning(
@@ -301,6 +348,7 @@ export class ReportsResultsController {
         );
         return;
       }
+
       if (!resp || resp.status !== "ok") {
         if (resp?.reason === "export_too_many_rows") {
           notify.warning("Слишком много результатов. Сузьте период поиска.");
@@ -312,10 +360,12 @@ export class ReportsResultsController {
         );
         return;
       }
+
       if (!resp.data) {
         notify.info(resp.message || "По вашему запросу ничего не найдено");
         return;
       }
+
       if (this._saveFile(resp.data, "report.xlsx")) {
         notify.success(`Выгружено строк: ${resp.data.rows_count ?? 0}`);
         logHistoryAction(
@@ -324,12 +374,11 @@ export class ReportsResultsController {
       }
     } finally {
       this._xlsxBusy = false;
-      // Было btn.disabled = false — снимало бы и замок уровня.
       if (!isStale()) this._syncExport();
     }
   }
 
-  /** base64 → blob → ссылка. Копия образца из _onExport. */
+  /** base64 → blob → ссылка. Один путь сохранения для CSV и XLSX. */
   _saveFile(data, fallbackName) {
     try {
       const bin = atob(data.file_base64);
@@ -372,6 +421,7 @@ export class ReportsResultsController {
   _subscribeNetwork() {
     this._eventsAbort = new AbortController();
     const signal = this._eventsAbort.signal;
+
     window.addEventListener(
       "offline",
       () =>
@@ -380,6 +430,7 @@ export class ReportsResultsController {
         ),
       { signal },
     );
+
     window.addEventListener(
       "online",
       () => {
@@ -388,7 +439,8 @@ export class ReportsResultsController {
       },
       { signal },
     );
-    // REPORTS §17: поллер работает и в служебном окне (start по isAuth, без
+
+    // §17: поллер работает и в служебном окне (start по isAuth, без
     // standalone-guard), поэтому уровень меняется здесь на лету.
     // Замки пересчитываются, а не навешиваются один раз при mount.
     window.addEventListener("reports:access", () => this._syncExport(), {
@@ -455,14 +507,18 @@ export class ReportsResultsController {
       this.repo.fetchStats(this._payload),
       this.repo.fetchList(this._payload, page, REPORTS.LIMIT_DEFAULT),
     ]);
+
     if (isStale() || seq !== this._seq) return;
     this._els.refreshBtn.disabled = false;
+
     if (statsResp?._authLost || listResp?._authLost) return;
+
     if (statsResp?.offline === true || listResp?.offline === true) {
       this._showStub("Нет соединения. Показаны последние полученные данные.");
       return;
     }
     if (statsResp?.code === "aborted" || listResp?.code === "aborted") return;
+
     const err = [statsResp, listResp].find((r) => r && r.status === "error");
     if (err) {
       const msg = err.message || "Не удалось построить отчёт.";
@@ -493,79 +549,76 @@ export class ReportsResultsController {
     this._els.echo.textContent = this._echoText(this._payload, pg);
     this._els.period.textContent = `Период МСК: ${formatTsMsk(this._payload.date_from)} — ${formatTsMsk(this._payload.date_to)}`;
     this._els.count.textContent = pg ? `Найдено: ${pg.total_items}` : "";
+
     // Номер в заголовке вкладки: диспетчер находит нужную вкладку
     // среди десятка открытых по одному взгляду.
     document.title = pg
       ? `Отчёт (${pg.total_items}) — LiftCS`
       : "Таблица отчёта — LiftCS";
+
     this._syncExport();
   }
 
   // ------------------------------------------------------------------
+
   async _onExport() {
-    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_CSV)) {
-      notify.warning(REPORTS.ACCESS.LOCK_HINT);
+    const K = this._featureKeys();
+    if (!userStore.hasReportFeature(K.csv)) {
+      notify.warning(this._lockHints().generic);
       return;
     }
-
     if (!this._payload || this._exportBusy) return;
+
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
+
     this._exportBusy = true;
     this._syncExport();
-    const resp = await this.repo.exportCsv(this._payload);
-    if (isStale()) return;
-    this._exportBusy = false;
-    this._syncExport();
-    if (resp?._authLost) return;
-    if (resp?.offline === true) {
-      this._showStub("Нет соединения. Выгрузка недоступна.");
-      return;
-    }
-    if (resp?.code === "rate_limited") {
-      const sec = Number(resp.retryAfterSec) || REPORTS.EXPORT_COOLDOWN_SEC;
-      notify.warning(`Слишком часто. Повторите выгрузку через ${sec} с.`);
-      this._startCooldown(sec);
-      return;
-    }
-    if (!resp || resp.status !== "ok") {
-      if (resp?.reason === "export_too_many_rows") {
-        notify.warning("Слишком много результатов. Сузьте период поиска.");
-      } else {
-        notify.error(resp?.message || "Не удалось выгрузить отчёт.");
-      }
-      logHistoryAction(
-        "Экспорт отчёта: " + (resp?.message || resp?.code || "ошибка"),
-      );
-      return;
-    }
-    if (!resp.data) {
-      notify.info(resp.message || "По вашему запросу ничего не найдено");
-      return;
-    }
+
     try {
-      const bin = atob(resp.data.file_base64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes], {
-        type: resp.data.mime_type || "text/csv",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = resp.data.filename || "report.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-      notify.success(`Выгружено строк: ${resp.data.rows_count ?? 0}`);
-      logHistoryAction(
-        `Выгрузка CSV отчёта (${resp.data.rows_count ?? 0} строк).`,
-      );
-      this._startCooldown(REPORTS.EXPORT_COOLDOWN_SEC);
-    } catch (e) {
-      console.warn("[ReportsResults] save file failed:", e);
-      notify.error("Не удалось сохранить файл выгрузки.");
+      const resp = await this.repo.exportCsv(this._payload);
+      if (isStale()) return;
+      if (resp?._authLost) return;
+
+      if (resp?.offline === true) {
+        this._showStub("Нет соединения. Выгрузка недоступна.");
+        return;
+      }
+
+      if (resp?.code === "rate_limited") {
+        const sec = Number(resp.retryAfterSec) || REPORTS.EXPORT_COOLDOWN_SEC;
+        notify.warning(`Слишком часто. Повторите выгрузку через ${sec} с.`);
+        this._startCooldown(sec);
+        return;
+      }
+
+      if (!resp || resp.status !== "ok") {
+        if (resp?.reason === "export_too_many_rows") {
+          notify.warning("Слишком много результатов. Сузьте период поиска.");
+        } else {
+          notify.error(resp?.message || "Не удалось выгрузить отчёт.");
+        }
+        logHistoryAction(
+          "Экспорт отчёта: " + (resp?.message || resp?.code || "ошибка"),
+        );
+        return;
+      }
+
+      if (!resp.data) {
+        notify.info(resp.message || "По вашему запросу ничего не найдено");
+        return;
+      }
+
+      if (this._saveFile(resp.data, "report.csv")) {
+        notify.success(`Выгружено строк: ${resp.data.rows_count ?? 0}`);
+        logHistoryAction(
+          `Выгрузка CSV отчёта (${resp.data.rows_count ?? 0} строк).`,
+        );
+        this._startCooldown(REPORTS.EXPORT_COOLDOWN_SEC);
+      }
+    } finally {
+      this._exportBusy = false;
+      if (!isStale()) this._syncExport();
     }
   }
 
@@ -586,19 +639,21 @@ export class ReportsResultsController {
    * Состояние всех кнопок выгрузки — в одном месте и на каждое
    * изменение: после _run, кулдауна, старта/финиша выгрузки и смены
    * уровня. Замок уровня вплетён В выражение disabled, а не навешен
-   * поверх: иначе первая же выгрузка его снимала (REPORTS §17).
+   * поверх: иначе первая же выгрузка его снимала (§17).
    *
-   * XLSX и лист печати ищутся по id, как в _bindButtons: правка
-   * _grabElements потребовала бы ещё двух якорей ради статических
-   * элементов.
+   * Источник замка — reports_features с сервера. Имя уровня здесь
+   * не участвует: клиент не выводит матрицу заново.
    */
   _syncExport() {
     if (!this._els) return;
+
+    const K = this._featureKeys();
+    const H = this._lockHints();
     const cooling = Date.now() < this._cooldownUntil;
-    const F = REPORTS.ACCESS.FEATURES;
-    const csvLocked = !userStore.hasReportFeature(F.EXPORT_CSV);
-    const printLocked = !userStore.hasReportFeature(F.EXPORT_PRINT);
-    const xlsxLocked = !userStore.hasReportFeature(F.EXPORT_XLSX);
+
+    const csvLocked = !userStore.hasReportFeature(K.csv);
+    const printLocked = !userStore.hasReportFeature(K.print);
+    const xlsxLocked = !userStore.hasReportFeature(K.xlsx);
 
     // Пустая выборка: сервер вернёт data:null, но окно 30 с уже
     // сгорит — лимит стоит до запроса намеренно (защита от перебора
@@ -612,33 +667,36 @@ export class ReportsResultsController {
       ? "Генерация..."
       : "Выгрузить CSV";
     this._els.exportBtn.title = csvLocked
-      ? REPORTS.ACCESS.LOCK_HINT
+      ? H.generic
       : this._isEmpty
         ? "В выборке нет строк — выгружать нечего"
         : "";
     this._els.exportBtn.classList.toggle("locked", csvLocked);
 
     this._els.printBtn.disabled =
-      printLocked || !this._payload || this._isEmpty;
-    this._els.printBtn.title = printLocked ? REPORTS.ACCESS.LOCK_HINT : "";
+      printLocked || this._printBusy || !this._payload || this._isEmpty;
+    this._els.printBtn.title = printLocked ? H.generic : "";
     this._els.printBtn.classList.toggle("locked", printLocked);
 
-    const sheet = document.getElementById("rrPrintSheet");
-    if (sheet) {
-      sheet.disabled = printLocked;
-      sheet.classList.toggle("locked", printLocked);
+    if (this._els.sheetSelect) {
+      this._els.sheetSelect.disabled = printLocked;
+      this._els.sheetSelect.title = printLocked ? H.generic : "Формат листа";
+      this._els.sheetSelect.classList.toggle("locked", printLocked);
     }
 
-    const xlsxBtn = document.getElementById("rrXlsxBtn");
-    if (xlsxBtn) {
+    if (this._els.xlsxBtn) {
       // Пустая выборка гасит и XLSX — раньше кнопка горела, а сервер
       // отвечал data:null. Выравниваем с CSV, поведение не расширяем.
-      xlsxBtn.disabled =
+      this._els.xlsxBtn.disabled =
         xlsxLocked || !this._payload || this._xlsxBusy || this._isEmpty;
-      xlsxBtn.title = xlsxLocked ? REPORTS.ACCESS.XLSX_LOCK_HINT : "";
-      xlsxBtn.classList.toggle("locked", xlsxLocked);
+      this._els.xlsxBtn.textContent = this._xlsxBusy
+        ? "Генерация..."
+        : "Выгрузить XLSX";
+      this._els.xlsxBtn.title = xlsxLocked ? H.xlsx : "";
+      this._els.xlsxBtn.classList.toggle("locked", xlsxLocked);
     }
   }
+
   _showStub(text) {
     if (!this._els) return;
     this._els.stub.textContent = text;

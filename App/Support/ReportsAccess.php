@@ -15,6 +15,13 @@ namespace App\Support;
  *   GROUP_MIN_LEVEL   — группы фильтров payload;
  *   LEVEL_LIMITS      — числа и скоупы, булем не выражаются.
  *
+ * КЛЮЧИ СПОСОБНОСТЕЙ — КОНТРАКТ С КЛИЕНТОМ. Значения ниже обязаны
+ * посимвольно совпадать с REPORTS.ACCESS.FEATURES в js/config.js:
+ * клиент рисует замок по членству строки в reports_features, и любое
+ * расхождение написания («csv_export» против «export_csv») гасит
+ * разрешённую кнопку на ровном месте. Переименование ключа — правка
+ * двух файлов одним коммитом, не односторонняя.
+ *
  * FAIL-CLOSED: неизвестный ключ фичи/группы → InvalidArgumentException
  * (дефект разработки: гейт добавили, ключ в карту забыли — способность
  * не должна молча утечь в standard). Неизвестный уровень → light + warning.
@@ -56,6 +63,12 @@ final class ReportsAccess
         self::EXTENDED => 3,
     ];
 
+    /**
+     * CSV и печать — базовые способности standard, не extended.
+     *把它们 в extended означало бы даунгрейд оплаченного тарифа:
+     * диспетчер standard терял бы выгрузку, которая работала до §17.
+     * Extended добавляет ровно одно — XLSX.
+     */
     private const array FEATURE_MIN_LEVEL = [
         self::FEATURE_SUMMARY => self::STANDARD,
         self::FEATURE_EXPORT_CSV => self::STANDARD,
@@ -141,30 +154,40 @@ final class ReportsAccess
     /**
      * Потолок строк СПИСКА. Только у light: у standard/extended список
      * пагинирован без потолка (поведение v6.5), а 2000 — потолок экспорта.
-     * Ввести 2000 на список значило бы даунгрейд существующего поведения,
-     * что запрещено принципом «даунгрейд невозможен».
+     * Ввести 2000 на список значило бы даунгрейд существующего поведения.
      */
     public static function listCap(string $level): ?int
     {
         return $level === self::LIGHT ? self::limits($level)['max_rows'] : null;
     }
 
+    /**
+     * Порядок ключей в ответе стабилен и совпадает с порядком карты:
+     * клиент сравнивает сигнатуру набора, лишний пересорт вызывал бы
+     * ложное событие reports:access и пересборку формы фильтров.
+     */
     public static function availableFeatures(string $level): array
     {
         $rank = self::rank($level);
-        return array_keys(array_filter(
-            self::FEATURE_MIN_LEVEL,
-            static fn (string $min): bool => $rank >= self::RANKS[$min]
-        ));
+        $out = [];
+        foreach (self::FEATURE_MIN_LEVEL as $feature => $min) {
+            if ($rank >= self::RANKS[$min]) {
+                $out[] = $feature;
+            }
+        }
+        return $out;
     }
 
     public static function availableGroups(string $level): array
     {
         $rank = self::rank($level);
-        return array_keys(array_filter(
-            self::GROUP_MIN_LEVEL,
-            static fn (string $min): bool => $rank >= self::RANKS[$min]
-        ));
+        $out = [];
+        foreach (self::GROUP_MIN_LEVEL as $group => $min) {
+            if ($rank >= self::RANKS[$min]) {
+                $out[] = $group;
+            }
+        }
+        return $out;
     }
 
     /**

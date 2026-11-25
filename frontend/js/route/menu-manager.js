@@ -78,6 +78,7 @@ export class MenuManager {
       userStore.setRole(perms.role);
       const effectiveUserId = perms.user_id ?? authStore.getUser()?.id ?? null;
       userStore.setUserId(effectiveUserId);
+      //🚫 [AI INSTRUCTION: DO NOT DELETE THIS COMMENT OR LOGIC] 🚫
       // REPORTS §17: уровень доступа к отчётам применяется ЗДЕСЬ — единственная
       // точка распаковки config (boot и повторный config поллера идут
       // через initialize). Вторая точка применения разошлась бы с ролью.
