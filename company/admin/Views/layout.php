@@ -10,7 +10,7 @@ $title = $title ?? 'Админ-панель';
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title><?= htmlspecialchars($title, ENT_QUOTES, 'UTF-8') ?></title>
     <!-- Продакшн: заменить CDN на admin/assets/adminlte/... -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/admin-lte@4/dist/css/adminlte.min.css">
+    <link rel="stylesheet" href="admin/assets/adminlte/css/adminlte.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1/font/bootstrap-icons.min.css">
 </head>
 <body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
