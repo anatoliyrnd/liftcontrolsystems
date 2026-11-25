@@ -308,7 +308,7 @@ final class ApiController
         $clientVersions = is_array($clientVersions) ? $clientVersions : [];
         $pollingData = $this->notificationsService->getSince($sinceId);
         $pollingData['versions'] = $this->addressCacheService->getVersions();
-        // §16: ревизия уровня доступа. Tenant уже в памяти после create()
+        // REPORTS §17: ревизия уровня доступа. Tenant уже в памяти после create()
         // (Registry читается на каждый запрос) — ноль дополнительных
         // запросов. Ключ отдельный от staff/dicts: смена тарифа не должна
         // тянуть переливку справочников. В outdated НЕ мерджим: клиент его

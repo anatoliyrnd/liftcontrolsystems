@@ -9,7 +9,7 @@ use App\Support\CallPolicy;
 use App\Support\CallScope;
 use App\Support\DemoGuard;
 use App\Tenant;
-use App\Support\ReportsAccess;   // §16: уровни доступа к отчётам
+use App\Support\ReportsAccess;   // REPORTS §17: уровни доступа к отчётам
 /**
  * Конфигурация SPA: права, меню, справочники.
  *
@@ -118,7 +118,7 @@ final class ConfigService
             'group'          => $this->getDict(3),
             'repair_time'    => ['не указан', '30 мин', 'Сегодня', 'Завтра', 'Три дня', '7 дней', '10 дней', '15 дней', '1 месяц', '3 месяца'],
         ];
-        // §16: уровни доступа к отчётам. Плоские аддитивные поля рядом
+        // REPORTS §17: уровни доступа к отчётам. Плоские аддитивные поля рядом
         // со status/is_legacy (§10.1): старые клиенты их игнорируют,
         // контракт не ломается. Матрица уровней — только в ReportsAccess;
         // здесь лишь выдача. Tenant в ConfigService не nullable, поэтому

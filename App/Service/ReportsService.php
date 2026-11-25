@@ -17,7 +17,7 @@ use App\Tenant;
  * долга §20 для нового модуля. Иначе инженер или гость получили бы
  * выгрузку всего тенанта через DevTools.
  *
- * §16: порядок проверок фиксирован и дешёвые раньше дорогих:
+ * REPORTS §17: порядок проверок фиксирован и дешёвые раньше дорогих:
  * роль → булева способность → группы фильтров/адрес-скоуп → даты →
  * строки → лимитер экспорта. Отказ по уровню не сжигает окно лимитера
  * и не зависит от мусорных дат.
@@ -50,7 +50,7 @@ final class ReportsService
         }
     }
 
-    /** §16: уровень тенанта. Нормализация fail-closed внутри ReportsAccess. */
+    /** REPORTS §17: уровень тенанта. Нормализация fail-closed внутри ReportsAccess. */
     private function level(): string
     {
         return ReportsAccess::normalizeLevel($this->tenant?->reportsLevel);
@@ -62,7 +62,7 @@ final class ReportsService
     }
 
     /**
-     * §16: гейт булевой способности (сводка, форматы экспорта).
+     * REPORTS §17: гейт булевой способности (сводка, форматы экспорта).
      * reason верхнего уровня, details плоско (§10.1, прецедент retry_after):
      * клиент читает resp.feature и рисует замок/тизер по нему.
      */
@@ -79,7 +79,7 @@ final class ReportsService
     }
 
     /**
-     * §16: группы фильтров и адрес-скоуп уровня.
+     * REPORTS §17: группы фильтров и адрес-скоуп уровня.
      *
      * Отказ ТОЛЬКО явный: дефолты (status=all, staff_id=0, пустые тексты,
      * city_only=false, пустые списки) проходят молча — клиент light их
@@ -146,7 +146,7 @@ final class ReportsService
 
     /**
      * Порядок проверок фиксирован: сначала «пусто», потом «слишком длинно».
-     * §16: потолок периода — из лимитов уровня (31 у light, 90 у остальных);
+     * REPORTS §17: потолок периода — из лимитов уровня (31 у light, 90 у остальных);
      * reason прежний date_range_too_long, текст динамический.
      */
     private function validateDates(array $f, int $maxDays): bool
@@ -183,7 +183,7 @@ final class ReportsService
      *
      * validateDates не нужен: пресет всегда валиден и ≤ 31 дня.
      *
-     * §16: сводка — способность standard+. У light клиент рисует тизер
+     * REPORTS §17: сводка — способность standard+. У light клиент рисует тизер
      * без запроса; прямой вызов через DevTools получает 403 здесь.
      */
     public function getSummary(array $user, array $body): array
@@ -229,7 +229,7 @@ final class ReportsService
         return [$from, $to];
     }
 
-    /** §16: справочники открыты всем уровням — словари и так в config.staff_list. */
+    /** REPORTS §17: справочники открыты всем уровням — словари и так в config.staff_list. */
     public function getFiltersData(array $user): array
     {
         $this->gate($user);
@@ -259,7 +259,7 @@ final class ReportsService
         $page = max(1, (int) ($body['page'] ?? 1));
         $sort = $this->sort($body);
         $total = $this->repo->countTotal($f, $user);
-        // §16: потолок списка только у light (100), проверка ДО выборки.
+        // REPORTS §17: потолок списка только у light (100), проверка ДО выборки.
         // reason переиспользован export_too_many_rows: сообщение «сузьте
         // период» уже принято приёмкой №40, новый reason ломал бы клиент.
         $cap = ReportsAccess::listCap($this->level());
@@ -297,7 +297,7 @@ final class ReportsService
     private function export(array $user, array $body): ?array
     {
         $this->gate($user);
-        // Карта форматов: allowlist, бакет лимитера, окно и §16-способность
+        // Карта форматов: allowlist, бакет лимитера, окно и REPORTS §17-способность
         // — в одном месте. Новый формат нельзя добавить наполовину: либо
         // строка целиком, либо unsupported_format. Окно печати короче:
         // запрос тот же на 2001 строку, но перепечатать после правки фильтра
@@ -316,7 +316,7 @@ final class ReportsService
                 reason: 'unsupported_format'
             );
         }
-        // §16: гейт способности ДО лимитера и до запросов. Иначе standard-
+        // REPORTS §17: гейт способности ДО лимитера и до запросов. Иначе standard-
         // тенант, дёргая XLSX через DevTools, сжигал бы окно бакета отказом.
         $this->gateFeature($fmt['feature']);
 

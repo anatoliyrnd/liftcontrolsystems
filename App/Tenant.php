@@ -30,7 +30,7 @@ final readonly class Tenant
         public string $dbUser,
         public string $dbPassword,
         public bool $legacyCompat = true,
-        // §16: уровень доступа к отчётам и его ревизия. Дефолты в конструкторе
+        // REPORTS §17: уровень доступа к отчётам и его ревизия. Дефолты в конструкторе
         // сохраняют легаси-вызовы (тесты/CLI) на прежнем поведении standard;
         // боевой путь fromRequest() всегда передаёт нормализованные значения.
         public string $reportsLevel = ReportsAccess::STANDARD,
@@ -120,7 +120,7 @@ final readonly class Tenant
             $data['db_user'],
             \App\Support\Crypto::decrypt($data['db_password']),
             (bool) ($data['legacy_compat'] ?? true),
-            // §16: нормализация здесь, а не в сервисах: один источник
+            // REPORTS §17: нормализация здесь, а не в сервисах: один источник
             // истины на весь запрос. Registry отдаёт SELECT *, колонка
             // доезжает без правки SQL. NULL (код раньше миграции) →
             // fail-closed light + warning, см. ReportsAccess::normalizeLevel.
