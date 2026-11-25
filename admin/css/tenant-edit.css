@@ -1,0 +1,172 @@
+/* Редактирование организации: секции, тарифные карты, инспектор. */
+
+body{padding-bottom:calc(var(--foot-h) + 24px)}
+
+.edit-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
+.edit-main{min-width:0;display:flex;flex-direction:column;gap:16px}
+
+/* ---------- заголовок записи ---------- */
+.rec-head{
+  position:relative;overflow:hidden;border-radius:var(--r-xl);padding:20px 22px;
+  background:linear-gradient(140deg,#17232f,#101821);border:1px solid var(--steel);
+  box-shadow:var(--shadow-2);
+}
+.rec-head::after{content:"";position:absolute;right:-60px;top:-70px;width:230px;height:230px;
+  border-radius:50%;background:radial-gradient(circle,var(--hc,var(--electric)),transparent 68%);opacity:.16}
+.rec-head .eyebrow{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:8px}
+.rec-head h1{font-size:23px;font-weight:800;letter-spacing:-.01em;position:relative;
+  overflow-wrap:anywhere;line-height:1.2}
+.rec-head .host{font-family:var(--mono);font-size:13px;color:var(--electric);
+  margin-top:6px;position:relative;display:inline-flex;align-items:center;gap:8px}
+.rec-head .tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;position:relative}
+
+/* ---------- секции ---------- */
+.sect{background:linear-gradient(180deg,#131c26,#101821);border:1px solid var(--line);
+  border-radius:var(--r-xl);box-shadow:var(--shadow-2);overflow:hidden}
+.sect-head{display:flex;align-items:center;gap:13px;padding:15px 20px;
+  border-bottom:1px solid var(--line);background:linear-gradient(180deg,#16202c,#121a24)}
+.sect-n{width:28px;height:28px;flex:none;border-radius:8px;display:grid;place-items:center;
+  font-family:var(--mono);font-size:11px;font-weight:700;
+  background:linear-gradient(150deg,#1b2b3d,#0e1620);border:1px solid #2c3f55;color:var(--electric)}
+.sect-t{flex:1;min-width:0}
+.sect-t h2{font-size:13.5px;font-weight:700;letter-spacing:.03em}
+.sect-t p{margin:3px 0 0;font-size:11.5px;color:var(--ink-mute);line-height:1.45}
+.sect-body{padding:20px}
+.sect-body > .fg:last-child{margin-bottom:0}
+.sect-flag{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:99px;
+  border:1px solid var(--line);color:var(--ink-mute);background:#0b131c;white-space:nowrap}
+.sect-flag.on{color:var(--amber);border-color:#fbbf2440;background:var(--warn-bg)}
+
+.host-preview{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);
+  font-size:11.5px;color:var(--electric);background:#0b131c;border:1px solid var(--line);
+  border-radius:5px;padding:3px 8px;margin-top:6px;max-width:100%;overflow-wrap:anywhere}
+
+/* ---------- тарифные карты ---------- */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.tier{
+  position:relative;display:block;cursor:pointer;padding:15px 15px 14px;
+  border-radius:var(--r-l);border:1px solid var(--steel);
+  background:linear-gradient(160deg,#141d28,#0e151e);
+  transition:transform .18s var(--ease),border-color .18s,box-shadow .22s,background .22s;
+  overflow:hidden;
+}
+.tier::after{content:"";position:absolute;right:-40px;top:-40px;width:120px;height:120px;
+  border-radius:50%;background:radial-gradient(circle,var(--tc),transparent 68%);
+  opacity:.1;transition:opacity .25s}
+.tier:hover{transform:translateY(-2px);border-color:var(--steel-2)}
+.tier input{position:absolute;opacity:0;width:0;height:0}
+.tier-mark{position:absolute;top:14px;right:14px;width:18px;height:18px;border-radius:50%;
+  border:1.5px solid var(--steel-2);background:#0b131c;transition:all .2s var(--ease)}
+.tier-mark::after{content:"";position:absolute;inset:3.5px;border-radius:50%;
+  background:var(--tc);transform:scale(0);transition:transform .22s var(--ease-out)}
+.tier-name{display:block;font-size:14px;font-weight:700;color:var(--ink);padding-right:26px;position:relative}
+.tier-rank{display:inline-block;font-family:var(--mono);font-size:9.5px;color:var(--tc);
+  border:1px solid;border-radius:99px;padding:1px 7px;margin-top:7px;opacity:.85;position:relative}
+.tier-lims{display:flex;flex-direction:column;gap:5px;margin-top:12px;position:relative}
+.tier-lim{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--ink-mute)}
+.tier-lim b{font-family:var(--mono);color:var(--ink-dim);font-weight:600}
+.tier-caps{display:flex;gap:4px;margin-top:12px;position:relative}
+.tier-caps i{flex:1;height:4px;border-radius:2px;background:#243040;transition:background .25s}
+.tier-caps i.on{background:var(--tc);box-shadow:0 0 7px -1px var(--tc)}
+.tier-cur{position:absolute;left:15px;bottom:-1px;font-size:9px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-faint)}
+
+.tier.on,.tier:has(input:checked){
+  border-color:var(--tc);
+  background:linear-gradient(160deg,#182430,#111a24);
+  box-shadow:0 0 0 1px var(--tc),0 14px 34px -18px var(--tc);
+  transform:translateY(-2px);
+}
+.tier.on::after,.tier:has(input:checked)::after{opacity:.2}
+.tier.on .tier-mark,.tier:has(input:checked) .tier-mark{border-color:var(--tc)}
+.tier.on .tier-mark::after,.tier:has(input:checked) .tier-mark::after{transform:scale(1)}
+.tier input:focus-visible ~ .tier-mark{outline:2px solid var(--electric);outline-offset:3px}
+
+/* ---------- дельта уровня ---------- */
+.delta{margin-top:18px;border:1px solid var(--line);border-radius:var(--r-l);
+  background:#0b131c;padding:15px 16px}
+.delta-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.delta-head .t{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-mute);font-weight:700}
+.delta-arrow{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600}
+.delta-arrow svg{width:14px;height:14px;color:var(--ink-faint)}
+.delta-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.delta-col h4{font-size:10px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:8px;font-weight:700}
+.delta-col.gain h4{color:var(--signal)}
+.delta-col.loss h4{color:var(--danger)}
+.delta-list{display:flex;flex-direction:column;gap:5px}
+.delta-item{display:flex;align-items:center;gap:8px;font-size:11.5px;padding:6px 9px;
+  border-radius:var(--r-s);border:1px solid}
+.delta-item .s{font-family:var(--mono);font-weight:800;flex:none}
+.delta-col.gain .delta-item{background:var(--ok-bg);border-color:#34d39930;color:#8fe6c0}
+.delta-col.loss .delta-item{background:var(--bad-bg);border-color:#fb4d6d30;color:#ffa8b8}
+.delta-none{font-size:11.5px;color:var(--ink-faint);padding:6px 0}
+.delta-lims{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.dlim{font-size:11px;color:var(--ink-mute);background:#0e1620;border:1px solid var(--line);
+  border-radius:99px;padding:4px 10px;display:inline-flex;align-items:center;gap:6px}
+.dlim b{font-family:var(--mono);color:var(--ink);font-weight:600}
+.dlim .ar{color:var(--ink-faint)}
+.dlim.up b{color:var(--signal)}
+.dlim.down b{color:var(--danger)}
+
+/* ---------- инспектор ---------- */
+.inspector{position:sticky;top:calc(var(--head-h) + 18px);display:flex;flex-direction:column;gap:14px;min-width:0}
+.insp{background:linear-gradient(160deg,#141d28,#101821);border:1px solid var(--line);
+  border-radius:var(--r-l);box-shadow:var(--shadow-1);overflow:hidden}
+.insp-head{display:flex;align-items:center;gap:9px;padding:12px 15px;border-bottom:1px solid var(--line);
+  background:#0f1720;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-mute);font-weight:700}
+.insp-head .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--electric);
+  background:var(--info-bg);border:1px solid #22d3ee35;border-radius:99px;padding:1px 8px;letter-spacing:0}
+.insp-body{padding:14px 15px}
+.insp-body.flush{padding:0}
+
+.diff-list{display:flex;flex-direction:column}
+.diff-row{padding:10px 15px;border-bottom:1px solid var(--line);animation:fadeUp .26s var(--ease-out)}
+.diff-row:last-child{border-bottom:none}
+.diff-k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:5px}
+.diff-v{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;flex-wrap:wrap}
+.diff-v .from{color:var(--ink-faint);text-decoration:line-through;overflow-wrap:anywhere}
+.diff-v .to{color:var(--amber);font-weight:600;overflow-wrap:anywhere}
+.diff-v svg{width:11px;height:11px;color:var(--ink-faint);flex:none}
+.diff-empty{padding:22px 15px;text-align:center;font-size:11.5px;color:var(--ink-faint);line-height:1.5}
+.diff-empty svg{width:22px;height:22px;display:block;margin:0 auto 9px;color:var(--ink-faint);opacity:.6}
+
+.mini{display:grid;grid-template-columns:auto 1fr;gap:7px 12px;font-size:11.5px;margin:0}
+.mini dt{color:var(--ink-mute);margin:0}
+.mini dd{margin:0;font-family:var(--mono);color:var(--ink-dim);text-align:right;overflow-wrap:anywhere}
+
+/* ---------- нижняя панель ---------- */
+.foot{
+  position:fixed;left:0;right:0;bottom:0;z-index:58;height:var(--foot-h);
+  display:flex;align-items:center;gap:12px;padding:0 20px;
+  background:linear-gradient(0deg,#0c131cfa,#0a1017f0);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-top:1px solid var(--line);box-shadow:0 -12px 34px -22px #000;
+}
+.foot-state{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--ink-mute);min-width:0}
+.foot-state .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-faint);flex:none;transition:all .25s}
+.foot-state.dirty .dot{background:var(--amber);box-shadow:0 0 10px var(--amber);animation:pulse 2s ease-in-out infinite}
+.foot-state.dirty{color:var(--amber)}
+.foot-state b{font-family:var(--mono);font-weight:700}
+.foot .grow{flex:1}
+
+/* ---------- адаптив ---------- */
+@media (max-width:1180px){
+  .edit-grid{grid-template-columns:minmax(0,1fr) 300px}
+  .tiers{grid-template-columns:1fr}
+  .tier-lims{flex-direction:row;flex-wrap:wrap;gap:12px}
+  .tier-cur{position:static;display:block;margin-top:10px}
+}
+@media (max-width:980px){
+  .edit-grid{grid-template-columns:1fr}
+  .inspector{position:static}
+  .rec-head h1{font-size:19px}
+  .sect-body{padding:16px}
+}
+@media (max-width:640px){
+  .delta-cols{grid-template-columns:1fr}
+  .foot{padding:0 12px;gap:8px}
+  .foot .btn{padding:9px 12px}
+  .foot-state span.txt{display:none}
+  .rec-head{padding:16px}
+  .tiers{gap:9px}
+}

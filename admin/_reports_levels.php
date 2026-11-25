@@ -3,13 +3,8 @@ declare(strict_types=1);
 
 /**
  * Подписи и справочная выдача уровней отчётов для Platform Admin.
- *
- * ТОЛЬКО тексты и витрина. Состава уровней и матрицы способностей здесь нет:
- * список и порядок — ReportsAccess::levels() (или RANKS через rank()),
- * способности и лимиты — ReportsAccess::configPayload().
- * Незнакомый ключ не ломает вывод: показываем сам ключ.
- *
- * Подключается только через require_once из admin/*.php.
+ * Только тексты и витрина: состав уровней, способности и лимиты
+ * живут в ReportsAccess, копий здесь нет.
  */
 
 if (!defined('APP_ENTRY_POINT')) {
@@ -49,10 +44,8 @@ const ADMIN_REPORTS_SCOPE_LABELS = [
 ];
 
 /**
- * Канонический упорядоченный список уровней.
- * Если в ReportsAccess уже есть публичная витрина RANKS — берём её.
- * Иначе порядок всё равно выводим из RANKS через публичный rank(),
- * а не из порядка строк в этом файле.
+ * Порядок — из RANKS. Публичная витрина levels() используется, если есть;
+ * иначе константы сортируются через публичный rank().
  *
  * @return list<string>
  */
@@ -69,6 +62,15 @@ function admin_reports_levels(): array
     usort($list, static fn(string $a, string $b): int => ReportsAccess::rank($a) <=> ReportsAccess::rank($b));
 
     return $list;
+}
+
+/** Строгая проверка для записи; мусор не нормализуется в light. */
+function admin_reports_is_level(string $level): bool
+{
+    if (method_exists(ReportsAccess::class, 'isLevel')) {
+        return ReportsAccess::isLevel($level);
+    }
+    return in_array($level, admin_reports_levels(), true);
 }
 
 function admin_reports_level_label(string $level): string
@@ -91,12 +93,17 @@ function admin_reports_group_label(string $key): string
     return ADMIN_REPORTS_GROUP_LABELS[$key] ?? $key;
 }
 
-function admin_reports_scope_label(string $key): string
+/** @return array<string,int> */
+function admin_reports_level_ranks(): array
 {
-    return ADMIN_REPORTS_SCOPE_LABELS[$key] ?? $key;
+    $out = [];
+    foreach (admin_reports_levels() as $level) {
+        $out[$level] = ReportsAccess::rank($level);
+    }
+    return $out;
 }
 
-/** Готовые <option>. Строка уже экранирована — снаружи esc() НЕ нужен. */
+/** Готовые <option>. Строка уже экранирована. */
 function admin_reports_level_options(string $selected): string
 {
     $html = '';
@@ -111,10 +118,6 @@ function admin_reports_level_options(string $selected): string
     return $html;
 }
 
-/**
- * Справочная выдача по уровню — без записи.
- * Всё считает ReportsAccess, админка только показывает.
- */
 function admin_reports_level_payload(string $level): array
 {
     $p = ReportsAccess::configPayload($level);
@@ -139,35 +142,35 @@ function admin_reports_matrix(): array
     return $out;
 }
 
-/** Объединение способностей по всем уровням — порядок из карты ReportsAccess. */
+/**
+ * Старший уровень содержит все ключи: availableFeatures/availableGroups
+ * идут по карте MIN_LEVEL и отбирают по рангу.
+ */
 function admin_reports_all_features(): array
 {
-    $out = [];
-    foreach (array_reverse(admin_reports_levels()) as $level) {
-        foreach (ReportsAccess::availableFeatures($level) as $f) {
-            $out[$f] = true;
-        }
-    }
-    $ordered = [];
-    foreach (admin_reports_level_payload(admin_reports_levels()[count(admin_reports_levels()) - 1])['features'] as $f) {
-        $ordered[] = $f;
-    }
-    foreach (array_keys($out) as $f) {
-        if (!in_array($f, $ordered, true)) {
-            $ordered[] = $f;
-        }
-    }
-    return $ordered;
+    $levels = admin_reports_levels();
+    return ReportsAccess::availableFeatures((string) end($levels));
 }
 
-/** Объединение групп фильтров по всем уровням. */
 function admin_reports_all_groups(): array
 {
-    $out = [];
-    foreach (array_reverse(admin_reports_levels()) as $level) {
-        foreach (ReportsAccess::availableGroups($level) as $g) {
-            $out[$g] = true;
-        }
-    }
-    return array_keys($out);
+    $levels = admin_reports_levels();
+    return ReportsAccess::availableGroups((string) end($levels));
+}
+
+/** Общий блок метаданных для JS обеих страниц. */
+function admin_reports_meta(): array
+{
+    return [
+        'levels'   => admin_reports_levels(),
+        'features' => array_map(
+            static fn(string $k): array => ['key' => $k, 'label' => admin_reports_feature_label($k)],
+            admin_reports_all_features()
+        ),
+        'groups'   => array_map(
+            static fn(string $k): array => ['key' => $k, 'label' => admin_reports_group_label($k)],
+            admin_reports_all_groups()
+        ),
+        'scopes'   => ADMIN_REPORTS_SCOPE_LABELS,
+    ];
 }
