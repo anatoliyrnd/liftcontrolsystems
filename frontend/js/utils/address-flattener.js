@@ -78,7 +78,7 @@ export function flattenAddresses(serverResponse) {
     // Поиск — по сырым именам, как раньше: normalizeSearchString сам
     // снимает маркеры своим словарём стоп-слов. Менять источник здесь
     // значит смешать две нормализации.
-    const rawSearch = `${cName} ${sName} ${hName} ${oName} ${sNote}`.trim()`;
+    const rawSearch = `${cName} ${sName} ${hName} ${oName} ${sNote}`.trim();
     const searchString = normalizeSearchString(rawSearch);
 
     flatData.push({
