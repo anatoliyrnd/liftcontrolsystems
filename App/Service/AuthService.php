@@ -1,5 +1,7 @@
 <?php
+
 declare(strict_types=1);
+
 namespace App\Service;
 
 use App\Repository\UserRepository;
@@ -45,6 +47,36 @@ final class AuthService
      */
     public const int REFRESH_REUSE_GRACE_SEC = 30;
 
+    /**
+     * Неудачных проверок пароля до временной блокировки входа (§19.1, §20).
+     *
+     * Ключ — АККАУНТ, а не IP: один и тот же диспетчер заходит из дома,
+     * с работы и с мобильной сети. Лимит по адресу запирал бы его
+     * собственным входом с другой точки, а перебор с одного адреса по
+     * разным аккаунтам всё равно проходил бы. Колонки login_attempts /
+     * locked_until заведены именно под аккаунт.
+     *
+     * Компромисс осознан: зная логин, можно намеренно запереть чужой
+     * вход на окно блокировки. Поэтому окно короткое, а активные сессии
+     * блокировка НЕ гасит — иначе отказ в обслуживании распространялся
+     * бы на уже работающего диспетчера, и вред был бы больше пользы.
+     *
+     * Счётчики входа и смены пароля РАЗДЕЛЕНЫ: проверку старого пароля
+     * в профиле защищает PasswordChangeLimiter. Общий счётчик означал
+     * бы, что пять опечаток в профиле запирают вход.
+     */
+    public const int LOGIN_MAX_ATTEMPTS = 5;
+
+    /**
+     * Длительность блокировки входа, секунды.
+     *
+     * 15 минут — компромисс между ценой перебора и ценой опечатки.
+     * Отсидевший окно начинает с чистого счётчика: сброс делает
+     * UserRepository::recordLoginFailure по истечении locked_until,
+     * а не «первая же опечатка снова запирает на четверть часа».
+     */
+    public const int LOGIN_LOCK_SEC = 900;
+
     public function __construct(private readonly UserRepository $userRepo)
     {
     }
@@ -56,22 +88,58 @@ final class AuthService
         if (!$user) {
             throw new ApiException(ErrorCode::InvalidCredentials, 'Пользователь не найден');
         }
+
         if ((int) $user['user_block'] === 1) {
             throw new ApiException(ErrorCode::UserBlocked, 'Учётная запись заблокирована');
         }
 
+        $uid = (int) $user['user_id'];
+
+        // Блокировка проверяется ДО Password::verify: bcrypt дорогой,
+        // а запертому аккаунту отказ не зависит от того, верен ли пароль.
+        // Заодно не сообщаем подборщику, угадал ли он пароль на запертой
+        // учётке. Существование аккаунта и так раскрывается текстом
+        // «Пользователь не найден» — нового канала утечки здесь нет.
+        //
+        // Порядок после user_block: постоянная блокировка аккаунта
+        // информативнее временного тормоза и не должна маскироваться им.
+        //
+        // Активные access/refresh НЕ гасим: блокировка входа — не
+        // блокировка аккаунта. Иначе пять чужих опечаток выбрасывали бы
+        // работающего диспетчера из сессии.
+        $guard = $this->userRepo->findLoginGuard($uid);
+        if ($guard !== null && $guard['is_locked']) {
+            throw new ApiException(
+                ErrorCode::RateLimited,
+                'Слишком много неверных попыток. Вход временно заблокирован.',
+                reason: 'login_locked',
+                details: ['retry_after' => $guard['retry_after']]
+            );
+        }
+
         if (!Password::verify($password, $user['user_password'])) {
+            // Счётчик пишем ДО логирования: Logger может бросить
+            // (переполнен диск, недоступный приёмник), и тогда попытка
+            // осталась бы неучтённой — ровно та дыра, которую закрываем.
+            $this->userRepo->recordLoginFailure($uid, self::LOGIN_MAX_ATTEMPTS, self::LOGIN_LOCK_SEC);
+
             Logger::warning("Неудачная попытка входа: {$login}", ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
             throw new ApiException(ErrorCode::InvalidCredentials, 'Неверный пароль');
         }
+
+        // Пароль доказан — счётчик снимаем сразу, до автомиграции хэша:
+        // если UPDATE хэша сорвётся, серия прошлых опечаток не должна
+        // остаться висеть на аккаунте. Внутри репозитория стоит WHERE,
+        // поэтому на обычном входе с нулевым счётчиком записи нет.
+        $this->userRepo->resetLoginAttempts($uid);
 
         // Автомиграция MD5 -> Bcrypt
         $passwordNeedsUpgrade = false;
         if (Password::needsRehash($user['user_password'])) {
             $newHash = Password::hash($password);
-            $this->userRepo->updatePasswordHash((int) $user['user_id'], $newHash);
+            $this->userRepo->updatePasswordHash($uid, $newHash);
             $passwordNeedsUpgrade = true;
-            Logger::info("Пароль ID:{$user['user_id']} обновлен на Bcrypt.", ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
+            Logger::info("Пароль ID:{$uid} обновлен на Bcrypt.", ['ip' => $_SERVER['REMOTE_ADDR'] ?? '']);
         }
 
         // Токен здесь больше не создаётся: единственный access выпускает
@@ -87,9 +155,11 @@ final class AuthService
     public function validate(string $token): array
     {
         $user = $this->userRepo->findByAccessToken($token);
+
         if (!$user) {
             throw new ApiException(ErrorCode::TokenInvalid, 'Токен недействителен');
         }
+
         if ((int) $user['user_block'] === 1) {
             throw new ApiException(ErrorCode::UserBlocked, 'Аккаунт заблокирован');
         }
@@ -97,7 +167,10 @@ final class AuthService
         // Срок действия уже проверен в SQL: findByAccessToken фильтрует
         // a.expires_at > NOW(). Проверка lift_users.api_token_expires удалена:
         // колонка писалась только при логине и через 2 часа валила любой refresh.
-
+        //
+        // Блокировку входа здесь НЕ проверяем намеренно: она про подбор
+        // пароля, а не про право работать. Иначе чужие опечатки на экране
+        // входа выбрасывали бы диспетчера из уже открытой смены.
         return $this->formatUser($user);
     }
 
@@ -127,7 +200,7 @@ final class AuthService
 
         $surname    = trim((string) ($u['user_surname'] ?? ''));
         $firstname  = trim((string) ($u['user_firstname'] ?? ''));
-         $patronymic = trim((string) ($u['user_patronymic'] ?? ''));
+        $patronymic = trim((string) ($u['user_patronymic'] ?? ''));
 
         // Должностной тип — бизнес-тип, а не роль доступа: его НЕ
         // нормализуем (mechanic/foreman выше относятся к user_role).
@@ -142,9 +215,8 @@ final class AuthService
             'name'         => $firstname !== '' ? $firstname : (string) $u['user_name'],
             'surname'      => $surname !== '' ? $surname : null,
             'patronymic'   => $patronymic !== '' ? $patronymic : null,
-           'display_name' => (string) $u['user_name'],
+            'display_name' => (string) $u['user_name'],
             'role'         => $role,
-
             // Флаги обязан вернуть именно formatUser: CallPolicy читает
             // права из $user и в БД не ходит. Без этих полей флаг
             // прочитается как 0, и инженер с правом потеряет создание
