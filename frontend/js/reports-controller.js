@@ -310,7 +310,7 @@ export class ReportsController {
   // Сводка
   // ------------------------------------------------------------------
   async _ensureSummary() {
-    // §16: способность проверяется первой — до городов, до запроса,
+    // REPORTS §17: способность проверяется первой — до городов, до запроса,
     // до создания вьюхи. Порядок тот же, что на сервере: дешёвое раньше.
     if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.SUMMARY)) {
       if (!this._summaryTeaser) this._renderSummaryTeaser();
@@ -435,7 +435,7 @@ const access = this._accessOptions();
     this._updateResultHint();
   }
 /**
-   * §16: реакция на смену уровня без F5.
+   * REPORTS §17: реакция на смену уровня без F5.
    *
    * Фильтры пересобираются, а не патчатся: лимиты и замки применяются
    * при создании вьюхи. Введённое сохраняем через snapshot в state —
@@ -474,7 +474,7 @@ const access = this._accessOptions();
   }
 
   /**
-   * §16: тизер сводки для light. Только createElement + textContent
+   * REPORTS §17: тизер сводки для light. Только createElement + textContent
    * (правило 1), только статичные подписи из config.js.
    *
    * Запрос НЕ уходит: цифры не нужны, а лишний reports_summary вернул
