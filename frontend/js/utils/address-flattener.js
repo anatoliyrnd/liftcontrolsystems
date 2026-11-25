@@ -78,7 +78,7 @@ export function flattenAddresses(serverResponse) {
     // Поиск — по сырым именам, как раньше: normalizeSearchString сам
     // снимает маркеры своим словарём стоп-слов. Менять источник здесь
     // значит смешать две нормализации.
-    const rawSearch = `${cName} ${sName} ${hName} ${oName}`;
+    const rawSearch = `${cName} ${sName} ${hName} ${oName} ${sNote}`.trim()`;
     const searchString = normalizeSearchString(rawSearch);
 
     flatData.push({
@@ -87,6 +87,7 @@ export function flattenAddresses(serverResponse) {
       city_name: cName,
       city_display: cDisplay,
       street_id: s.id,
+      street_note: sNote,
       home_id: h.id,
       home_name: hName,
       // Пикер читает elev.object_name для подписи пилюли. Поля не было,
