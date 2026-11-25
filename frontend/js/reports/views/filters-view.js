@@ -68,6 +68,14 @@ function check(text, checked) {
  * вкладку до первого await, иначе браузер заблокирует её как не
  * пользовательский жест.
  *
+ * ПОРЯДОК ИНИЦИАЛИЗАЦИИ — ИНВАРИАНТ.
+ * picker.setValue() синхронно зовёт onChange, а тот трогает поля
+ * полнотекста и таймер валидации. Восстановление адреса поэтому стоит
+ * ПОСЛЕ объявления всех контролов и логики: раньше оно падало в TDZ
+ * («Cannot access … before initialization»), создание вьюхи обрывалось,
+ * и хост фильтров оставался пустым. Проявлялось только при сохранённом
+ * адресе — то есть у диспетчера, который уже искал по лифту.
+ *
  * Бизнес-правила прежние: последний отдел не снимается, полнотекст только
  * при доме/лифте и не при city_only, «до» не больше сегодня. Потолок
  * периода приезжает опцией access; REPORTS.MAX_RANGE_DAYS — фолбэк.
@@ -109,6 +117,9 @@ export function createFiltersView(opts) {
   const v = initial || {};
   const root = el("div", { class: "rep-filters" });
   let busy = false;
+  let changeTimer = null;
+  /** Пока контролы не собраны, onChange пикера не имеет права их трогать. */
+  let ready = false;
 
   const isKnownSort = (s) =>
     Object.prototype.hasOwnProperty.call(REPORTS.SORTS, s);
@@ -153,33 +164,8 @@ export function createFiltersView(opts) {
 
   const cityOnly = check("только город", v.cityOnly === true);
 
-  // --- адрес --------------------------------------------------------
-  // light: mode elevator — заголовок дома не кликабелен, выбрать можно
-  // только лифт. Обязательность лифта дублируется в validate(): setValue
-  // из snapshot способен восстановить дом-выборку и в этом режиме.
-  const picker = createAddressPicker({
-    mode: acc.objectOnly ? "elevator" : "any",
-    autoOpen: false,
-    onChange: () => {
-      refreshTextEnabled();
-      scheduleChange();
-    },
-  });
-  const addressBox = el("div", { class: "rep-f-address" });
-  addressBox.appendChild(el("label", { class: "rep-fl" }, "Адрес"));
-  addressBox.appendChild(picker.element);
-  if (v.address) picker.setValue(v.address);
-
-  /**
-   * R1: сворачивание поиска при «только город».
-   * ?.() обязателен: ?. на получателе не проверяет наличие метода.
-   * Без него пикер旧 версии ронял создание вьюхи целиком, и хост
-   * фильтров оставался пустым — экран без формы вместо деградации
-   * до «поле не свёрнуто».
-   */
-  const collapseSearch = (flag) => picker.setSearchCollapsed?.(flag === true);
-
   // --- полнотекст и сортировка --------------------------------------
+  // Объявлены ДО пикера: его onChange читает эти узлы.
   const detailsInput = el("input", {
     type: "text",
     class: "search-input",
@@ -268,7 +254,7 @@ export function createFiltersView(opts) {
   );
   if (!canStaffFilter) staffField.style.display = "none";
 
-  // --- кнопки -------------------------------------------------------
+  // --- кнопки и служебные строки ------------------------------------
   const searchBtn = el(
     "button",
     { type: "button", class: "menu-item rep-primary", id: "repSearchBtn" },
@@ -290,6 +276,32 @@ export function createFiltersView(opts) {
     capEl.textContent = CAP_NOTE;
     capEl.style.display = "";
   }
+
+  // --- адрес --------------------------------------------------------
+  // light: mode elevator — заголовок дома не кликабелен, выбрать можно
+  // только лифт. Обязательность лифта дублируется в validate(): setValue
+  // из snapshot способен восстановить дом-выборку и в этом режиме.
+  const picker = createAddressPicker({
+    mode: acc.objectOnly ? "elevator" : "any",
+    autoOpen: false,
+    onChange: () => {
+      if (!ready) return;
+      refreshTextEnabled();
+      scheduleChange();
+    },
+  });
+  const addressBox = el("div", { class: "rep-f-address" });
+  addressBox.appendChild(el("label", { class: "rep-fl" }, "Адрес"));
+  addressBox.appendChild(picker.element);
+
+  /**
+   * R1: сворачивание поиска при «только город».
+   * ?.() обязателен: ?. на получателе не проверяет наличие метода.
+   * Без него пикер старой версии ронял создание вьюхи целиком, и хост
+   * фильтров оставался пустым — экран без формы вместо деградации
+   * до «поле не свёрнуто».
+   */
+  const collapseSearch = (flag) => picker.setSearchCollapsed?.(flag === true);
 
   // --- сборка -------------------------------------------------------
   const row1 = el("div", { class: "rep-frow" });
@@ -318,7 +330,6 @@ export function createFiltersView(opts) {
   root.appendChild(capEl);
 
   // --- логика -------------------------------------------------------
-  let changeTimer = null;
   const scheduleChange = () => {
     if (changeTimer) clearTimeout(changeTimer);
     changeTimer = setTimeout(() => validate(), 120);
@@ -512,6 +523,10 @@ export function createFiltersView(opts) {
   });
   resetBtn.addEventListener("click", () => onReset());
 
+  // --- первичная инициализация --------------------------------------
+  // Строго после объявлений выше: setValue синхронно вызывает onChange.
+  ready = true;
+  if (v.address) picker.setValue(v.address);
   applyLocks();
   collapseSearch(cityOnly.input.checked);
   refreshTextEnabled();
