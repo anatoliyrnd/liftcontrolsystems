@@ -10,6 +10,21 @@ import {
 
 const TEXT_HINT = "Выберите конкретный дом или лифт для полнотекстового поиска";
 
+/**
+ * Словарь замков берётся из config.js, но с фолбэками: несовпадение
+ * версий config и вьюхи не должно ронять панель целиком. Пустой хост
+ * фильтров — худший исход, чем отсутствующая подсказка.
+ */
+const ACCESS = REPORTS.ACCESS || {};
+const LOCK_FILTER =
+  ACCESS.LOCK_FILTER_HINT || "Фильтр недоступен на текущем уровне доступа";
+const LOCK_TEXT =
+  ACCESS.TEXT_LOCK_HINT || "Полнотекстовый поиск недоступен на текущем уровне";
+const OBJECT_HINT =
+  ACCESS.OBJECT_HINT || "Выберите конкретный лифт, а не дом или город";
+const CAP_NOTE =
+  ACCESS.CAP_NOTE || "Период не более месяца, отчёт ограничен по строкам.";
+
 function el(tag, attrs = {}, text = null) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -48,21 +63,19 @@ function check(text, checked) {
 
 /**
  * Панель расширенного поиска — только фильтры, три плотные строки.
- * Таблицы и экспорта здесь нет: они живут в отдельной вкладке
- * браузера. «Найти» отдаёт payload контроллеру синхронно — тот
- * обязан открыть вкладку до первого await, иначе браузер заблокирует
- * её как не пользовательский жест.
+ * Таблицы и экспорта здесь нет: они живут в отдельной вкладке браузера.
+ * «Найти» отдаёт payload контроллеру синхронно — тот обязан открыть
+ * вкладку до первого await, иначе браузер заблокирует её как не
+ * пользовательский жест.
  *
- * Бизнес-правила прежние: последний отдел не снимается, полнотекст
- * только при доме/лифте и не при city_only, «до» не больше сегодня.
- * Потолок периода теперь приезжает опцией access (уровень тенанта),
- * REPORTS.MAX_RANGE_DAYS — фолбэк для сервера без REPORTS §17.
+ * Бизнес-правила прежние: последний отдел не снимается, полнотекст только
+ * при доме/лифте и не при city_only, «до» не больше сегодня. Потолок
+ * периода приезжает опцией access; REPORTS.MAX_RANGE_DAYS — фолбэк.
  *
- * REPORTS §17: замки групп. Матрицу уровней вьюха НЕ хранит: контроллер
- * передаёт снимок access из userStore, вьюха только применяет.
- * Заблокированная группа приводится к дефолту В UI (иначе radio
- * «Открытые» врал бы при payload status=all), а payload шлёт дефолт
- * сервера: department_ids [] = «условия по отделу нет».
+ * REPORTS §17: замки групп. Матрицу уровней вьюха НЕ хранит — контроллер
+ * передаёт снимок access, вьюха только применяет. Заблокированная группа
+ * приводится к дефолту и в UI, и в payload: иначе radio «Открытые» показывал
+ * бы условие, которого в запросе нет.
  */
 export function createFiltersView(opts) {
   const {
@@ -75,7 +88,7 @@ export function createFiltersView(opts) {
     onReset,
   } = opts;
 
-  // Фолбэк = прежнее поведение standard: сервер без REPORTS §17 не присылает
+  // Фолбэк = прежнее поведение standard: сервер без §17 не присылает
   // limits, и форма не должна сужаться сама по себе.
   const acc = {
     objectOnly: false,
@@ -92,8 +105,7 @@ export function createFiltersView(opts) {
     },
   };
   const g = acc.groups;
-  //const LOCK_FILTER = REPORTS.ACCESS.LOCK_FILTER_HINT;
-  const LOCK_FILTER = REPORTS.ACCESS.LOCK_HINT;
+
   const v = initial || {};
   const root = el("div", { class: "rep-filters" });
   let busy = false;
@@ -142,9 +154,9 @@ export function createFiltersView(opts) {
   const cityOnly = check("только город", v.cityOnly === true);
 
   // --- адрес --------------------------------------------------------
-  // REPORTS §17 light: mode elevator — заголовок дома не кликабелен, выбрать
-  // можно только лифт. Обязательность лифта дублируется в validate():
-  // setValue из snapshot может восстановить дом-выборку и в этом режиме.
+  // light: mode elevator — заголовок дома не кликабелен, выбрать можно
+  // только лифт. Обязательность лифта дублируется в validate(): setValue
+  // из snapshot способен восстановить дом-выборку и в этом режиме.
   const picker = createAddressPicker({
     mode: acc.objectOnly ? "elevator" : "any",
     autoOpen: false,
@@ -157,6 +169,15 @@ export function createFiltersView(opts) {
   addressBox.appendChild(el("label", { class: "rep-fl" }, "Адрес"));
   addressBox.appendChild(picker.element);
   if (v.address) picker.setValue(v.address);
+
+  /**
+   * R1: сворачивание поиска при «только город».
+   * ?.() обязателен: ?. на получателе не проверяет наличие метода.
+   * Без него пикер旧 версии ронял создание вьюхи целиком, и хост
+   * фильтров оставался пустым — экран без формы вместо деградации
+   * до «поле не свёрнуто».
+   */
+  const collapseSearch = (flag) => picker.setSearchCollapsed?.(flag === true);
 
   // --- полнотекст и сортировка --------------------------------------
   const detailsInput = el("input", {
@@ -264,11 +285,9 @@ export function createFiltersView(opts) {
 
   const msgEl = el("div", { class: "rep-msg", style: "display:none;" });
   const periodEl = el("div", { class: "rep-period" });
-  // REPORTS §17: подпись потолков light. Числа не зашиваем в текст словаря —
-  // показываем сам факт ограничения, цифры видны в датах и в отказе сервера.
   const capEl = el("div", { class: "rep-period", style: "display:none;" });
   if (acc.objectOnly) {
-    capEl.textContent = REPORTS.ACCESS.CAP_NOTE;
+    capEl.textContent = CAP_NOTE;
     capEl.style.display = "";
   }
 
@@ -306,11 +325,9 @@ export function createFiltersView(opts) {
   };
 
   /**
-   * REPORTS §17: замки групп приводим к дефолту в UI. Без этого radio «Открытые»
-   * или снятые отделы показывали бы условие, которого в payload нет:
-   * заблокированная группа всегда шлёт дефолт сервера.
-   * Вызывается при создании и в setValues (восстановление snapshot
-   * прошлой сессии могло принести значения уровня standard).
+   * Замки применяем и при создании, и в setValues: snapshot прошлой
+   * сессии мог прийти с уровня standard и принести включённые контролы
+   * в заблокированную группу.
    */
   function applyLocks() {
     if (!g.department) {
@@ -332,8 +349,8 @@ export function createFiltersView(opts) {
       lockControl(cityOnly.input, LOCK_FILTER);
     }
     if (!g.text) {
-      lockControl(detailsInput, REPORTS.ACCESS.TEXT_LOCK_HINT);
-      lockControl(solutionInput, REPORTS.ACCESS.TEXT_LOCK_HINT);
+      lockControl(detailsInput, LOCK_TEXT);
+      lockControl(solutionInput, LOCK_TEXT);
     }
   }
 
@@ -347,7 +364,7 @@ export function createFiltersView(opts) {
     for (const inp of [detailsInput, solutionInput]) {
       // Замок уровня не снимается выбором адреса: сначала право, потом адрес.
       inp.disabled = !g.text || !ok;
-      inp.title = !g.text ? REPORTS.ACCESS.TEXT_LOCK_HINT : ok ? "" : TEXT_HINT;
+      inp.title = !g.text ? LOCK_TEXT : ok ? "" : TEXT_HINT;
     }
   }
 
@@ -362,10 +379,8 @@ export function createFiltersView(opts) {
     else if (to - from > acc.maxRangeDays * 86400)
       msg = `Период не может превышать ${acc.maxRangeDays} дней`;
     else if (acc.objectOnly) {
-      // REPORTS §17 light: второй пояс к mode elevator — snapshot мог вернуть дом.
       const sel = picker.getValue();
-      if (!sel || !(Number(sel.object_id) > 0))
-        msg = REPORTS.ACCESS.OBJECT_HINT;
+      if (!sel || !(Number(sel.object_id) > 0)) msg = OBJECT_HINT;
     }
     msgEl.textContent = msg;
     msgEl.style.display = msg ? "block" : "none";
@@ -391,7 +406,7 @@ export function createFiltersView(opts) {
       home_id: useLower ? Number(sel.home_id) || null : null,
       object_id: useLower ? Number(sel.object_id) || null : null,
       city_only: cityOnly.input.checked,
-      // REPORTS §17: заблокированная группа шлёт дефолт сервера, а не состояние
+      // Заблокированная группа шлёт дефолт сервера, а не состояние
       // задизейбленных контролов. [] = «условия по отделу нет».
       department_ids: g.department ? [...selected] : [],
       status: !g.status
@@ -466,10 +481,8 @@ export function createFiltersView(opts) {
       ? next.sort
       : REPORTS.SORT_DEFAULT;
 
-    // REPORTS §17: snapshot прошлой сессии мог прийти с уровня standard —
-    // замки применяем ПОСЛЕ восстановления, иначе UI соврёт о payload.
     applyLocks();
-    picker.setSearchCollapsed(cityOnly.input.checked === true);
+    collapseSearch(cityOnly.input.checked);
     refreshTextEnabled();
     validate();
   }
@@ -483,10 +496,7 @@ export function createFiltersView(opts) {
   fromInput.addEventListener("change", validate);
   toInput.addEventListener("change", validate);
   cityOnly.input.addEventListener("change", () => {
-    // R1: «только город» сворачивает поле поиска адреса и сбрасывает
-    // выбор ниже города. Иначе диспетчер выбирал бы лифт, который
-    // getPayload молча отбросит (useLower = !cityOnly).
-    picker.setSearchCollapsed(cityOnly.input.checked === true);
+    collapseSearch(cityOnly.input.checked);
     refreshTextEnabled();
     scheduleChange();
   });
@@ -503,7 +513,7 @@ export function createFiltersView(opts) {
   resetBtn.addEventListener("click", () => onReset());
 
   applyLocks();
-  picker.setSearchCollapsed(cityOnly.input.checked === true);
+  collapseSearch(cityOnly.input.checked);
   refreshTextEnabled();
   validate();
 

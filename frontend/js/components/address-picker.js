@@ -80,20 +80,15 @@ export function createAddressPicker(opts = {}) {
   searchWrap.appendChild(searchLabel);
   searchWrap.appendChild(searchInput);
   searchWrap.appendChild(dropdown);
-
   wrap.appendChild(cityWrap);
   wrap.appendChild(searchWrap);
 
   let selectedData = initialValue;
-  // R1: «только город» снаружи сворачивает поиск. Флаг живёт здесь, а не
-  // в filters-view: видимость searchWrap меняют четыре внутренних места
-  // (loadCities, handleCityChange, setValue, reset), и внешний display
-  // перезатирался бы первым же из них.
-  let searchCollapsed = false;
   let currentCities = [];
   let pendingCityId = null;
   let focusableElements = [];
   let activeIndex = -1;
+
   // Пагинация отрисовки: поиск в памяти, лимит — только окно DOM.
   let searchResults = [];
   let groupedResults = [];
@@ -101,6 +96,14 @@ export function createAddressPicker(opts = {}) {
   let renderedItems = 0;
   let footerEl = null;
   let currentQuery = "";
+
+  /**
+   * R1: «только город» сворачивает поиск снаружи. Флаг живёт здесь,
+   * а не в filters-view: видимость searchWrap меняют четыре внутренних
+   * места (loadCities, handleCityChange, setValue, reset), и внешний
+   * display перезатирался бы первым же из них.
+   */
+  let searchCollapsed = false;
 
   const normalize = normalizeSearchString;
 
@@ -117,7 +120,7 @@ export function createAddressPicker(opts = {}) {
    * HTML, а не regexp, и от этого не спасал.
    *
    * Второй: сначала escapeHtml, потом replace — запрос «amp» вставлял
-   * <b> внутрь сущности &amp; и рвал разметку. Теперь режем СЫРОЙ текст
+   * <b> внутрь сущности & и рвал разметку. Теперь режем СЫРОЙ текст
    * и экранируем каждый кусок отдельно.
    */
   function highlight(text, query) {
@@ -127,7 +130,7 @@ export function createAddressPicker(opts = {}) {
     const tokens = [...new Set(query.split(" ").filter(Boolean))];
     if (tokens.length === 0) return escapeHtml(raw);
 
-    // Одна.capture-группа с альтернацией: split возвращает
+    // Одна capture-группа с альтернацией: split возвращает
     // [текст, совпадение, текст, …], нечётные индексы — совпадения.
     const re = new RegExp("(" + tokens.map(escapeRegExp).join("|") + ")", "gi");
 
@@ -151,6 +154,14 @@ export function createAddressPicker(opts = {}) {
     }
   }
 
+  /** Единая точка видимости поля поиска: город выбран и поиск не свёрнут. */
+  function applySearchVisibility() {
+    const visible = !readOnly && !searchCollapsed && !!citySelect.value;
+    searchWrap.style.display = visible ? "block" : "none";
+    if (!visible) hideDropdown();
+    return visible;
+  }
+
   async function loadCities() {
     currentCities = await offlineDB.getCities();
     citySelect.innerHTML = '<option value="">— Выберите город —</option>';
@@ -164,9 +175,7 @@ export function createAddressPicker(opts = {}) {
     if (pendingCityId) {
       citySelect.value = String(pendingCityId);
       pendingCityId = null;
-      if (!readOnly) {
-        applySearchVisibility();
-      }
+      applySearchVisibility();
     } else {
       const defaultCity = await offlineDB.getConfig("default_city_id");
       if (
@@ -175,12 +184,16 @@ export function createAddressPicker(opts = {}) {
       ) {
         citySelect.value = String(defaultCity);
         if (readOnly) return;
-
+        // autoOpen:false — экран отчётов: город проставлен и поле поиска
+        // видно, но без focus() и triggerSearch(""): иначе страница
+        // открывалась бы с раскрытым списком и подложкой поверх фильтров,
+        // а onChange(null) затирал бы восстановленные фильтры.
         applySearchVisibility();
         if (autoOpen) handleCityChange();
       }
     }
   }
+
   /**
    * Кнопка «Обновить кэш адресов» меняет справочник под открытым пикером.
    * Без повторного поиска список продолжал бы показывать записи старого
@@ -193,6 +206,7 @@ export function createAddressPicker(opts = {}) {
     }
   }
   window.addEventListener("addresses:updated", onAddressesUpdated);
+
   function handleCityChange() {
     const cityId = citySelect.value;
     if (!cityId) {
@@ -202,8 +216,10 @@ export function createAddressPicker(opts = {}) {
       return;
     }
     if (readOnly) return;
+
     searchInput.value = "";
-    // R1: при свёрнутом поиске город обязан остаться в payload:
+
+    // R1: при свёрнутом поиске город обязан остаться в payload.
     // selectedData = null потерял бы city_id, и city_only=true уехал бы
     // без города — фильтр расширился бы до всего тенанта.
     if (searchCollapsed) {
@@ -219,13 +235,13 @@ export function createAddressPicker(opts = {}) {
       applySearchVisibility();
       return;
     }
+
     selectedData = null;
     onChange(null);
     if (!applySearchVisibility()) return;
     searchInput.focus();
     triggerSearch("");
   }
-
   citySelect.onchange = handleCityChange;
 
   function showDropdown() {
@@ -236,7 +252,6 @@ export function createAddressPicker(opts = {}) {
     const windowHeight = window.innerHeight;
     const padding = 20;
     const minSpace = 250;
-
     const spaceBelow = windowHeight - rect.bottom - padding;
     const spaceAbove = rect.top - padding;
 
@@ -264,20 +279,12 @@ export function createAddressPicker(opts = {}) {
     dropdown.style.display = "none";
     backdrop.style.display = "none";
   }
-  function applySearchVisibility() {
-    const visible = !readOnly && !searchCollapsed && !!citySelect.value;
-    searchWrap.style.display = visible ? "block" : "none";
-    if (!visible) hideDropdown();
-    return visible;
-  }
 
   // === СОХРАНЯЕМ ССЫЛКИ НА СЛУШАТЕЛИ ===
   const onWindowResize = () => hideDropdown();
-
   const onWindowScroll = (e) => {
     if (!dropdown.contains(e.target)) hideDropdown();
   };
-
   const onDocClick = (e) => {
     if (!searchWrap.contains(e.target)) hideDropdown();
   };
@@ -285,6 +292,7 @@ export function createAddressPicker(opts = {}) {
   window.addEventListener("resize", onWindowResize);
   window.addEventListener("scroll", onWindowScroll, true);
   document.addEventListener("click", onDocClick);
+
   const onDropdownScroll = () => {
     if (dropdown.style.display === "none") return;
     if (renderedGroups >= groupedResults.length) return;
@@ -302,11 +310,13 @@ export function createAddressPicker(opts = {}) {
     groupEl.className = "address-group";
     groupEl.style.cssText =
       "padding: 10px 12px; border-bottom: 1px solid var(--border-color);";
+
     const houseEl = document.createElement("div");
     houseEl.className = "address-house-header";
     houseEl.style.cssText =
       "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
     houseEl.innerHTML = highlight(group.house_display, query);
+
     if (mode === "house" || mode === "any") {
       houseEl.style.cursor = "pointer";
       houseEl.classList.add("selectable-house");
@@ -314,9 +324,11 @@ export function createAddressPicker(opts = {}) {
       focusableElements.push(houseEl);
     }
     groupEl.appendChild(houseEl);
+
     const pillsWrap = document.createElement("div");
     pillsWrap.className = "address-pills-wrap";
     pillsWrap.style.cssText = "display: flex; flex-wrap: wrap; gap: 6px;";
+
     group.elevators.forEach((elev) => {
       const pill = document.createElement("button");
       pill.type = "button";
@@ -326,6 +338,7 @@ export function createAddressPicker(opts = {}) {
       focusableElements.push(pill);
       pillsWrap.appendChild(pill);
     });
+
     groupEl.appendChild(pillsWrap);
     return groupEl;
   }
@@ -334,6 +347,7 @@ export function createAddressPicker(opts = {}) {
     if (!footerEl) return;
     const total = searchResults.length;
     const capped = total >= SEARCH_LIMIT;
+
     if (renderedItems >= total && !capped) {
       footerEl.style.display = "none";
       return;
@@ -367,17 +381,21 @@ export function createAddressPicker(opts = {}) {
     renderedGroups = 0;
     renderedItems = 0;
     footerEl = null;
+
     const cityId = citySelect.value;
     const rawQuery = searchInput.value.trim();
     const query = normalize(rawQuery);
     currentQuery = query;
+
     const recent = !query ? getRecentAddresses(cityId) : [];
+
     if (recent.length > 0) {
       const title = document.createElement("div");
       title.textContent = "Недавние адреса";
       title.style.cssText =
         "padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; border-bottom: 1px solid var(--border-color);";
       dropdown.appendChild(title);
+
       recent.forEach((item) => {
         const el = document.createElement("div");
         el.className = "recent-address-item";
@@ -388,12 +406,14 @@ export function createAddressPicker(opts = {}) {
         dropdown.appendChild(el);
       });
     }
+
     if (results.length === 0 && recent.length === 0) {
       dropdown.innerHTML =
         '<div style="padding: 10px; font-size: 13px; color: var(--text-secondary); text-align: center;">Ничего не найдено</div>';
       showDropdown();
       return;
     }
+
     if (results.length > 0 && recent.length > 0) {
       const divider = document.createElement("div");
       divider.style.cssText =
@@ -401,6 +421,7 @@ export function createAddressPicker(opts = {}) {
       divider.textContent = "Результаты поиска";
       dropdown.appendChild(divider);
     }
+
     const grouped = new Map();
     results.forEach((item) => {
       if (!grouped.has(item.home_id)) {
@@ -415,13 +436,16 @@ export function createAddressPicker(opts = {}) {
       grouped.get(item.home_id).elevators.push(item);
     });
     groupedResults = [...grouped.values()];
+
     footerEl = document.createElement("div");
     footerEl.style.cssText =
       "padding: 8px; font-size: 11px; color: var(--text-secondary); text-align: center; background: var(--bg-primary);";
     dropdown.appendChild(footerEl);
+
     appendPage(PAGE_ITEMS);
     showDropdown();
   }
+
   /**
    * Подпись лифта. Отрезаем префикс дома, а не split(", ").pop():
    * имя лифта само может содержать запятую («п.1, пасс.»), и pop()
@@ -436,6 +460,7 @@ export function createAddressPicker(opts = {}) {
       house && full.startsWith(house) ? full.slice(house.length) : full;
     return tail.replace(/^,\s*/, "") || `Лифт №${elev.id}`;
   }
+
   function selectAddress(item, type) {
     const isHouse = type === "house";
     selectedData = {
@@ -459,17 +484,16 @@ export function createAddressPicker(opts = {}) {
   const SEARCH_LIMIT = 300;
   // Сколько объектов дорисовываем за один шаг пагинации.
   const PAGE_ITEMS = 50;
+
   let debounceTimer = null;
   let searchSeq = 0;
 
   async function triggerSearch(val) {
     const cityId = parseInt(citySelect.value, 10);
     if (!cityId) return;
-
     const seq = ++searchSeq;
     const q = normalize(val);
     const results = await offlineDB.searchAddresses(cityId, q, SEARCH_LIMIT);
-
     // Ответ устаревшего запроса не перерисовывает список: при быстром
     // вводе порядок разрешения async-вызовов не гарантирован, и медленный
     // ранний поиск затирал бы результат свежего.
@@ -480,7 +504,6 @@ export function createAddressPicker(opts = {}) {
   searchInput.oninput = () => {
     const val = searchInput.value.trim();
     if (debounceTimer) clearTimeout(debounceTimer);
-
     if (selectedData && val !== selectedData.address) {
       selectedData = null;
       onChange(null);
@@ -586,14 +609,13 @@ export function createAddressPicker(opts = {}) {
       selectedData = val;
       // Черновик из sessionStorage мог сохраниться до появления address.
       searchInput.value = val.address || val.display_name || "";
-      applySearchVisibility();
-
       const stringCityId = String(val.city_id);
       if (citySelect.options.length > 1) {
         citySelect.value = stringCityId;
       } else {
         pendingCityId = stringCityId;
       }
+      applySearchVisibility();
       onChange(selectedData);
     },
     reset: () => {
@@ -606,14 +628,12 @@ export function createAddressPicker(opts = {}) {
     },
     destroy: () => {
       if (debounceTimer) clearTimeout(debounceTimer);
-
       // Удаляем глобальные слушатели
       window.removeEventListener("addresses:updated", onAddressesUpdated);
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("scroll", onWindowScroll, true);
       document.removeEventListener("click", onDocClick);
       dropdown.removeEventListener("scroll", onDropdownScroll);
-
       // Удаляем подложку
       backdrop.removeEventListener("click", onBackdropClick);
       if (backdrop.parentNode) {
