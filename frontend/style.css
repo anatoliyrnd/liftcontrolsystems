@@ -3954,3 +3954,85 @@ body.rr-standalone .container {
 /* pointer-events НЕ гасим: на плитках и кнопках висит title с текстом
    уровня, а без событий мыши браузер подсказку не покажет. Запрет
    действия обеспечивает disabled и сервер, не стиль. */
+/* ==========================================================================
+   REPORTS §17: замок уровня доступа к отчётам.
+   Класс .locked навешивают контроллеры (13/14) и тизер сводки (12).
+
+   Смысл несёт ВИДИМЫЙ значок, а не только title: на disabled-контроле
+   подсказку показывают не все браузеры. Замок — основной носитель,
+   title — дополнение.
+
+   Только переменные, уже используемые в проекте (--text-secondary,
+   --border-color, --table-row-hover): новой палитры не заводим, тема
+   переключается сама. Append в конец обязателен: специфичность
+   .menu-item.locked равна .menu-item:disabled, выигрывает порядок.
+   ========================================================================== */
+
+/* --- кнопки выгрузки: CSV / XLSX / печать -------------------------------- */
+button.locked,
+.menu-item.locked,
+.theme-toggle-btn.locked {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button.locked::after,
+.menu-item.locked::after,
+.theme-toggle-btn.locked::after {
+  content: " 🔒";
+  font-size: 0.9em;
+}
+
+/* --- поля и селекты ------------------------------------------------------
+   ::after у input/select не работает (заменяемые элементы) — замок здесь
+   выражен фоном и курсором, текст причины в title. */
+input.locked,
+select.locked,
+.search-input.locked {
+  cursor: not-allowed;
+  opacity: 0.6;
+  background-color: var(--table-row-hover);
+}
+
+/* --- чекбоксы и радиокнопки в подписях -----------------------------------
+   Гасить надо подпись, а не только квадратик: иначе «Открытые» выглядит
+   активным пунктом. Без поддержки :has деградирует до гашения самого
+   контрола — функциональность (disabled) от CSS не зависит. */
+.rep-chip:has(input.locked) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.rep-chip:has(input.locked) > span::after {
+  content: " 🔒";
+  font-size: 0.9em;
+}
+
+/* --- плитки тизера сводки (light) ----------------------------------------
+   Значение «—» уже проставлено контроллером; здесь только вид. */
+.rep-kpi.locked {
+  position: relative;
+  cursor: default;
+  opacity: 0.75;
+}
+
+.rep-kpi.locked .rep-kpi-value {
+  color: var(--text-secondary);
+}
+
+.rep-kpi.locked::after {
+  content: "🔒";
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* --- баннер тизера -------------------------------------------------------
+   Это не ошибка, а информация о тарифе: нейтральная рамка, не красный. */
+.rep-stub.locked {
+  border-left: 3px solid var(--border-color);
+  background: var(--table-row-hover);
+  color: var(--text-secondary);
+}

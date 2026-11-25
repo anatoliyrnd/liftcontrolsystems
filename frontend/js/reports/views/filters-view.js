@@ -56,9 +56,9 @@ function check(text, checked) {
  * Бизнес-правила прежние: последний отдел не снимается, полнотекст
  * только при доме/лифте и не при city_only, «до» не больше сегодня.
  * Потолок периода теперь приезжает опцией access (уровень тенанта),
- * REPORTS.MAX_RANGE_DAYS — фолбэк для сервера без §16.
+ * REPORTS.MAX_RANGE_DAYS — фолбэк для сервера без REPORTS §17.
  *
- * §16: замки групп. Матрицу уровней вьюха НЕ хранит: контроллер
+ * REPORTS §17: замки групп. Матрицу уровней вьюха НЕ хранит: контроллер
  * передаёт снимок access из userStore, вьюха только применяет.
  * Заблокированная группа приводится к дефолту В UI (иначе radio
  * «Открытые» врал бы при payload status=all), а payload шлёт дефолт
@@ -75,7 +75,7 @@ export function createFiltersView(opts) {
     onReset,
   } = opts;
 
-  // Фолбэк = прежнее поведение standard: сервер без §16 не присылает
+  // Фолбэк = прежнее поведение standard: сервер без REPORTS §17 не присылает
   // limits, и форма не должна сужаться сама по себе.
   const acc = {
     objectOnly: false,
@@ -142,7 +142,7 @@ export function createFiltersView(opts) {
   const cityOnly = check("только город", v.cityOnly === true);
 
   // --- адрес --------------------------------------------------------
-  // §16 light: mode elevator — заголовок дома не кликабелен, выбрать
+  // REPORTS §17 light: mode elevator — заголовок дома не кликабелен, выбрать
   // можно только лифт. Обязательность лифта дублируется в validate():
   // setValue из snapshot может восстановить дом-выборку и в этом режиме.
   const picker = createAddressPicker({
@@ -264,7 +264,7 @@ export function createFiltersView(opts) {
 
   const msgEl = el("div", { class: "rep-msg", style: "display:none;" });
   const periodEl = el("div", { class: "rep-period" });
-  // §16: подпись потолков light. Числа не зашиваем в текст словаря —
+  // REPORTS §17: подпись потолков light. Числа не зашиваем в текст словаря —
   // показываем сам факт ограничения, цифры видны в датах и в отказе сервера.
   const capEl = el("div", { class: "rep-period", style: "display:none;" });
   if (acc.objectOnly) {
@@ -306,7 +306,7 @@ export function createFiltersView(opts) {
   };
 
   /**
-   * §16: замки групп приводим к дефолту в UI. Без этого radio «Открытые»
+   * REPORTS §17: замки групп приводим к дефолту в UI. Без этого radio «Открытые»
    * или снятые отделы показывали бы условие, которого в payload нет:
    * заблокированная группа всегда шлёт дефолт сервера.
    * Вызывается при создании и в setValues (восстановление snapshot
@@ -362,7 +362,7 @@ export function createFiltersView(opts) {
     else if (to - from > acc.maxRangeDays * 86400)
       msg = `Период не может превышать ${acc.maxRangeDays} дней`;
     else if (acc.objectOnly) {
-      // §16 light: второй пояс к mode elevator — snapshot мог вернуть дом.
+      // REPORTS §17 light: второй пояс к mode elevator — snapshot мог вернуть дом.
       const sel = picker.getValue();
       if (!sel || !(Number(sel.object_id) > 0))
         msg = REPORTS.ACCESS.OBJECT_HINT;
@@ -391,7 +391,7 @@ export function createFiltersView(opts) {
       home_id: useLower ? Number(sel.home_id) || null : null,
       object_id: useLower ? Number(sel.object_id) || null : null,
       city_only: cityOnly.input.checked,
-      // §16: заблокированная группа шлёт дефолт сервера, а не состояние
+      // REPORTS §17: заблокированная группа шлёт дефолт сервера, а не состояние
       // задизейбленных контролов. [] = «условия по отделу нет».
       department_ids: g.department ? [...selected] : [],
       status: !g.status
@@ -466,7 +466,7 @@ export function createFiltersView(opts) {
       ? next.sort
       : REPORTS.SORT_DEFAULT;
 
-    // §16: snapshot прошлой сессии мог прийти с уровня standard —
+    // REPORTS §17: snapshot прошлой сессии мог прийти с уровня standard —
     // замки применяем ПОСЛЕ восстановления, иначе UI соврёт о payload.
     applyLocks();
     picker.setSearchCollapsed(cityOnly.input.checked === true);

@@ -30,6 +30,129 @@ final class UserRepository
         $this->db->execute("UPDATE lift_users SET user_password = :hash WHERE user_id = :id", ['hash' => $newHash, 'id' => $userId]);
     }
 
+    // -----------------------------------------------------------------------
+    // Ограничение попыток входа (§19.1, §20)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Состояние защиты от перебора для аккаунта.
+     *
+     * Ключ — АККАУНТ, а не IP. Один и тот же диспетчер заходит из дома,
+     * с работы и с мобильной сети: лимит по адресу запирал бы его own
+     * входом с другой точки. Колонки login_attempts / locked_until
+     * заведены именно под это, их комментарии в DDL описывают алгоритм.
+     *
+     * Компромисс осознан: зная логин, злоумышленник может намеренно
+     * запереть чужой аккаунт на окно блокировки. Короткое окно (15 мин)
+     * и требование знать логин делают это дороже, чем неограниченный
+     * перебор пароля, который был до этого.
+     *
+     * Остаток окна считается в SQL, а не в PHP: locked_until пишется
+     * через NOW(), значит и сравнивать его надо с NOW(). Иначе вернулся
+     * бы TZ-скос между зоной PHP и зоной сессии MySQL.
+     *
+     * @return array{attempts:int,is_locked:bool,retry_after:int}|null
+     */
+    public function findLoginGuard(int $userId): ?array
+    {
+        $row = $this->db->fetchOne(
+            "SELECT login_attempts,
+                    (locked_until IS NOT NULL AND locked_until > NOW()) AS is_locked,
+                    GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), COALESCE(locked_until, NOW()))) AS retry_after
+             FROM lift_users
+             WHERE user_id = :uid
+             LIMIT 1",
+            ['uid' => $userId]
+        );
+
+        if ($row === null) {
+            return null;
+        }
+
+        return [
+            'attempts'    => (int) $row['login_attempts'],
+            'is_locked'   => (bool) $row['is_locked'],
+            // Минимум 1 при активной блокировке: ноль клиент прочитал бы
+            // как «можно сразу» и повторил бы в тот же тик.
+            'retry_after' => (bool) $row['is_locked'] ? max(1, (int) $row['retry_after']) : 0,
+        ];
+    }
+
+    /**
+     * Зафиксировать неверный пароль. Атомарно, одним UPDATE.
+     *
+     * Счётчик инкрементится в SQL, а не читается-пишется из PHP: два
+     * параллельных запроса иначе прочитали бы 4, каждый записал 5 —
+     * и порог сработал бы на попытку позже реальной.
+     *
+     * ПОРЯДОК ПРИСВАИВАНИЙ ЗНАЧИМ. MySQL/MariaDB вычисляет SET слева
+     * направо, и правая часть последующих присваиваний видит уже НОВОЕ
+     * значение ранее присвоенной колонки. Поэтому:
+     *   - login_attempts первым: читает СТАРЫЕ locked_until и
+     *     login_attempts, даёт новый счётчик (1 после истечения окна,
+     *     иначе старый + 1);
+     *   - locked_until вторым: читает УЖЕ НОВЫЙ счётчик и старый
+     *     locked_until.
+     * Обратный порядок дал бы off-by-one в пороге и сброс не там.
+     *
+     * Активная блокировка не продлевается: WHERE отсекает строку, пока
+     * locked_until в будущем. Иначе каждая новая попытка сдвигала бы
+     * окно, и аккаунт оставался бы заперт бессрочно, пока идёт перебор.
+     *
+     * Истёкшее окно обнуляет счётчик (ветка THEN 1) и чистит locked_until
+     * в NULL: отсидевший блокировку пользователь не должен запираться
+     * снова с первой опечатки, а NULL — единственное «не заблокирован»
+     * по semantics колонки.
+     *
+     * @param int $maxAttempts порог из AuthService — политика там, где TTL
+     * @param int $lockSeconds длительность блокировки, секунды
+     */
+    public function recordLoginFailure(int $userId, int $maxAttempts, int $lockSeconds): void
+    {
+        $this->db->execute(
+            "UPDATE lift_users
+                SET login_attempts = CASE
+                        WHEN locked_until IS NOT NULL AND locked_until <= NOW() THEN 1
+                        ELSE login_attempts + 1
+                    END,
+                    locked_until = CASE
+                        WHEN login_attempts >= :max_attempts THEN NOW() + INTERVAL :lock_sec SECOND
+                        WHEN locked_until IS NOT NULL AND locked_until <= NOW() THEN NULL
+                        ELSE locked_until
+                    END
+              WHERE user_id = :uid
+                AND (locked_until IS NULL OR locked_until <= NOW())",
+            [
+                'max_attempts' => $maxAttempts,
+                'lock_sec'     => $lockSeconds,
+                'uid'          => $userId,
+            ]
+        );
+    }
+
+    /**
+     * Успешный вход сбрасывает счётчик и блокировку.
+     *
+     * Без сброса серия опечаток копилась бы через дни: четыре ошибки
+     * в понедельник и одна во вторник дали бы блокировку, хотя пароль
+     * введён верно.
+     *
+     * WHERE отсекает холостые записи: у большинства входов счётчик уже
+     * нулевой, а login — горячий путь. Лишний UPDATE на каждый вход
+     * брал бы блокировку строки lift_users без всякой пользы.
+     */
+    public function resetLoginAttempts(int $userId): void
+    {
+        $this->db->execute(
+            "UPDATE lift_users
+                SET login_attempts = 0,
+                    locked_until   = NULL
+              WHERE user_id = :uid
+                AND (login_attempts > 0 OR locked_until IS NOT NULL)",
+            ['uid' => $userId]
+        );
+    }
+
     /**
      * Сохранить раздельное ФИО и отображаемое имя (§13.4).
      *
@@ -97,7 +220,7 @@ final class UserRepository
      * нет: «Ковалёв А.П.», без отчества — «Ковалёв А.».
      *
      * Публичный статический, как CallRepository::normalizeGuid: формат
-     * принадлежит одному месту, а的消费者 не должен иметь экземпляр
+     * принадлежит одному месту, а потребителю не нужен экземпляр
      * репозитория. Админка, импорт и генератор демо обязаны звать этот
      * метод, а не собирать строку заново — две копии формата уже
      * расходились в адресном слое (Address::format vs formatDisplay).
