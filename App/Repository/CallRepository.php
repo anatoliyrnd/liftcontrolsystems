@@ -49,6 +49,7 @@ final class CallRepository
                 c.city_type,
                 s.street_name,
                 s.street_type,
+                s.street_note,
                 h.home_name,
                 o.object_name,
                 o.group_id,
