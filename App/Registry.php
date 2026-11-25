@@ -23,7 +23,30 @@ final class Registry
             ]);
         }
     }
+    public function setReportsLevel(int $id, string $level): bool
+    {
+        if (!\App\Support\ReportsAccess::isLevel($level)) {
+            throw new \InvalidArgumentException('unknown reports level: ' . $level);
+        }
 
+        // Два РАЗНЫХ имени плейсхолдера намеренно: в конструкторе стоит
+        // PDO::ATTR_EMULATE_PREPARES => false, а без эмуляции PDO не даёт
+        // использовать один именованный маркер дважды (HY093).
+        $sql = "UPDATE organizations
+                   SET reports_level      = :level_set,
+                       reports_access_rev = reports_access_rev + 1
+                 WHERE id = :id
+                   AND reports_level <> :level_cmp";
+
+        $stmt = self::$pdo->prepare($sql);
+        $stmt->execute([
+            'level_set' => $level,
+            'level_cmp' => $level,
+            'id'        => $id,
+        ]);
+
+        return $stmt->rowCount() > 0;
+    }
     public function findBySubdomain(string $subdomain): ?array
     {
         // ИСПОЛЬЗУЕМ self::$pdo

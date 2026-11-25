@@ -122,7 +122,27 @@ final class ReportsAccess
         ]);
         return self::LIGHT;
     }
+    /**
+     * Канонический упорядоченный список уровней — публичная витрина RANKS.
+     * Админка строит <select> и allowlist отсюда, а не из своего массива:
+     * уровень, добавленный в RANKS, появляется в UI сам.
+     *
+     * @return list<string>
+     */
+    public static function levels(): array
+    {
+        return array_keys(self::RANKS);
+    }
 
+    /**
+     * Строгая проверка для ЗАПИСИ. В отличие от normalizeLevel() НЕ приводит
+     * мусор к light: молчаливый даунгрейд платящего тенанта из битого POST
+     * дороже отказа. normalizeLevel() остаётся для чтения из БД (fail-closed).
+     */
+    public static function isLevel(string $level): bool
+    {
+        return isset(self::RANKS[$level]);
+    }
     public static function rank(string $level): int
     {
         return self::RANKS[$level] ?? self::RANKS[self::LIGHT];

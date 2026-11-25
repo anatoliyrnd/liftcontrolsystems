@@ -2,6 +2,7 @@
 declare(strict_types=1);
 define('APP_ENTRY_POINT', true);
 require_once __DIR__ . '/../autoload.php';
+require_once __DIR__ . '/_reports_levels.php';
 session_start();
 
 if (empty($_SESSION['admin_logged_in'])) {
@@ -45,6 +46,7 @@ $form = [
     'db_name' => (string) ($tenant['db_name'] ?? ''),
     'db_user' => (string) ($tenant['db_user'] ?? ''),
     'legacy_compat' => !empty($tenant['legacy_compat']) ? 1 : 0,
+        'reports_level' => \App\Support\ReportsAccess::normalizeLevel($tenant['reports_level'] ?? null),
 ];
 
 $error = '';
@@ -77,7 +79,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($error === '' && !ctype_digit((string) ($post['db_port'] ?? ''))) {
         $error = 'Порт БД должен быть числом';
     }
-
+    $reportsLevel = (string) ($post['reports_level'] ?? '');
+    if ($error === '' && !\App\Support\ReportsAccess::isLevel($reportsLevel)) {
+        $error = 'Недопустимый уровень отчётов';
+    }
     // Уникальность поддомена
     if ($error === '') {
         foreach ($registry->listAll() as $t) {
@@ -112,6 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Предполагается, что save() при наличии 'id' обновляет запись.
             // Если в твоём \App\Registry обновление — отдельный метод, замени вызов.
             $registry->save($data);
+            $registry->setReportsLevel($id, $reportsLevel);
             header('Location: /admin/tenants.php');
             exit;
         } catch (\Throwable $e) {
@@ -129,6 +135,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'db_name' => (string) ($post['db_name'] ?? ''),
             'db_user' => (string) ($post['db_user'] ?? ''),
             'legacy_compat' => (int) ($post['legacy_compat'] ?? 0),
+            'reports_level' => \App\Support\ReportsAccess::isLevel($reportsLevel)
+                ? $reportsLevel
+                : \App\Support\ReportsAccess::normalizeLevel($tenant['reports_level'] ?? null),
         ];
     }
 }
@@ -197,6 +206,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: 12px;
             color: #666;
         }
+        .form-group select {
+    width: 100%;
+    padding: 6px;
+    box-sizing: border-box;
+}
     </style>
 </head>
 
@@ -250,7 +264,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <input type="password" id="db_password" name="db_password" autocomplete="new-password">
             <div class="hint">Оставьте пустым, чтобы не менять текущий пароль.</div>
         </div>
-
+<div class="form-group">
+    <label for="reports_level">Уровень отчётов</label>
+    <select id="reports_level" name="reports_level">
+        <?= admin_reports_level_options($form['reports_level']) ?>
+    </select>
+    <div class="hint">Уровень применяется ко всем пользователям организации и не зависит от их ролей.
+        Изменение вступает в силу в открытых вкладках автоматически в течение одного цикла опроса
+        уведомлений; перелогин не требуется. Понижение уровня скрывает часть отчётов и выгрузок —
+        данные не удаляются.</div>
+</div>
         <div class="form-group">
             <label>
                 <input type="checkbox" name="legacy_compat" value="1" <?= $form['legacy_compat'] ? 'checked' : '' ?>>
@@ -271,14 +294,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         document.getElementById('editForm').addEventListener('submit', function (e) {
             const subdomain = document.getElementById('subdomain').value.trim();
             const legacy = document.querySelector('[name="legacy_compat"]').checked ? 1 : 0;
-
+            const reportsRanks = <?= json_encode(admin_reports_level_ranks()) ?>;
+            const originalReportsLevel = <?= json_encode(\App\Support\ReportsAccess::normalizeLevel($tenant['reports_level'] ?? null)) ?>;
             if (subdomain !== originalSubdomain) {
                 if (!confirm('Вы меняете поддомен. Старые ссылки и закладки перестанут работать. Продолжить?')) {
                     e.preventDefault();
                     return;
                 }
             }
-
+const level = document.getElementById('reports_level').value;
+if (reportsRanks[level] < reportsRanks[originalReportsLevel]) {
+    if (!confirm('Вы понижаете уровень отчётов. Часть отчётов и выгрузок станет недоступна всем пользователям организации. Продолжить?')) {
+        e.preventDefault();
+        return;
+    }
+}
             if (legacy !== originalLegacy) {
                 if (!confirm(
                     'Вы меняете режим совместимости (legacy). Это может повлиять на работу уведомлений. Продолжить?'

@@ -95,6 +95,7 @@ $tenants = $registry->listAll();
             <th>БД</th>
             <th>Legacy</th>
             <th>Статус</th>
+            <th>Отчёты</th>
             <th>Действия</th>
         </tr>
         <?php foreach ($tenants as $t): ?>
@@ -110,6 +111,10 @@ $tenants = $registry->listAll();
                     <?php endif; ?>
                 </td>
                 <td><?= $t['is_active'] ? 'Активен' : 'Отключен' ?></td>
+                <td>
+    <?= htmlspecialchars(admin_reports_level_label(\App\Support\ReportsAccess::normalizeLevel($t['reports_level'] ?? null)), ENT_QUOTES, 'UTF-8') ?>
+    <span class="legacy-badge">rev: <?= (int) ($t['reports_access_rev'] ?? 1) ?></span>
+</td>
                 <td>
                     <form action="/admin/tenants_save.php" method="POST" style="display:inline;">
                         <input type="hidden" name="id" value="<?= $t['id'] ?>">
