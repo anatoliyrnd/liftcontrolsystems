@@ -39,16 +39,16 @@ export function createRepairTimePicker(opts = {}) {
     }
 
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+    wrap.style.cssText = 'display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 100%;';
 
     const display = document.createElement('div');
     display.className = 'editable-field';
-    display.style.cssText = 'font-size: 13px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-primary); min-height: 32px; display: flex; align-items: center; font-weight: 600;';
+    display.style.cssText = 'font-size: 13px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-primary); min-height: 32px; display: flex; align-items: center; font-weight: 600; min-width: 0;';
     display.textContent = formatTs(currentValue);
 
     const select = document.createElement('select');
     select.className = 'search-input editable-field';
-    select.style.cssText = 'font-size: 13px; padding: 6px 8px; cursor: pointer;';
+    select.style.cssText = 'font-size: 13px; padding: 6px 8px; cursor: pointer; max-width: 100%;';
 
     [
         { value: '',         text: '— выбрать срок —' },
@@ -63,19 +63,21 @@ export function createRepairTimePicker(opts = {}) {
         select.appendChild(opt);
     });
 
+    // ИСПРАВЛЕНО: flex-wrap + flex-basis вместо жёстких ширины/процентов.
+    // Колонка >= ~236px — date и time в ряд; уже — time на вторую строку.
     const customWrap = document.createElement('div');
-    customWrap.style.cssText = 'display: none; gap: 6px; align-items: center;';
+    customWrap.style.cssText = 'display: none; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0;';
 
     const dateInput = document.createElement('input');
     dateInput.type = 'date';
     dateInput.className = 'search-input editable-field';
-    dateInput.style.cssText = 'font-size: 13px; padding: 6px 8px; flex: 1;';
+    dateInput.style.cssText = 'font-size: 13px; padding: 6px 8px; flex: 1 1 110px; min-width: 0; width: auto;';
     dateInput.min = formatDateInput(new Date(getMinAllowedTs() * 1000));
 
     const timeInput = document.createElement('input');
     timeInput.type = 'time';
     timeInput.className = 'search-input editable-field';
-    timeInput.style.cssText = 'font-size: 13px; padding: 6px 8px; width: 120px;';
+    timeInput.style.cssText = 'font-size: 13px; padding: 6px 8px; flex: 0 1 120px; min-width: 0; width: auto;';
     timeInput.step = 1800;
 
     const initialMin = new Date(getMinAllowedTs() * 1000);

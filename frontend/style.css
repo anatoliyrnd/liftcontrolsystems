@@ -730,42 +730,113 @@ table[data-mode="open"] td[data-col-id="close_date"] {
 }*/
 /* ==========================================================================
    8. АДАПТИВНАЯ СЕТКА КАРТОЧКИ ИНЦИДЕНТА
+   Колонки заданы ТОЛЬКО здесь. Нижний дублирующий блок удалён.
    ========================================================================== */
-
-/* Сетка для больших мониторов оператора */
 .ticket-card-layout-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 2rem;
+    align-items: stretch;
     width: 100%;
     height: 100%;
     min-height: 0;
     padding-top: 15px;
 }
 
-/* Медиа-запрос: Если экран сужается меньше 920px (мобильные, планшеты, сжатая IDE) */
-@media screen and (max-width: 768px) {
-    /* Переводим сетку в один вертикальный столбец */
+/* Планшет/десктоп: 50/50 + фиксация высоты панелей.
+   !important сохранён — гасит возможные inline-стили шаблона. */
+@media screen and (min-width: 769px) {
     .ticket-card-layout-grid {
-        grid-template-columns: 1fr !important;
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+        gap: 2rem !important;
+        align-items: stretch !important;
+    }
+    .ticket-info-panel,
+    .ticket-notes-panel {
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+        min-width: 0;
+    }
+}
+
+/* Большие мониторы: 70/30. Блок ПОСЛЕ 769-правила — поздний побеждает. */
+@media screen and (min-width: 1200px) {
+    .ticket-card-layout-grid {
+        grid-template-columns: minmax(0, 7fr) minmax(0, 3fr) !important;
+    }
+}
+
+/* Мобильные: один столбец */
+@media screen and (max-width: 768px) {
+    .ticket-card-layout-grid {
+        grid-template-columns: minmax(0, 1fr) !important;
         grid-template-rows: auto auto;
         overflow-y: auto !important;
         gap: 1.5rem;
     }
-
-    /* Снимаем жесткое ограничение высоты для контейнера приложения, чтобы прокрутка шла плавно */
     .container {
         height: auto !important;
         overflow-y: auto !important;
     }
-
-    /* Панели карточки подстраиваются под контент, но не сжимаются меньше 300px */
     .ticket-info-panel,
     .ticket-notes-panel {
         overflow-y: visible !important;
         height: auto !important;
         min-height: 600px !important;
+        min-width: 0;
     }
+}
+
+/* ==========================================================================
+   МЕТА-СЕТКА КАРТОЧКИ (даты и классификация)
+   Отступ между двумя сетками даёт родительский flex-gap ticketBodyBlock —
+   собственный margin не нужен (info-group его не имеет).
+   ========================================================================== */
+.ticket-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+    gap: 1rem;
+    align-items: start;
+}
+
+.ticket-meta-grid .info-group {
+    min-width: 0;
+}
+
+/* Корневые контейнеры виджетов редактирования — на всю колонку */
+#repairTimeEditBlock,
+#deptEditBlock,
+#reqEditBlock,
+#groupEditBlock {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+/* dict-select — нативный select с inline width:100%;
+   date/time инпуты пикера переносятся его собственным flex-wrap */
+.ticket-meta-grid input,
+.ticket-meta-grid select {
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+/* ==========================================================================
+   КОММЕНТАРИИ В УЗКОЙ КОЛОНКЕ — id подтверждены grep'ом.
+   Скоуп .ticket-notes-panel: mobile-версия (notesContainerDOM без панели)
+   не затрагивается.
+   ========================================================================== */
+.ticket-notes-panel #notesContainerDOM > div > div:first-child {
+    flex-wrap: wrap;
+    gap: 2px 8px;
+}
+
+.ticket-notes-panel #noteComposer > button:last-child {
+    width: 100%;
+    align-self: stretch !important;
 }
 /* ==========================================================================
    ИНДИКАТОР СЕТЕВОГО ШЛЮЗА — LED / спиннер
@@ -2523,24 +2594,7 @@ td.cell-alert-info {
     .sync-indicator { width: 38px; height: 38px; }
     .offline-banner { font-size: 12px; padding: 6px 10px; }
 }
-/* ==========================================================================
-   ЖЕСТКАЯ ФИКСАЦИЯ ДВУХ КОЛОНОК ДЛЯ ДЕСКТОПА
-   ========================================================================== */
-@media screen and (min-width: 769px) {
-    .ticket-card-layout-grid {
-        display: grid !important;
-        grid-template-columns: 1fr 1fr !important;
-        gap: 2rem !important;
-        align-items: stretch !important;
-    }
-    
-    .ticket-info-panel, 
-    .ticket-notes-panel {
-        height: 100% !important;
-        min-height: 0 !important;
-        max-height: 100% !important;
-    }
-}
+
 /* ==========================================================================
    Новый логотип (Иконка + Текст + Тенант)
    ========================================================================== */

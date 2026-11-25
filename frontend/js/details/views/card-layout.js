@@ -91,7 +91,8 @@ export function renderCardLayout({
           <div id="staffSlotsContainer" style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;"></div>
         </div>
 
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <!-- Блок дат -->
+        <div class="ticket-meta-grid">
           <div class="info-group">
             <label style="${LABEL}">📅 Дата регистрации</label>
             <div style="font-size: 14px; margin-top: 2px;">${formatTs(t.date)}</div>
@@ -104,7 +105,8 @@ export function renderCardLayout({
           </div>
         </div>
 
-        <div style="display: flex; flex-direction: column; gap: 1rem;">
+        <!-- Блок классификации -->
+        <div class="ticket-meta-grid">
           <div class="info-group">
             <label style="${LABEL}">🏢 Отдел</label>
             <div id="deptDisplay" style="font-size: 14px; margin-top: 2px;">${escapeHtml(t.department || "—")}</div>
