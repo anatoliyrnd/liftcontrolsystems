@@ -38,6 +38,7 @@ export function flattenAddresses(serverResponse) {
 
     const cName = String(c.city_name ?? "").trim();
     const sName = String(s.street_name ?? "").trim();
+    const sNote = String(s.street_note ?? "").trim();
     const hName = String(h.home_name ?? "").trim();
     const oName = String(obj.object_name ?? "").trim();
 
