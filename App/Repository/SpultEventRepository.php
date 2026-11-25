@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace App\Repository;
@@ -23,8 +24,16 @@ final class SpultEventRepository
      * Словарь типов. Он же — контракт для админ-панели: severity задаёт
      * цвет, ticket_expected объясняет, будет ли ссылка на карточку.
      *
-     * admin_alert: false только у spult_id_conflict — расхождение
-     * служебного идентификатора не мешает работе, письмо не нужно.
+     * admin_alert: false у spult_id_conflict (расхождение служебного
+     * идентификатора не мешает работе) и у info_status (штатная работа
+     * фильтра, а не расхождение).
+     *
+     * ОТСУТСТВИЕ kind В СЛОВАРЕ — НЕ НЕЙТРАЛЬНО. shouldAlertAdmin()
+     * для неизвестного типа возвращает true (fail-safe: лучше лишнее
+     * письмо, чем потерянный инцидент). Поэтому штатный kind, забытый
+     * в словаре, шлёт письмо админу на каждое событие — ровно то, что
+     * происходило с info_status. Новый kind обязан заводиться здесь,
+     * даже если он информационный.
      */
     private const KINDS = [
         'guid_mismatch' => [
@@ -41,6 +50,26 @@ final class SpultEventRepository
         ],
         'spult_id_conflict' => [
             'title'           => 'LIFT@ID отличается от сохранённого',
+            'severity'        => 'info',
+            'ticket_expected' => true,
+            'admin_alert'     => false,
+        ],
+        // Штатная работа фильтра статусов, а не расхождение.
+        //
+        // ПОЧЕМУ В СЛОВАРЕ, хотя в ленту не показывается. Это два
+        // независимых решения: словарь отвечает «как классифицировать,
+        // какого цвета и кому письмо», а FEED_SKIP_KINDS в
+        // NotificationsService — «показывать ли плашку». Заявка создана,
+        // отфильтрованные статусы сохранены в истории и в этом журнале;
+        // тостом их показывать нечего, но событие обязано быть
+        // первоклассным, иначе shouldAlertAdmin вернёт фолбэк true.
+        //
+        // Подавление SUPPRESS_SEC работает по паре (kind, lift_id):
+        // переименование улицы в пульте даёт сигнал на каждый лифт,
+        // и разные лифты не подавляются. Без admin_alert=false это
+        // письмо на каждый лифт улицы.
+        'info_status' => [
+            'title'           => 'Информационные статусы пульта не включены в описание',
             'severity'        => 'info',
             'ticket_expected' => true,
             'admin_alert'     => false,
@@ -100,10 +129,19 @@ final class SpultEventRepository
     /** Потолок meta: longtext вмещает больше, но раздувать журнал нечем. */
     private const META_MAX_BYTES = 65535;
 
-    // Ширины колонок из миграции 1.2. Обрезка обязательна: в strict mode
-    // MariaDB длинное значение даёт 1406 Data too long → эксепшн → потеря сигнала.
+    // Ширины колонок из миграции 1.2.
+    //
+    // ПОПРАВКА К ПРЕЖНЕМУ КОММЕНТАРИЮ: sql_mode сервера проверен и
+    // STRICT_TRANS_TABLES в нём НЕТ. Переполнение varchar обрезается
+    // МОЛЧА, а не даёт 1406 и не бросает исключение. Прежнее обоснование
+    // («иначе эксепшн → потеря сигнала») описывало режим, которого на
+    // этом сервере нет.
+    //
+    // Обрезка всё равно нужна, но по другой причине: без неё хвост
+    // теряется по прихоти сервера и незаметно, а с ней — предсказуемо,
+    // по границе символа и в одном месте кода.
     private const W_KIND       = 32;
-    private const W_SPUST_ID   = 32;
+    private const W_SPULT_ID   = 32;
     private const W_ADDRESS    = 512;
     private const W_MESSAGE    = 500;
     private const W_SPOOL_FILE = 255;
@@ -128,7 +166,10 @@ final class SpultEventRepository
      * @param string|null $dbAddress  адрес объекта в нашей БД
      * @param string|null $spoolFile  относительный путь в _spult/, напр. quarantine/2026….xml
      * @param array       $meta       диагностика: статусы, классификация, id
-     * @return bool true = строка вставлена; false = подавлено, неизвестный тип или сбой
+     * @return bool true = строка вставлена; false = подавлено окном или сбой записи.
+     *              Неизвестный тип НЕ отбрасывается: событие пишется, в лог уходит
+     *              предупреждение. Прежняя формулировка «false = … неизвестный тип»
+     *              расходилась с кодом — проверка ниже только логирует.
      */
     public function record(
         string $kind,
@@ -146,8 +187,10 @@ final class SpultEventRepository
             $kind = $this->cut($kind, self::W_KIND);
 
             if (!isset(self::KINDS[$kind])) {
-                // Не бросаем: событие всё равно фиксируем, иначе потеряем
-                // диагностику из-за опечатки в вызывающем коде.
+                // Не бросаем и не отбрасываем: событие всё равно фиксируем,
+                // иначе потеряем диагностику из-за опечатки в вызывающем коде.
+                // Но молчать нельзя и здесь: неизвестный kind получит
+                // shouldAlertAdmin() === true и уйдёт письмом админу.
                 error_log('SpultEventRepository: unknown kind "' . $kind . '"');
             }
 
@@ -167,17 +210,17 @@ final class SpultEventRepository
 
             $this->db->execute(
                 "INSERT INTO spult_events
-                     (kind, lift_id, ticket_id, guid, spult_id,
-                      xml_address, db_address, message, spool_file, meta)
+                    (kind, lift_id, ticket_id, guid, spult_id,
+                     xml_address, db_address, message, spool_file, meta)
                  VALUES
-                     (:kind, :lift_id, :ticket_id, :guid, :spult_id,
-                      :xml_address, :db_address, :message, :spool_file, :meta)",
+                    (:kind, :lift_id, :ticket_id, :guid, :spult_id,
+                     :xml_address, :db_address, :message, :spool_file, :meta)",
                 [
                     'kind'        => $kind,
                     'lift_id'     => $liftId,
                     'ticket_id'   => $ticketId,
                     'guid'        => $normalizedGuid,
-                    'spult_id'    => $this->nullableCut($spultId, self::W_SPUST_ID),
+                    'spult_id'    => $this->nullableCut($spultId, self::W_SPULT_ID),
                     'xml_address' => $this->nullableCut($xmlAddress, self::W_ADDRESS),
                     'db_address'  => $this->nullableCut($dbAddress, self::W_ADDRESS),
                     'message'     => $this->nullableCut($message, self::W_MESSAGE),
@@ -187,7 +230,6 @@ final class SpultEventRepository
             );
 
             return true;
-
         } catch (\Throwable $e) {
             // Журнал не имеет права уронить приём сигнала.
             error_log('SpultEventRepository: record failed (' . $kind . ') — ' . $e->getMessage());
@@ -196,7 +238,8 @@ final class SpultEventRepository
     }
 
     /**
-     * Словарь типов для админ-панели: заголовок, severity, ожидание заявки.
+     * Словарь типов для админ-панели: заголовок, severity, ожидание заявки,
+     * нужно ли письмо админу.
      *
      * @return array<string, array{title:string,severity:string,ticket_expected:bool,admin_alert:bool}>
      */
@@ -214,6 +257,11 @@ final class SpultEventRepository
     /**
      * Нужно ли письмо админу. Отдельно от severity: guid_mismatch —
      * warning по цвету, но письмо нужно (решение согласовано).
+     *
+     * Фолбэк true осознан: неизвестный kind — это дефект вызывающего
+     * кода, и лучше лишнее письмо, чем потерянный инцидент. Цена —
+     * штатный kind, забытый в словаре, шлёт почту на каждое событие.
+     * Поэтому словарь обязан пополняться вместе с новым kind.
      */
     public static function shouldAlertAdmin(string $kind): bool
     {
@@ -230,6 +278,10 @@ final class SpultEventRepository
      * Запрос покрыт индексом idx_kind_lift (kind, lift_id, created_at).
      * lift_id IS NULL обрабатывается отдельно: у org_mismatch, bad_xml
      * и fatal объекта нет, а `= NULL` в SQL никогда не истинно.
+     *
+     * created_at — TIMESTAMP: хранится в UTC и приводится к зоне сессии
+     * при чтении, NOW() тоже в зоне сессии. Сравнение согласовано при
+     * любой зоне, поэтому фиксация time_zone в PDO его не ломает.
      */
     private function isSuppressed(string $kind, ?int $liftId): bool
     {
@@ -279,15 +331,23 @@ final class SpultEventRepository
         return $json;
     }
 
+    /**
+     * Обрезка по ширине колонки.
+     *
+     * Кодировка задана явно: varchar(N) считает СИМВОЛЫ, а без аргумента
+     * mb_substr берёт mb_internal_encoding — ширина обрезки начала бы
+     * зависеть от default_charset хостера и резала кириллицу не там.
+     */
     private function cut(string $value, int $width): string
     {
-        return mb_substr(trim($value), 0, $width);
+        return mb_substr(trim($value), 0, $width, 'UTF-8');
     }
 
     /** Пустая строка → NULL: в журнале отсутствие значения и пустота — одно и то же. */
     private function nullableCut(?string $value, int $width): ?string
     {
         $cut = $this->cut((string) $value, $width);
+
         return $cut === '' ? null : $cut;
     }
 }
