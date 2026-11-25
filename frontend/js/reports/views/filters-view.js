@@ -20,12 +20,14 @@ function el(tag, attrs = {}, text = null) {
   if (text != null) node.textContent = text;
   return node;
 }
+
 function field(labelText, control, cls = "") {
   const box = el("div", { class: `rep-f${cls ? " " + cls : ""}` });
   if (labelText) box.appendChild(el("label", { class: "rep-fl" }, labelText));
   box.appendChild(control);
   return box;
 }
+
 function radio(name, value, text, checked) {
   const r = el("input", { type: "radio", name, value });
   r.checked = checked === true;
@@ -34,6 +36,7 @@ function radio(name, value, text, checked) {
   item.appendChild(el("span", {}, text));
   return { input: r, item };
 }
+
 function check(text, checked) {
   const c = el("input", { type: "checkbox" });
   c.checked = checked === true;
@@ -45,26 +48,52 @@ function check(text, checked) {
 
 /**
  * Панель расширенного поиска — только фильтры, три плотные строки.
- *
  * Таблицы и экспорта здесь нет: они живут в отдельной вкладке
  * браузера. «Найти» отдаёт payload контроллеру синхронно — тот
  * обязан открыть вкладку до первого await, иначе браузер заблокирует
  * её как не пользовательский жест.
  *
  * Бизнес-правила прежние: последний отдел не снимается, полнотекст
- * только при доме/лифте и не при city_only, период ≤ 90 календарных
- * дней, «до» не больше сегодня.
+ * только при доме/лифте и не при city_only, «до» не больше сегодня.
+ * Потолок периода теперь приезжает опцией access (уровень тенанта),
+ * REPORTS.MAX_RANGE_DAYS — фолбэк для сервера без §16.
+ *
+ * §16: замки групп. Матрицу уровней вьюха НЕ хранит: контроллер
+ * передаёт снимок access из userStore, вьюха только применяет.
+ * Заблокированная группа приводится к дефолту В UI (иначе radio
+ * «Открытые» врал бы при payload status=all), а payload шлёт дефолт
+ * сервера: department_ids [] = «условия по отделу нет».
  */
 export function createFiltersView(opts) {
   const {
     departments = [],
     staff = [],
     canStaffFilter = false,
+    access = null,
     initial = null,
     onSubmit,
     onReset,
   } = opts;
 
+  // Фолбэк = прежнее поведение standard: сервер без §16 не присылает
+  // limits, и форма не должна сужаться сама по себе.
+  const acc = {
+    objectOnly: false,
+    maxRangeDays: REPORTS.MAX_RANGE_DAYS,
+    maxRows: REPORTS.EXPORT_MAX_ROWS,
+    ...(access || {}),
+    groups: {
+      department: true,
+      status: true,
+      staff: true,
+      text: true,
+      addressMulti: true,
+      ...((access && access.groups) || {}),
+    },
+  };
+  const g = acc.groups;
+  //const LOCK_FILTER = REPORTS.ACCESS.LOCK_FILTER_HINT;
+  const LOCK_FILTER = REPORTS.ACCESS.LOCK_HINT;
   const v = initial || {};
   const root = el("div", { class: "rep-filters" });
   let busy = false;
@@ -72,6 +101,12 @@ export function createFiltersView(opts) {
   const isKnownSort = (s) =>
     Object.prototype.hasOwnProperty.call(REPORTS.SORTS, s);
   const safeStatus = (s) => (["all", "open", "close"].includes(s) ? s : "all");
+
+  function lockControl(node, hint) {
+    node.disabled = true;
+    node.title = hint;
+    node.classList.add("locked");
+  }
 
   // --- период -------------------------------------------------------
   const fromInput = el("input", {
@@ -107,8 +142,11 @@ export function createFiltersView(opts) {
   const cityOnly = check("только город", v.cityOnly === true);
 
   // --- адрес --------------------------------------------------------
+  // §16 light: mode elevator — заголовок дома не кликабелен, выбрать
+  // можно только лифт. Обязательность лифта дублируется в validate():
+  // setValue из snapshot может восстановить дом-выборку и в этом режиме.
   const picker = createAddressPicker({
-    mode: "any",
+    mode: acc.objectOnly ? "elevator" : "any",
     autoOpen: false,
     onChange: () => {
       refreshTextEnabled();
@@ -195,6 +233,7 @@ export function createFiltersView(opts) {
   }
   if (v.staffId != null) staffSelect.value = String(v.staffId);
   staffSelect.disabled = !staffToggle.checked;
+
   const staffLine = el("div", { class: "rep-chips" });
   const staffToggleLabel = el("label", { class: "rep-chip" });
   staffToggleLabel.appendChild(staffToggle);
@@ -225,13 +264,20 @@ export function createFiltersView(opts) {
 
   const msgEl = el("div", { class: "rep-msg", style: "display:none;" });
   const periodEl = el("div", { class: "rep-period" });
+  // §16: подпись потолков light. Числа не зашиваем в текст словаря —
+  // показываем сам факт ограничения, цифры видны в датах и в отказе сервера.
+  const capEl = el("div", { class: "rep-period", style: "display:none;" });
+  if (acc.objectOnly) {
+    capEl.textContent = REPORTS.ACCESS.CAP_NOTE;
+    capEl.style.display = "";
+  }
 
   // --- сборка -------------------------------------------------------
   const row1 = el("div", { class: "rep-frow" });
   row1.appendChild(field("От", fromInput, "rep-f-date"));
   row1.appendChild(field("До", toInput, "rep-f-date"));
   row1.appendChild(field("Искать по дате", dateTypeBox));
-  row1.appendChild(field(" ", cityOnly.item, "rep-f-inline"));
+  row1.appendChild(field("", cityOnly.item, "rep-f-inline"));
   row1.appendChild(addressBox);
 
   const row2 = el("div", { class: "rep-frow" });
@@ -250,6 +296,7 @@ export function createFiltersView(opts) {
   root.appendChild(row3);
   root.appendChild(msgEl);
   root.appendChild(periodEl);
+  root.appendChild(capEl);
 
   // --- логика -------------------------------------------------------
   let changeTimer = null;
@@ -258,15 +305,49 @@ export function createFiltersView(opts) {
     changeTimer = setTimeout(() => validate(), 120);
   };
 
+  /**
+   * §16: замки групп приводим к дефолту в UI. Без этого radio «Открытые»
+   * или снятые отделы показывали бы условие, которого в payload нет:
+   * заблокированная группа всегда шлёт дефолт сервера.
+   * Вызывается при создании и в setValues (восстановление snapshot
+   * прошлой сессии могло принести значения уровня standard).
+   */
+  function applyLocks() {
+    if (!g.department) {
+      selected.clear();
+      for (const [id, cb] of deptCheckboxes) {
+        cb.checked = true;
+        selected.add(id);
+        lockControl(cb, LOCK_FILTER);
+      }
+    }
+    if (!g.status) {
+      statusAll.input.checked = true;
+      for (const r of [statusAll, statusOpen, statusClose]) {
+        lockControl(r.input, LOCK_FILTER);
+      }
+    }
+    if (!g.addressMulti) {
+      cityOnly.input.checked = false;
+      lockControl(cityOnly.input, LOCK_FILTER);
+    }
+    if (!g.text) {
+      lockControl(detailsInput, REPORTS.ACCESS.TEXT_LOCK_HINT);
+      lockControl(solutionInput, REPORTS.ACCESS.TEXT_LOCK_HINT);
+    }
+  }
+
   function refreshTextEnabled() {
     const sel = picker.getValue();
     const ok =
+      g.text &&
       !cityOnly.input.checked &&
       !!sel &&
       ((Number(sel.home_id) || 0) > 0 || (Number(sel.object_id) || 0) > 0);
     for (const inp of [detailsInput, solutionInput]) {
-      inp.disabled = !ok;
-      inp.title = ok ? "" : TEXT_HINT;
+      // Замок уровня не снимается выбором адреса: сначала право, потом адрес.
+      inp.disabled = !g.text || !ok;
+      inp.title = !g.text ? REPORTS.ACCESS.TEXT_LOCK_HINT : ok ? "" : TEXT_HINT;
     }
   }
 
@@ -278,8 +359,14 @@ export function createFiltersView(opts) {
     else if (from > to) msg = "Дата «от» не может быть больше даты «до»";
     else if (to > mskDayEndTs(mskTodayYmd()))
       msg = "Дата «до» не может быть больше сегодняшней";
-    else if (to - from > REPORTS.MAX_RANGE_DAYS * 86400)
-      msg = `Период не может превышать ${REPORTS.MAX_RANGE_DAYS} дней`;
+    else if (to - from > acc.maxRangeDays * 86400)
+      msg = `Период не может превышать ${acc.maxRangeDays} дней`;
+    else if (acc.objectOnly) {
+      // §16 light: второй пояс к mode elevator — snapshot мог вернуть дом.
+      const sel = picker.getValue();
+      if (!sel || !(Number(sel.object_id) > 0))
+        msg = REPORTS.ACCESS.OBJECT_HINT;
+    }
     msgEl.textContent = msg;
     msgEl.style.display = msg ? "block" : "none";
     fromInput.classList.toggle("rep-invalid", !!msg);
@@ -304,12 +391,16 @@ export function createFiltersView(opts) {
       home_id: useLower ? Number(sel.home_id) || null : null,
       object_id: useLower ? Number(sel.object_id) || null : null,
       city_only: cityOnly.input.checked,
-      department_ids: [...selected],
-      status: statusOpen.input.checked
-        ? "open"
-        : statusClose.input.checked
-          ? "close"
-          : "all",
+      // §16: заблокированная группа шлёт дефолт сервера, а не состояние
+      // задизейбленных контролов. [] = «условия по отделу нет».
+      department_ids: g.department ? [...selected] : [],
+      status: !g.status
+        ? "all"
+        : statusOpen.input.checked
+          ? "open"
+          : statusClose.input.checked
+            ? "close"
+            : "all",
       staff_id:
         canStaffFilter && staffToggle.checked
           ? Number(staffSelect.value) || null
@@ -348,6 +439,7 @@ export function createFiltersView(opts) {
     cityOnly.input.checked = next.cityOnly === true;
     if (next.address) picker.setValue(next.address);
     else picker.reset();
+
     // null/пусто = «все отделы»: ноль галочек ломает защиту последнего,
     // а payload [] на сервере молча означает «условия по отделу нет».
     const depIds =
@@ -357,6 +449,7 @@ export function createFiltersView(opts) {
     for (const [id, cb] of deptCheckboxes) cb.checked = depIds.includes(id);
     selected.clear();
     for (const id of depIds) selected.add(id);
+
     const s = safeStatus(next.status);
     (s === "open"
       ? statusOpen
@@ -372,6 +465,11 @@ export function createFiltersView(opts) {
     sortSelect.value = isKnownSort(next.sort)
       ? next.sort
       : REPORTS.SORT_DEFAULT;
+
+    // §16: snapshot прошлой сессии мог прийти с уровня standard —
+    // замки применяем ПОСЛЕ восстановления, иначе UI соврёт о payload.
+    applyLocks();
+    picker.setSearchCollapsed(cityOnly.input.checked === true);
     refreshTextEnabled();
     validate();
   }
@@ -385,6 +483,10 @@ export function createFiltersView(opts) {
   fromInput.addEventListener("change", validate);
   toInput.addEventListener("change", validate);
   cityOnly.input.addEventListener("change", () => {
+    // R1: «только город» сворачивает поле поиска адреса и сбрасывает
+    // выбор ниже города. Иначе диспетчер выбирал бы лифт, который
+    // getPayload молча отбросит (useLower = !cityOnly).
+    picker.setSearchCollapsed(cityOnly.input.checked === true);
     refreshTextEnabled();
     scheduleChange();
   });
@@ -400,6 +502,8 @@ export function createFiltersView(opts) {
   });
   resetBtn.addEventListener("click", () => onReset());
 
+  applyLocks();
+  picker.setSearchCollapsed(cityOnly.input.checked === true);
   refreshTextEnabled();
   validate();
 

@@ -175,8 +175,13 @@ export class ReportsResultsController {
    * Данные — по _payload последнего принятого поиска, не по форме.
    */
   async _onPrint() {
+    // Порядок критичен: гейт после window.open открыл бы пустое третье
+    // окно, которое пользователь закрывает руками.
+    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_PRINT)) {
+      notify.warning(REPORTS.ACCESS.LOCK_HINT);
+      return;
+    }
     if (this._printBusy) return;
-
     const win = window.open(
       "",
       REPORTS.PRINT_WINDOW_NAME,
@@ -270,13 +275,17 @@ export class ReportsResultsController {
    * бакеты обратно — после книги CSV молчал бы 30 с без причины.
    */
   async _onXlsx() {
+    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_XLSX)) {
+      notify.warning(REPORTS.ACCESS.XLSX_LOCK_HINT);
+      return;
+    }
     if (!this._payload || this._xlsxBusy) return;
-    const btn = document.getElementById("rrXlsxBtn");
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
-
     this._xlsxBusy = true;
-    if (btn) btn.disabled = true;
+    // Единственная точка расчёта состояния кнопок. Ручной
+    // btn.disabled = true/false разъезжался бы с замком уровня.
+    this._syncExport();
     try {
       const resp = await this.repo.exportXlsx(this._payload);
       if (isStale()) return;
@@ -315,7 +324,8 @@ export class ReportsResultsController {
       }
     } finally {
       this._xlsxBusy = false;
-      if (btn && !isStale()) btn.disabled = false;
+      // Было btn.disabled = false — снимало бы и замок уровня.
+      if (!isStale()) this._syncExport();
     }
   }
 
@@ -378,6 +388,12 @@ export class ReportsResultsController {
       },
       { signal },
     );
+    // §16: поллер работает и в служебном окне (start по isAuth, без
+    // standalone-guard), поэтому уровень меняется здесь на лету.
+    // Замки пересчитываются, а не навешиваются один раз при mount.
+    window.addEventListener("reports:access", () => this._syncExport(), {
+      signal,
+    });
   }
 
   _accept(req) {
@@ -487,6 +503,11 @@ export class ReportsResultsController {
 
   // ------------------------------------------------------------------
   async _onExport() {
+    if (!userStore.hasReportFeature(REPORTS.ACCESS.FEATURES.EXPORT_CSV)) {
+      notify.warning(REPORTS.ACCESS.LOCK_HINT);
+      return;
+    }
+
     if (!this._payload || this._exportBusy) return;
     const myMountId = this._mountId;
     const isStale = () => !this._isActive || this._mountId !== myMountId;
@@ -561,25 +582,63 @@ export class ReportsResultsController {
     );
   }
 
+  /**
+   * Состояние всех кнопок выгрузки — в одном месте и на каждое
+   * изменение: после _run, кулдауна, старта/финиша выгрузки и смены
+   * уровня. Замок уровня вплетён В выражение disabled, а не навешен
+   * поверх: иначе первая же выгрузка его снимала (§16).
+   *
+   * XLSX и лист печати ищутся по id, как в _bindButtons: правка
+   * _grabElements потребовала бы ещё двух якорей ради статических
+   * элементов.
+   */
   _syncExport() {
     if (!this._els) return;
     const cooling = Date.now() < this._cooldownUntil;
+    const F = REPORTS.ACCESS.FEATURES;
+    const csvLocked = !userStore.hasReportFeature(F.EXPORT_CSV);
+    const printLocked = !userStore.hasReportFeature(F.EXPORT_PRINT);
+    const xlsxLocked = !userStore.hasReportFeature(F.EXPORT_XLSX);
+
     // Пустая выборка: сервер вернёт data:null, но окно 30 с уже
     // сгорит — лимит стоит до запроса намеренно (защита от перебора
     // широких периодов). Гасим кнопку здесь, чтобы честный пустой
     // поиск не блокировал следующую выгрузку.
     const blocked =
       !this._payload || this._exportBusy || cooling || this._isEmpty;
-    this._els.exportBtn.disabled = blocked;
+
+    this._els.exportBtn.disabled = csvLocked || blocked;
     this._els.exportBtn.textContent = this._exportBusy
       ? "Генерация..."
       : "Выгрузить CSV";
-    this._els.exportBtn.title = this._isEmpty
-      ? "В выборке нет строк — выгружать нечего"
-      : "";
-    this._els.printBtn.disabled = !this._payload || this._isEmpty;
-  }
+    this._els.exportBtn.title = csvLocked
+      ? REPORTS.ACCESS.LOCK_HINT
+      : this._isEmpty
+        ? "В выборке нет строк — выгружать нечего"
+        : "";
+    this._els.exportBtn.classList.toggle("locked", csvLocked);
 
+    this._els.printBtn.disabled =
+      printLocked || !this._payload || this._isEmpty;
+    this._els.printBtn.title = printLocked ? REPORTS.ACCESS.LOCK_HINT : "";
+    this._els.printBtn.classList.toggle("locked", printLocked);
+
+    const sheet = document.getElementById("rrPrintSheet");
+    if (sheet) {
+      sheet.disabled = printLocked;
+      sheet.classList.toggle("locked", printLocked);
+    }
+
+    const xlsxBtn = document.getElementById("rrXlsxBtn");
+    if (xlsxBtn) {
+      // Пустая выборка гасит и XLSX — раньше кнопка горела, а сервер
+      // отвечал data:null. Выравниваем с CSV, поведение не расширяем.
+      xlsxBtn.disabled =
+        xlsxLocked || !this._payload || this._xlsxBusy || this._isEmpty;
+      xlsxBtn.title = xlsxLocked ? REPORTS.ACCESS.XLSX_LOCK_HINT : "";
+      xlsxBtn.classList.toggle("locked", xlsxLocked);
+    }
+  }
   _showStub(text) {
     if (!this._els) return;
     this._els.stub.textContent = text;

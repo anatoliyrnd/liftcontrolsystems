@@ -3829,3 +3829,128 @@ body.rr-standalone .container {
   text-overflow: ellipsis;
   vertical-align: middle;
 }
+/* ==========================================================================
+   §16: замок уровня доступа к отчётам.
+   Класс .locked навешивают контроллеры (12–14), стиль только оформляет:
+   функциональный запрет даёт disabled и серверный гейт, не CSS.
+
+   Скоуп обязателен: глобальный .locked задел бы чужие экраны.
+   Цвета — только переменные темы, иначе тёмная тема получила бы
+   нечитаемые подписи. Иконка — mask + currentColor для кнопок и
+   серый fill для фонов input: currentColor внутри background-image
+   не работает, а чёрный значок в тёмной теме не виден.
+   ========================================================================== */
+:root {
+  --rep-lock-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23888888'%3E%3Cpath d='M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 1 1 6 0v3H9z'/%3E%3C/svg%3E");
+}
+
+.rep-filters .locked,
+.rep-summary .locked,
+.rep-results-actions .locked {
+  cursor: not-allowed;
+}
+
+/* --- кнопки выгрузки: замок справа от подписи --------------------------- */
+.rep-results-actions button.locked {
+  opacity: 0.65;
+}
+
+.rep-results-actions button.locked::after {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  vertical-align: -1px;
+  background-color: currentColor;
+  -webkit-mask: var(--rep-lock-icon) center / contain no-repeat;
+  mask: var(--rep-lock-icon) center / contain no-repeat;
+}
+
+/* Лист печати: у select нет ::after (заменённый элемент), а фоновый
+   значок лёг бы поверх стрелки раскрытия. Гасим и меняем курсор —
+   замок уже виден на соседней кнопке «Печать». */
+.rep-results-actions select.locked {
+  opacity: 0.6;
+  color: var(--text-secondary);
+}
+
+/* --- чекбоксы и радио в чипах ------------------------------------------- */
+/* Разметка: label.rep-chip > input + span. Соседний селектор точен и
+   не требует :has() — поддержка Firefox ниже 121 не нужна. */
+.rep-filters .rep-chip input.locked + span {
+  color: var(--text-secondary);
+  cursor: not-allowed;
+}
+
+.rep-filters .rep-chip input.locked + span::after {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-left: 5px;
+  vertical-align: -1px;
+  background-color: currentColor;
+  -webkit-mask: var(--rep-lock-icon) center / contain no-repeat;
+  mask: var(--rep-lock-icon) center / contain no-repeat;
+}
+
+.rep-filters .rep-chip input.locked {
+  opacity: 0.5;
+}
+
+/* --- текстовые поля полнотекста ----------------------------------------- */
+/* Фон вместо mask: у input нет псевдоэлементов. Отступ справа обязателен,
+   иначе длинный текст подлез бы под значок. */
+.rep-filters input[type="text"].locked {
+  background-color: var(--table-row-hover);
+  background-image: var(--rep-lock-icon);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 13px 13px;
+  padding-right: 28px;
+  color: var(--text-secondary);
+}
+
+/* --- тизер сводки (light) ------------------------------------------------ */
+.rep-summary .rep-stub.locked {
+  display: block;
+  color: var(--text-secondary);
+}
+
+.rep-summary .rep-stub.locked::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  background-color: currentColor;
+  -webkit-mask: var(--rep-lock-icon) center / contain no-repeat;
+  mask: var(--rep-lock-icon) center / contain no-repeat;
+}
+
+.rep-summary .rep-kpi.locked {
+  position: relative;
+  opacity: 0.7;
+}
+
+.rep-summary .rep-kpi.locked::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 12px;
+  height: 12px;
+  background-color: var(--text-secondary);
+  -webkit-mask: var(--rep-lock-icon) center / contain no-repeat;
+  mask: var(--rep-lock-icon) center / contain no-repeat;
+}
+
+.rep-summary .rep-kpi.locked .rep-kpi-value {
+  color: var(--text-secondary);
+}
+
+/* pointer-events НЕ гасим: на плитках и кнопках висит title с текстом
+   уровня, а без событий мыши браузер подсказку не покажет. Запрет
+   действия обеспечивает disabled и сервер, не стиль. */

@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace App\Database;
@@ -13,6 +14,7 @@ use Throwable;
 final class DB
 {
     private static array $instances = [];
+
     private PDO $pdo;
 
     /**
@@ -29,11 +31,35 @@ final class DB
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
                 PDO::MYSQL_ATTR_FOUND_ROWS => false,
+
+                // Зона сессии фиксируется, а не наследуется от сервера.
+                //
+                // Было @@session.time_zone = SYSTEM: PHP зафиксирован
+                // bootstrap'ом (Europe/Moscow), MySQL — нет. Смена TZ
+                // хостера разъезжала бы NOW() и FROM_UNIXTIME() на часы:
+                // refresh-токен считался бы истёкшим при живой cookie
+                // либо жил лишние три часа, а TTL-фильтры логов
+                // идемпотентности отсекали бы не то окно.
+                //
+                // Смещение, а не имя зоны: 'Europe/Moscow' требует
+                // загруженных tz-таблиц MySQL, на shared-хостинге их
+                // обычно нет — SET упал бы или молча не применился.
+                // Москва без DST с 2014 года, поэтому +03:00 эквивалентно
+                // именованной зоне и не зависит от базы tz.
+                //
+                // Существующие строки не сдвигаются: system_time_zone
+                // проверен = MSK, то есть прежнее значение совпадало.
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET time_zone = '+03:00'",
             ]);
         } catch (PDOException $e) {
             // Пишем ошибку подключения в единый лог
             Logger::error('CONNECT ERROR: ' . $e->getMessage(), ['db' => $tenant->dbName]);
-            throw new DbException('Ошибка подключения к БД');
+
+            // previous обязателен: без него PDOException с SQLSTATE
+            // и errorInfo терялся, наружу уходила фиксированная строка.
+            // Диагностика причины становилась невозможной, а любая
+            // проверка «какая это ошибка» по getMessage() — мёртвой.
+            throw new DbException('Ошибка подключения к БД', 0, $e);
         }
     }
 
@@ -45,6 +71,7 @@ final class DB
         if (!isset(self::$instances[$tenant->id])) {
             self::$instances[$tenant->id] = new self($tenant);
         }
+
         return self::$instances[$tenant->id];
     }
 
@@ -57,10 +84,15 @@ final class DB
             Logger::db($sql, $params); // Логируем запрос
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute($params);
+
             return $stmt->fetchAll();
         } catch (PDOException $e) {
             Logger::error('SQL Error (fetchAll): ' . $e->getMessage(), ['sql' => $sql, 'params' => $params]);
-            throw new DbException('Ошибка при выполнении SELECT запроса');
+
+            // Цепочка сохраняет SQLSTATE и errorInfo: текст наружу
+            // остаётся нейтральным (клиенту внутренности БД не отдаём),
+            // но вызывающий код и лог получают причину через getPrevious().
+            throw new DbException('Ошибка при выполнении SELECT запроса', 0, $e);
         }
     }
 
@@ -74,10 +106,11 @@ final class DB
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute($params);
             $res = $stmt->fetch();
+
             return $res === false ? null : $res;
         } catch (PDOException $e) {
             Logger::error('SQL Error (fetchOne): ' . $e->getMessage(), ['sql' => $sql, 'params' => $params]);
-            throw new DbException('Ошибка при выполнении SELECT запроса');
+            throw new DbException('Ошибка при выполнении SELECT запроса', 0, $e);
         }
     }
 
@@ -90,10 +123,11 @@ final class DB
             Logger::db($sql, $params); // Логируем запрос
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute($params);
+
             return $stmt->fetchColumn();
         } catch (PDOException $e) {
             Logger::error('SQL Error (fetchColumn): ' . $e->getMessage(), ['sql' => $sql, 'params' => $params]);
-            throw new DbException('Ошибка при выполнении SELECT запроса');
+            throw new DbException('Ошибка при выполнении SELECT запроса', 0, $e);
         }
     }
 
@@ -106,10 +140,16 @@ final class DB
             Logger::db($sql, $params); // Логируем запрос
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute($params);
+
             return $stmt->rowCount();
         } catch (PDOException $e) {
             Logger::error('SQL Error (execute): ' . $e->getMessage(), ['sql' => $sql, 'params' => $params]);
-            throw new DbException('Ошибка при выполнении INSERT/UPDATE/DELETE запроса');
+
+            // Именно здесь терялся 1062 Duplicate entry: bindSpultGuid
+            // не мог отличить гонку по UNIQUE(guid) от отказа БД.
+            // Детект конфликта переведён на факт (поиск владельца GUID)
+            // и от текста не зависит; цепочка нужна для разбора инцидента.
+            throw new DbException('Ошибка при выполнении INSERT/UPDATE/DELETE запроса', 0, $e);
         }
     }
 
@@ -121,6 +161,7 @@ final class DB
         $keys = array_keys($data);
         $sql = "INSERT INTO `$table` (`" . implode('`,`', $keys) . "`) VALUES (:" . implode(',:', $keys) . ")";
         $this->execute($sql, $data);
+
         return (int) $this->pdo->lastInsertId();
     }
 
@@ -133,6 +174,7 @@ final class DB
         foreach ($data as $k => $v) {
             $set[] = "`$k` = :$k";
         }
+
         $cond = [];
         foreach ($where as $k => $v) {
             $cond[] = "`$k` = :w_$k";
@@ -180,6 +222,7 @@ final class DB
         try {
             $result = $fn($this);
             $this->commit();
+
             return $result;
         } catch (Throwable $e) {
             $this->rollBack();

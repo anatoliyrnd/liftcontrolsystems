@@ -85,6 +85,11 @@ export function createAddressPicker(opts = {}) {
   wrap.appendChild(searchWrap);
 
   let selectedData = initialValue;
+  // R1: «только город» снаружи сворачивает поиск. Флаг живёт здесь, а не
+  // в filters-view: видимость searchWrap меняют четыре внутренних места
+  // (loadCities, handleCityChange, setValue, reset), и внешний display
+  // перезатирался бы первым же из них.
+  let searchCollapsed = false;
   let currentCities = [];
   let pendingCityId = null;
   let focusableElements = [];
@@ -160,7 +165,7 @@ export function createAddressPicker(opts = {}) {
       citySelect.value = String(pendingCityId);
       pendingCityId = null;
       if (!readOnly) {
-        searchWrap.style.display = "block";
+        applySearchVisibility();
       }
     } else {
       const defaultCity = await offlineDB.getConfig("default_city_id");
@@ -170,11 +175,8 @@ export function createAddressPicker(opts = {}) {
       ) {
         citySelect.value = String(defaultCity);
         if (readOnly) return;
-        // autoOpen:false — экран отчётов: город проставлен и поле поиска
-        // видно, но без focus() и triggerSearch(""): иначе страница
-        // открывалась бы с раскрытым списком и подложкой поверх фильтров,
-        // а onChange(null) затирал бы восстановленные фильтры.
-        searchWrap.style.display = "block";
+
+        applySearchVisibility();
         if (autoOpen) handleCityChange();
       }
     }
@@ -200,11 +202,26 @@ export function createAddressPicker(opts = {}) {
       return;
     }
     if (readOnly) return;
-
-    searchWrap.style.display = "block";
     searchInput.value = "";
+    // R1: при свёрнутом поиске город обязан остаться в payload:
+    // selectedData = null потерял бы city_id, и city_only=true уехал бы
+    // без города — фильтр расширился бы до всего тенанта.
+    if (searchCollapsed) {
+      selectedData = {
+        city_id: Number(cityId),
+        street_id: null,
+        home_id: null,
+        object_id: null,
+        address: citySelect.selectedOptions[0]?.textContent || "",
+        sort_key: null,
+      };
+      onChange(selectedData);
+      applySearchVisibility();
+      return;
+    }
     selectedData = null;
     onChange(null);
+    if (!applySearchVisibility()) return;
     searchInput.focus();
     triggerSearch("");
   }
@@ -246,6 +263,12 @@ export function createAddressPicker(opts = {}) {
   function hideDropdown() {
     dropdown.style.display = "none";
     backdrop.style.display = "none";
+  }
+  function applySearchVisibility() {
+    const visible = !readOnly && !searchCollapsed && !!citySelect.value;
+    searchWrap.style.display = visible ? "block" : "none";
+    if (!visible) hideDropdown();
+    return visible;
   }
 
   // === СОХРАНЯЕМ ССЫЛКИ НА СЛУШАТЕЛИ ===
@@ -467,7 +490,16 @@ export function createAddressPicker(opts = {}) {
 
   searchInput.onfocus = () => {
     const val = searchInput.value.trim();
-    if (selectedData && val === selectedData.address) {
+    // R2: ранний выход только для выбора ЛИФТА. После выбора дома
+    // (object_id == null) фокус обязан открыть список: иначе диспетчер
+    // не может дойти до пилюль лифта, не стирая текст вручную.
+    // Ветка объекта не тронута: клик по полю с полным адресом по-прежнему
+    // выделяет текст, а не раскрывает список поверх выбранного значения.
+    if (
+      selectedData &&
+      selectedData.object_id != null &&
+      val === selectedData.address
+    ) {
       searchInput.select();
       return;
     }
@@ -522,12 +554,39 @@ export function createAddressPicker(opts = {}) {
     // Снаружи: контроллер гасит список при уходе с вкладки. Подложка
     // лежит в body и переживает display:none родителя.
     closeDropdown: hideDropdown,
+    /**
+     * R1: сворачивание поиска при «только город». Сбрасываем выбор ниже
+     * города, город сохраняем. Один onChange на вызов — без шторма
+     * scheduleChange в filters-view. Разворачивание список НЕ раскрывает:
+     * на отчётах autoOpen:false, автораскрытие при восстановлении уже
+     * ловили как дефект.
+     */
+    setSearchCollapsed: (flag) => {
+      searchCollapsed = flag === true;
+      if (searchCollapsed) {
+        hideDropdown();
+        if (selectedData) {
+          selectedData = {
+            city_id:
+              Number(selectedData.city_id) || Number(citySelect.value) || null,
+            street_id: null,
+            home_id: null,
+            object_id: null,
+            address: citySelect.selectedOptions[0]?.textContent || "",
+            sort_key: null,
+          };
+          searchInput.value = "";
+          onChange(selectedData);
+        }
+      }
+      applySearchVisibility();
+    },
     setValue: (val) => {
       if (!val) return;
       selectedData = val;
       // Черновик из sessionStorage мог сохраниться до появления address.
       searchInput.value = val.address || val.display_name || "";
-      searchWrap.style.display = "block";
+      applySearchVisibility();
 
       const stringCityId = String(val.city_id);
       if (citySelect.options.length > 1) {
