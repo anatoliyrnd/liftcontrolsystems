@@ -57,8 +57,8 @@ final class AddressService
                     );
                     return $r;
                 },
-                $this->db->fetchAll(
-                    "SELECT id, street_name, street_type, city_id FROM lift_street WHERE vis = 1 ORDER BY street_name"
+               $this->db->fetchAll(
+                    "SELECT id, street_name, street_type, street_note, city_id FROM lift_street WHERE vis = 1 ORDER BY street_name"
                 )
             ),
 
