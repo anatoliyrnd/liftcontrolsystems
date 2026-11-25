@@ -191,6 +191,38 @@ final class Address
 
         return ['type' => null, 'name' => $s];
     }
+     /**
+     * Доп. описание улицы из скобок: «Ленина (старая часть)» → «старая часть».
+     * Несколько групп склеиваются через «; ». Пустая строка, если скобок нет
+     * или имя состоит только из них — идентичность улицы терять нельзя.
+     */
+    public static function streetNote(string $raw): string
+    {
+        $s = self::space($raw);
+        if ($s === '' || !preg_match_all('/\(([^()]*)\)/u', $s, $m)) {
+            return '';
+        }
+        if (self::stripStreetNote($raw) === $s) {
+            return ''; // срез не изменил имя (только скобки) — note не выделяем
+        }
+        $parts = array_values(array_filter(
+            array_map('trim', $m[1]),
+            static fn (string $p): bool => $p !== ''
+        ));
+        return implode('; ', $parts);
+    }
+
+    /** Срез скобочных групп. Пустой результат → исходная строка (защита идентичности). */
+    private static function stripStreetNote(string $raw): string
+    {
+        $s = self::space($raw);
+        $clean = $s;
+        do {
+            $prev  = $clean;
+            $clean = self::space(preg_replace('/\([^()]*\)/u', '', $clean) ?? $clean);
+        } while ($clean !== $prev);
+        return $clean === '' ? $s : $clean;
+    }
     /**
      * Разбор улицы. Тип принимается и префиксом, и суффиксом.
      *
@@ -205,7 +237,7 @@ final class Address
      */
     public static function parseStreet(string $raw): array
     {
-        $s = self::space($raw);
+         $s = self::space(self::stripStreetNote($raw));
         if ($s === '') {
             return ['type' => null, 'name' => ''];
         }

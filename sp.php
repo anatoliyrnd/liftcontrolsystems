@@ -616,40 +616,47 @@ try {
 
         $cityId = (int) ($cityRow['id'] ?? 0);
 
-        // УЛИЦА. Тип вынесен в street_type и ВХОДИТ в ключ: «Ленина ул.»
-        // и «Ленина пр-кт» — разные улицы одного города.
+ // УЛИЦА. Тип вынесен в street_type и ВХОДИТ в ключ: «Ленина ул.»
+        // и «Ленина пр-кт» — разные улицы одного города. Скобочное
+        // примечание живёт в street_note: в имя и ключ не попадает.
         $streetParsed = Address::parseStreet($street);
         $streetKey    = Address::streetKey($street);
-
+        $streetNote   = Address::streetNote($street);
         if ($streetParsed['type'] === null && $street !== '') {
-            // Не угадываем: тип остался в названии. Логируем, чтобы словарь
-            // пополнялся по факту приходящих данных, а не по догадкам.
             error_log('SPult ADDR: street type unknown — ' . $street);
+        }
+        if ($streetNote !== '') {
+            $st['meta']['street_note'] = $streetNote;
         }
 
         $streetRow = $cityId ? $db->fetchOne(
-            "SELECT id FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
+            "SELECT id, street_note FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
             [$cityId, $streetKey]
         ) : null;
 
         if (!$streetRow && $cityId && $allowAdd) {
-            // Чистое имя + тип + ключ. Сырое значение больше не пишем:
-            // иначе справочник сам плодит «ул. Ленина» рядом с «Ленина».
+            // Чистое имя + тип + ключ + примечание. Сырое значение не пишем.
             $db->execute(
-                "INSERT INTO lift_street (street_name, street_type, street_key, city_id, vis)
-                 VALUES (?, ?, ?, ?, 1)",
-                [$streetParsed['name'], $streetParsed['type'], $streetKey, $cityId]
+                "INSERT INTO lift_street (street_name, street_type, street_key, street_note, city_id, vis)
+                 VALUES (?, ?, ?, ?, ?, 1)",
+                [$streetParsed['name'], $streetParsed['type'], $streetKey, $streetNote !== '' ? $streetNote : null, $cityId]
             );
             $streetRow = $db->fetchOne(
-                "SELECT id FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
+                "SELECT id, street_note FROM lift_street WHERE city_id = ? AND street_key = ? LIMIT 1",
                 [$cityId, $streetKey]
             );
             $newStreetId = (int) ($streetRow['id'] ?? 0);
             $addressChanged = true;
+        } elseif ($streetRow && $streetNote !== '' && trim((string) ($streetRow['street_note'] ?? '')) === '') {
+            // Дозаполнение примечания у существующей улицы: имя/ключ не трогаем.
+            $db->execute(
+                "UPDATE lift_street SET street_note = ? WHERE id = ? AND (street_note IS NULL OR street_note = '')",
+                [$streetNote, (int) $streetRow['id']]
+            );
+            $addressChanged = true;
         }
 
         $streetId = (int) ($streetRow['id'] ?? 0);
-
         // ДОМ. Ведущий маркер снят, корпус/строение/дробь/литера сохранены.
         $homeParsed = Address::parseHome($homeRaw);
         $homeKey    = Address::homeKey($homeRaw);
