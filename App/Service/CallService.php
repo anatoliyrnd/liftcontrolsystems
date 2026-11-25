@@ -264,8 +264,10 @@ class CallService
         ]);
 
         // --- История ---
+        // Всё ниже — побочных каналов записи. Заявка уже в БД, и отказ
+        // строки аудита не имеет права превращать успех в ошибку.
         if ($isOffline) {
-            $this->historyRepo->add(
+            $this->addHistory(
                 $callId,
                 'Срок ремонта назначен сервером: офлайн-клиент срок не задаёт',
                 $authorId,
@@ -273,7 +275,7 @@ class CallService
             );
         }
         if ($hasDateCorrection) {
-            $this->historyRepo->add(
+            $this->addHistory(
                 $callId,
                 "Автокоррекция даты создания: оффлайн-таймстемп {$originalDateStr} сдвинут на время сервера",
                 $authorId,
@@ -281,7 +283,7 @@ class CallService
             );
         }
         if ($hasSolutionCorrection) {
-            $this->historyRepo->add(
+            $this->addHistory(
                 $callId,
                 'Автокоррекция закрытия: решение передано без даты закрытия, выставлено текущее время сервера',
                 $authorId,
@@ -289,14 +291,14 @@ class CallService
             );
         }
         if ($hasClosedAtCorrection) {
-            $this->historyRepo->add(
+            $this->addHistory(
                 $callId,
                 'Автокоррекция закрытия: переданная дата закрытия была меньше даты открытия, выровнено по дате открытия',
                 $authorId,
                 $source
             );
         }
-        $this->historyRepo->add(
+        $this->addHistory(
             $callId,
             $isOffline
                 ? "Заявка синхронизирована из офлайна (Автор: {$authorName})"
@@ -305,7 +307,7 @@ class CallService
             $source
         );
         if (!$addr['vis']) {
-            $this->historyRepo->add(
+            $this->addHistory(
                 $callId,
                 'объект выведен из обслуживания на момент синхронизации',
                 $authorId,
@@ -321,7 +323,7 @@ class CallService
                     static fn (array $dup): string => '№' . (int) $dup['call_id'],
                     $activeDuplicates
                 ));
-                $this->historyRepo->add(
+                $this->addHistory(
                     $callId,
                     "Принудительное создание дубликата (подтверждено диспетчером {$authorName}). Возможный дубликат к заявке(ам) {$numbers}",
                     $authorId,
@@ -330,7 +332,7 @@ class CallService
             } else {
                 // Легальная гонка: пока шла пачка или была открыта модалка,
                 // дубликат закрыл другой пользователь. Факт подтверждения фиксируем.
-                $this->historyRepo->add(
+                $this->addHistory(
                     $callId,
                     "Принудительное создание дубликата (подтверждено диспетчером {$authorName}). Активных дубликатов на момент создания не было",
                     $authorId,
@@ -340,16 +342,23 @@ class CallService
         }
 
         // Офлайн-комментарии получают флаг is_offline = 1 (§9.2).
+        // Сама заметка — строгая запись: без неё терять нечего, и отказ
+        // обязан быть виден. А вот метка над уже созданной заметкой —
+        // побочная, её отказ otherwise дал бы дубль при повторе.
         if ($comments !== '') {
             $noteId = $this->noteRepo->add($callId, $authorId, $comments);
             if ($isOffline) {
-                $this->noteRepo->updateOfflineFlag($noteId, $openedAt);
+                $this->markNoteOffline($noteId, $openedAt, $callId);
             }
         }
 
         // B2.11: заявка создана сразу закрытой — заметки обязаны попасть
         // в слепок, иначе карточка их не покажет: она читает
         // call_full_note_history, а не lift_notes.
+        //
+        // Слепок и удаление остаются СТРОГИМИ: deleteByCall уже удалил
+        // живые заметки, потеря слепка после него необратима. Тихая
+        // обёртка здесь стоила бы комментариев безвозвратно.
         if ($callStatus === 1) {
             $notes = $this->noteRepo->listByCall($callId);
             if (!empty($notes)) {
@@ -482,7 +491,7 @@ class CallService
 
         if (!empty($fields)) {
             $this->callRepo->updateFields($callId, $fields);
-            $this->historyRepo->add($callId, "Отредактирована пользователем {$authorName}", $authorId, $source);
+            $this->addHistory($callId, "Отредактирована пользователем {$authorName}", $authorId, $source);
             // B2.4: правка меняет только открытый слой.
             $this->invalidateAfterWrite($source, true, false);
             // Событие шлём ТОЛЬКО при фактических изменениях. Раньше вызов
@@ -530,7 +539,9 @@ class CallService
         $authorId = isset($data['offline_author_id']) ? (int) $data['offline_author_id'] : (int) $user['id'];
         $closedAt = isset($data['closed_at']) ? (int) $data['closed_at'] : time();
 
-        // Слепок сохраняем ДО удаления заметок.
+        // Слепок сохраняем ДО удаления заметок. Оба вызова строгие:
+        // после deleteByCall живых заметок нет, и потеря слепка
+        // необратима — тихая обёртка здесь стоила бы комментариев.
         $notes = $this->noteRepo->listByCall($callId);
         if (!empty($notes)) {
             $this->callRepo->saveNotesHistory(
@@ -548,7 +559,8 @@ class CallService
             'closed_by_id'   => $authorId,
         ]);
 
-        $this->historyRepo->add(
+        // Закрытие уже применено — история побочных каналов, не источник истины.
+        $this->addHistory(
             $callId,
             "Закрыта пользователем {$authorName}. Решение: {$solution}",
             $authorId,
@@ -612,18 +624,85 @@ class CallService
         // его в ErrorException — любой офлайн-комментарий падал.
         $createdAt = isset($data['created_at']) ? (int) $data['created_at'] : time();
 
+        // Заметка — источник истины этого метода, запись строгая.
         $noteId = $this->noteRepo->add($callId, $authorId, $note);
         if ($source === 'offline_sync') {
-            $this->noteRepo->updateOfflineFlag($noteId, $createdAt);
+            $this->markNoteOffline($noteId, $createdAt, $callId);
         }
 
-        $this->historyRepo->add($callId, "Добавлена заметка от {$authorName}: {$note}", $authorId, $source);
+        $this->addHistory($callId, "Добавлена заметка от {$authorName}: {$note}", $authorId, $source);
 
         // B2.4: комментарий меняет только открытый слой.
         $this->invalidateAfterWrite($source, true, false);
         $this->notificationsService->ticketNote($callId, $authorName, $authorId);
 
         return ['message' => "Комментарий добавлен к заявке №{$callId}."];
+    }
+
+    /**
+     * Строка истории — побочный канал, отказ не выходит наружу.
+     *
+     * ЗАЧЕМ. К моменту вызова бизнес-запись уже применена: заявка
+     * вставлена, правка сохранена, закрытие выполнено, заметка добавлена.
+     * Throw отсюда превращал успешную операцию в ответ 500, а в sp.php
+     * уводил сигнал в failed/ с письмом «сигнал потерян» — при живой
+     * заявке. В sync-пути хуже: INSERT заявки внутри транзакции пачки
+     * коммитится, а команда помечается failed, и клиент повторяет то,
+     * что уже сделано.
+     *
+     * ПОЧЕМУ ИМЕННО ИСТОРИЯ. Потерянная строка аудита восстановима из
+     * лога: ниже пишется call_id и причина, а SQL с параметрами уже
+     * осел в Logger::error внутри DB. Потерянная заявка не восстановима
+     * ничем. Из двух зол выбирается обратимое.
+     *
+     * ЧЕГО НЕ ОБОРАЧИВАЕМ. Слепок заметок и deleteByCall остаются
+     * строгими: после удаления живых заметок потеря слепка необратима.
+     * Сама заметка в callnote тоже строгая — без неё сообщать об успехе
+     * нечего.
+     *
+     * Молчать совсем нельзя: иначе пробел в истории не отличить от
+     * «события не было».
+     */
+    private function addHistory(int $callId, string $text, int $authorId, string $source): void
+    {
+        try {
+            $this->historyRepo->add($callId, $text, $authorId, $source);
+        } catch (\Throwable $e) {
+            error_log(sprintf(
+                'CallService: history write failed (call=%d, source=%s) — %s',
+                $callId,
+                $source,
+                $e->getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Офлайн-метка заметки — побочная правка уже созданной записи.
+     *
+     * updateOfflineFlag пишет is_offline и note_post_date. Заметка к
+     * этому моменту вставлена, и отказ метки наружу давал бы ДУБЛЬ:
+     * идемпотентности у заметок нет, повтор команды создаст вторую.
+     * Клиент увидел бы ошибку, добавил бы комментарий ещё раз — и
+     * получил два одинаковых.
+     *
+     * Цена тихого отказа: заметка останется с серверной датой и без
+     * маркера ⏳. Это искажение метаданных, а не потеря текста, и оно
+     * восстановимо по логу — в отличие от дубля, который придётся
+     * удалять руками.
+     */
+    private function markNoteOffline(int $noteId, int $createdAt, int $callId): void
+    {
+        try {
+            $this->noteRepo->updateOfflineFlag($noteId, $createdAt);
+        } catch (\Throwable $e) {
+            error_log(sprintf(
+                'CallService: offline flag failed (call=%d, note=%d) — %s',
+                $callId,
+                $noteId,
+                $e->getMessage()
+            ));
+        }
     }
 
     /**
