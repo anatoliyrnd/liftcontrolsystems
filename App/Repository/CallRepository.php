@@ -94,6 +94,7 @@ final class CallRepository
                 g.type_name AS group_name,
                 ac.city_name    AS addr_city_name,
                 ast.street_name AS addr_street_name,
+                ast.street_note AS addr_street_note,
                 ast.street_type AS addr_street_type,
                 ah.home_name    AS addr_home_name,
                 ao.object_name  AS addr_object_name
@@ -136,6 +137,7 @@ final class CallRepository
                 g.type_name AS group_name,
                 ac.city_name    AS addr_city_name,
                 ast.street_name AS addr_street_name,
+                ast.street_note AS addr_street_note,
                 ast.street_type AS addr_street_type,
                 ah.home_name    AS addr_home_name,
                 ao.object_name  AS addr_object_name
@@ -540,6 +542,7 @@ final class CallRepository
                 g.type_name AS group_name,
                 ac.city_name    AS addr_city_name,
                 ast.street_name AS addr_street_name,
+                ast.street_note AS addr_street_note,
                 ast.street_type AS addr_street_type,
                 ah.home_name    AS addr_home_name,
                 ao.object_name  AS addr_object_name
