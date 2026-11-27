@@ -316,7 +316,17 @@ export function createAddressPicker(opts = {}) {
     houseEl.style.cssText =
       "font-weight: 600; font-size: 13px; margin-bottom: 8px; color: var(--text-primary);";
     houseEl.innerHTML = highlight(group.house_display, query);
-
+ // Примечание улицы — отдельной приглушённой подписью, не в display-строке:
+ // идентичность адреса (address/display_name/sort_key) остаётся чистой.
+ // highlight() экранирует каждый кусок сам — правило 1 architecture_frone.md.
+ if (group.street_note) {
+   const noteEl = document.createElement("span");
+   noteEl.className = "address-street-note";
+   noteEl.style.cssText =
+     "margin-left: 6px; font-weight: 500; font-size: 11px; color: var(--text-secondary);";
+   noteEl.innerHTML = "📎 " + highlight(group.street_note, query);
+   houseEl.appendChild(noteEl);
+ }
     if (mode === "house" || mode === "any") {
       houseEl.style.cursor = "pointer";
       houseEl.classList.add("selectable-house");
@@ -428,8 +438,8 @@ export function createAddressPicker(opts = {}) {
         grouped.set(item.home_id, {
           home_id: item.home_id,
           city_id: item.city_id,
-          street_id: item.street_id,
           house_display: item.house_display,
+          street_note: item.street_note ?? "",
           elevators: [],
         });
       }

@@ -8,6 +8,7 @@ import { UI } from "./config.js";
 import { appState } from "./app-state.js";
 import { authStore } from "./auth-store.js";
 import { outboxQueue } from "./outbox-queue.js";
+import { offlineDB } from "./offline-db.js";
 import { compressPhoto } from "./utils/photo-compressor.js";
 import { normalizeTicketFields } from "./details/ticket-normalizer.js";
 import { nowTs } from "./utils/date-utils.js";
@@ -144,6 +145,12 @@ export class DetailsController {
           ? { ...ticket.note }
           : ticket.note,
     });
+    if (!normalizedTicket.addr_street_note && !normalizedTicket.street_note) {
+      normalizedTicket.street_note = await offlineDB.getStreetNoteByObjectId(
+        normalizedTicket.object_id,
+      );
+      if (isStale() || this.currentTicketId !== ticketId) return;
+    }
 
     this._sourceArray =
       combinedTicketsArray.length > 0 ? combinedTicketsArray : null;
@@ -224,9 +231,14 @@ export class DetailsController {
       }
 
       if (this.state.mode !== "view") return;
-
       const fresh = result.data;
       normalizeTicketFields(fresh);
+      if (!fresh.addr_street_note && !fresh.street_note) {
+        fresh.street_note = await offlineDB.getStreetNoteByObjectId(
+          fresh.object_id,
+        );
+        if (isStale() || this.state.mode !== "view") return;
+      }
       const cmds = await outboxQueue.getPendingByTicket(ticketId);
       if (isStale() || this.state.mode !== "view") return;
 

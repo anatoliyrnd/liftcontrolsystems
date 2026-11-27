@@ -338,10 +338,21 @@ class OfflineDB {
     }
     await tx.done;
 
-    matches.sort(compareAddress);
+     matches.sort(compareAddress);
     return matches.slice(0, limit);
   }
 
+  /**
+   * Примечание улицы из кэша адресов по id объекта.
+   * Карточка заявки: серверный ответ ticket не несёт street_note,
+   * а справочник — источник правды по метаданным улицы.
+   */
+  async getStreetNoteByObjectId(objectId) {
+    if (objectId == null || objectId === "") return "";
+    const db = await this.dbPromise;
+    const rec = await db.get("address_flat", Number(objectId));
+    return String(rec?.street_note ?? "").trim();
+  }
   // =========================================================================
   // Outbox
   // =========================================================================

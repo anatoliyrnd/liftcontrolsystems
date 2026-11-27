@@ -75,10 +75,9 @@ export function flattenAddresses(serverResponse) {
       .join(" ")
       .toLowerCase();
 
-    // Поиск — по сырым именам, как раньше: normalizeSearchString сам
-    // снимает маркеры своим словарём стоп-слов. Менять источник здесь
-    // значит смешать две нормализации.
-    const rawSearch = `${cName} ${sName} ${hName} ${oName} ${sNote}`.trim();
+    // Поиск — по сырым именам + примечание улицы. filter(Boolean).join,
+    // как у sortKey/displayName: пустой компонент не даёт висящего пробела.
+    const rawSearch = [cName, sName, hName, oName, sNote].filter(Boolean).join(" ");
     const searchString = normalizeSearchString(rawSearch);
 
     flatData.push({
@@ -87,6 +86,7 @@ export function flattenAddresses(serverResponse) {
       city_name: cName,
       city_display: cDisplay,
       street_id: s.id,
+      street_name: sName,
       street_note: sNote,
       home_id: h.id,
       home_name: hName,

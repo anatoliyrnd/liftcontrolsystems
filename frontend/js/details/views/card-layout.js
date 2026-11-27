@@ -35,11 +35,12 @@ export function renderCardLayout({
   closeDate,
   closeName,
   isAdmin,
-}) {
+}) { 
+  const streetNote = String(t.addr_street_note ?? t.street_note ?? "");
   const repairText = isOffline
     ? "будет назначен при синхронизации"
     : formatTs(t.repair_time);
-
+ 
   return `
 <div class="ticket-card-layout-grid">
   <div class="ticket-info-panel" style="background: var(--bg-secondary); border: 2px solid var(--border-color); border-radius: 12px; padding: 1.25rem 1rem 0.75rem; display: flex; flex-direction: column; gap: 0.75rem; overflow: visible; height: 100%; min-height: 0; position: relative;">
@@ -51,6 +52,7 @@ export function renderCardLayout({
     <div class="info-group" style="flex-shrink: 0;">
       <label style="${LABEL}">📍 Адрес объекта</label>
       <div style="font-size: 15px; font-weight: 600; margin-top: 2px; white-space: normal;">${escapeHtml(t.fullAddress || t.address || "—")}</div>
+      ${streetNote ? `<div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">📎 ${escapeHtml(streetNote)}</div>` : ""}
     </div>
 
     ${
