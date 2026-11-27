@@ -829,3 +829,22 @@ COMMIT;
 -- Контроль: остаточные дубли ключа (должно быть пусто)
 SELECT city_id, street_key, COUNT(*) c, GROUP_CONCAT(id) ids
 FROM lift_street GROUP BY city_id, street_key HAVING c > 1;
+
+ALTER TABLE lift_calls
+  ADD KEY idx_calls_staff2_active (call_staff2, call_status),
+  ADD KEY idx_calls_staff3_active (call_staff3, call_status),
+  ADD KEY idx_calls_home   (address_home),
+  ADD KEY idx_calls_street (address_street);
+
+  ALTER TABLE lift_notes
+    MODIFY note_post_ip VARCHAR(45) NOT NULL DEFAULT '';
+
+  -- опционально: legacy-колонка, новым API не пишется
+  ALTER TABLE lift_users
+    MODIFY last_ip VARCHAR(45) NOT NULL DEFAULT '';
+
+    ALTER TABLE lift_notes
+      MODIFY note_body TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;
+
+    ALTER TABLE lift_history
+      MODIFY history_info TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;
